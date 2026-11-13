@@ -87,24 +87,39 @@ Then `herdr server reload-config`.
 
 ### Board views
 
-`Tab` / `0`–`4` switch between (Esc walks back up: details → Tasks → Overview → quit):
+The board has one **scope**, shown as a breadcrumb in its header:
+`all projects › project › plan`. ⏎ on a plan narrows to it, Esc widens again
+(plan → project → all projects → quit), `A` jumps to all projects. `prefix+t` starts at
+the plan scope of the focused pane's project, `prefix+alt+t` at all projects.
 
-- **Overview**: see above.
-- **Tasks**: the plan's task tree with connectors. `▣ name` marks a work package (a parent
-  task owned by one agent); `↳name` is ownership inherited from the package. Below the tree:
-  needs-attention list and a preview of the selected task (with its breadcrumb).
-- **Agents**: per agent, its packages and tasks grouped by package, each with its path in
-  the plan, plus live herdr state and progress. Unassigned tasks are listed at the end.
-- **Plan**: goal, description, outcome, progress per top-level branch with owners,
-  open questions, decisions, warnings, blockers, and all artifacts.
-- **Log**: the event stream.
+Every tab shows its content for the scope (`Tab` / `0`–`4`):
+
+- **Overview**: every plan in scope, unfolded by default to its *live slice*: tasks in
+  progress (owner, live agent state, %), in review, blocked or failed, each with its
+  parent path, plus a summary line of the rest (`✓ 5 done · ○ 3 todo (2 ready)`).
+  ←/→/space fold a plan (▸ folded, ▾ live, ▿ full tree), `z` folds/unfolds all. Below:
+  the inbox (reviews, questions, failures, stalled agents, finished plans), oldest first.
+  `c` closes the selected plan (press twice), `f` shows/hides closed plans in all tabs.
+- **Tasks**: at plan scope the task tree (with a needs-attention list and a preview of the
+  selected task); at wider scopes one collapsible node per plan containing its tree
+  (plans with open work start expanded). `▣ name` marks a work package, `↳name` an owner
+  inherited from the package.
+- **Agents**: per agent its packages and tasks with their path in the plan, live herdr
+  state and progress; at wider scopes grouped by project and plan, headed by how many
+  agents are live and working.
+- **Plan**: one plan: goal, description, outcome, per-branch progress with owners,
+  questions, decisions, warnings, blockers, artifacts. At wider scopes it shows the plan
+  selected in Overview or Tasks.
+- **Log**: events of all plans in scope, newest first, tagged with their plan.
+
+Rows always know their project and plan, so `g`, `s`, `a` and ⏎ work at any scope.
 
 ### Board keys
 
 | key | action |
 |-----|--------|
 | `Tab` / `0`–`4` | switch view (`0` Overview) |
-| `a` (Overview) | this project ↔ all known projects |
+| `⏎` / `Esc` / `A` | narrow scope to the selected plan / widen / all projects |
 | `↑↓` / `jk`, PgUp/PgDn | select / scroll |
 | `←→` / `hl`, `space` | collapse / expand subtrees (`←` on a leaf jumps to its parent) |
 | `⏎` | full task details (scrollable) |
@@ -113,7 +128,7 @@ Then `herdr server reload-config`.
 | `a` | approve a task in `review` (→ `done`) |
 | `p` / `P` | next / previous plan |
 | `?` | help |
-| `q` / `esc` | close view / quit |
+| `q` | close view / quit |
 
 ### Plugin config (optional)
 

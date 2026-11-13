@@ -75,32 +75,43 @@ const TABS = [
   ['log', 'Log'],
 ];
 
+/**
+ * The board. One *scope* applies to every tab:
+ *   all projects  ›  project  ›  plan
+ * Enter narrows it (on a plan or a project's plan), Esc widens it again, A jumps to all
+ * projects. Every tab shows its content for the scope: at plan scope one plan; at the
+ * wider scopes all active plans in it, grouped by project and plan. Every row knows its
+ * project and plan, so actions (g, s, a, ⏎) work at any scope.
+ */
 function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd, start, initDir }) {
-  let root = initialRoot; // the project whose plan is open; may change from the overview
   const out = process.stdout;
   const ui = {
-    plans: [],
-    planIdx: 0,
-    state: null,
-    rows: [], // visible task ids in tree order (collapsed subtrees hidden)
-    prefix: {}, // id -> tree connector prefix
-    collapsed: new Set(),
-    sel: 0,
-    scroll: 0,
-    tab: start === 'overview-all' || !initialRoot ? 'overview' : 'tasks', // overview | tasks | agents | plan | log
-    scope: start === 'overview-all' ? 'all' : 'project', // overview: this project or all known projects
-    ov: { entries: [], sel: 0, scroll: 0 },
-    cache: new Map(), // root#plan -> {mtime, state}
-    overlay: null, // detail | help | null
-    scrolls: {}, // per-view scroll offsets
+    scope: null, // {level: 'all'|'project'|'plan', root?, plan?}
+    tab: 'overview',
+    overlay: null, // detail | help
+    sel: { overview: 0, tasks: 0, plan: 0 },
+    scrolls: {},
+    open: new Map(), // plan key -> expanded? (multi-plan Tasks view)
+    collapsed: new Set(), // task keys collapsed in the tree
+    focus: null, // {root, plan}: plan for the Plan tab when the scope holds several
+    cache: new Map(), // plan key -> {mtime, state}
     agents: new Map(),
-    agentsSince: new Map(), // pane -> {status, since}
+    agentsSince: new Map(),
     flash: null,
-    lastSeqSeen: new Map(), // plan -> seq (for notifications)
+    lastSeq: new Map(), // plan key -> last seq seen (board notifications)
+    rows: { overview: [], tasks: [], plan: [] }, // selectable rows of the current draw
+    fold: new Map(), // overview: plan key -> 'folded' | 'live' | 'full' (default live; closed plans folded)
+    showClosed: false, // wider scopes: also list completed / cancelled plans
+    confirm: null, // {action, key, until}: second press confirms
   };
-  const hasHook = (r) => !!r && (readConfig(r).hooks?.post_write || []).some((h) => h.join(' ').includes('atf-herdr'));
-  let hookNotifies = hasHook(root);
+  const keyOf = (root, plan) => `${root}#${plan}`;
+  const hookCache = new Map();
+  const hasHook = (r) => {
+    if (!hookCache.has(r)) hookCache.set(r, (readConfig(r).hooks?.post_write || []).some((h) => h.join(' ').includes('atf-herdr')));
+    return hookCache.get(r);
+  };
   const view = () => ui.overlay || ui.tab;
+  const multi = () => ui.scope.level !== 'plan';
 
   function flash(msg, style = 'yellow') {
     ui.flash = { msg, style, until: Date.now() + 4000 };
@@ -108,63 +119,84 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   // ---------- data ----------
-  function loadPlans() {
-    if (!root) {
-      ui.plans = [];
-      return setPlan();
+  function cachedPlan(r, id) {
+    const key = keyOf(r, id);
+    let mtime = 0;
+    try {
+      mtime = fs.statSync(eventsPath(r, id)).mtimeMs;
+    } catch {}
+    const hit = ui.cache.get(key);
+    if (hit && hit.mtime === mtime) return hit.state;
+    const state = loadPlan(r, id);
+    ui.cache.set(key, { mtime, state });
+    return state;
+  }
+
+  const isOpenStatus = (st) => st.status === 'active' || st.status === 'paused';
+
+  function rootsInScope() {
+    const s = ui.scope;
+    if (s.level !== 'all') return [s.root];
+    const roots = knownRoots();
+    for (const r of [initialRoot]) if (r && !roots.includes(r)) roots.unshift(r);
+    return roots;
+  }
+
+  /** Plans in scope: [{root, id, st, key}], active first, then most recently updated. */
+  function scopePlans() {
+    const s = ui.scope;
+    if (s.level === 'plan') {
+      try {
+        return [{ root: s.root, id: s.plan, st: cachedPlan(s.root, s.plan), key: keyOf(s.root, s.plan) }];
+      } catch {
+        return [];
+      }
     }
-    const states = listPlanIds(root).map((id) => loadPlan(root, id));
-    const rank = (s) => (s.status === 'active' ? 0 : s.status === 'paused' ? 1 : 2);
-    states.sort((a, b) => rank(a) - rank(b) || (b.updated_at || '').localeCompare(a.updated_at || ''));
-    let prevId = ui.state?.id ?? process.env.ATF_PLAN ?? getCurrentPlan(root);
-    // follow a newly started plan if the one on screen is already finished
-    const prev = states.find((s) => s.id === prevId);
-    if (prev && prev.status !== 'active' && states[0]?.status === 'active' && !ui.plans.some((p) => p.id === states[0].id)) prevId = states[0].id;
-    ui.plans = states;
-    const idx = states.findIndex((s) => s.id === prevId);
-    ui.planIdx = idx >= 0 ? idx : 0;
-    setPlan();
+    const res = [];
+    for (const r of rootsInScope())
+      for (const id of listPlanIds(r)) {
+        const st = cachedPlan(r, id);
+        if (isOpenStatus(st) || ui.showClosed) res.push({ root: r, id, st, key: keyOf(r, id) });
+      }
+    const rank = (p) => (p.st.status === 'active' ? 0 : p.st.status === 'paused' ? 1 : 2);
+    return res.sort((a, b) => rank(a) - rank(b) || (b.st.updated_at || '').localeCompare(a.st.updated_at || ''));
   }
 
-  function setPlan() {
-    const prevSel = ui.rows[ui.sel];
-    ui.state = ui.plans[ui.planIdx] || null;
-    ui.rows = [];
-    ui.prefix = {};
-    const s = ui.state;
-    if (s) {
-      const visit = (id, prefix, isLast, depth) => {
-        ui.rows.push(id);
-        ui.prefix[id] = depth ? prefix + (isLast ? '└─' : '├─') : '';
-        if (ui.collapsed.has(id)) return;
-        const kids = s.tasks[id].children;
-        kids.forEach((c, i) => visit(c, depth ? prefix + (isLast ? '  ' : '│ ') : '', i === kids.length - 1, depth + 1));
-      };
-      const roots = s.order.filter((id) => !s.tasks[id].parent || !s.tasks[s.tasks[id].parent]);
-      roots.forEach((id, i) => visit(id, '', i === roots.length - 1, 0));
-    }
-    const keep = ui.rows.indexOf(prevSel);
-    ui.sel = keep >= 0 ? keep : Math.min(ui.sel, Math.max(0, ui.rows.length - 1));
+  /** Best plan to open in a project: $ATF_PLAN / current, else the most recent active one. */
+  function pickPlan(r) {
+    const ids = listPlanIds(r);
+    if (!ids.length) return null;
+    const pref = [process.env.ATF_PLAN, getCurrentPlan(r)].find((id) => id && ids.includes(id) && isOpenStatus(cachedPlan(r, id)));
+    if (pref) return pref;
+    const states = ids.map((id) => cachedPlan(r, id));
+    const open = states.filter(isOpenStatus).sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+    return (open[0] || states.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))[0])?.id ?? null;
   }
 
-  function reloadCurrent() {
-    if (!ui.state) return loadPlans();
-    const fresh = loadPlan(root, ui.state.id);
-    if (!hookNotifies && inHerdr()) maybeNotify(fresh);
-    ui.plans[ui.planIdx] = fresh;
-    setPlan();
-  }
-
-  function maybeNotify(s) {
-    const seen = ui.lastSeqSeen.get(s.id);
-    ui.lastSeqSeen.set(s.id, s.last_seq);
-    if (seen === undefined || s.last_seq <= seen) return;
-    for (const e of readEvents(root, s.id).filter((e) => e.seq > seen)) {
-      if (e.type === 'task.status' && ['blocked', 'review', 'failed'].includes(e.data?.status))
-        notify(`ATF ${e.task} ${e.data.status}: ${s.tasks[e.task]?.title ?? ''}`, `${e.actor?.id ?? '?'}: ${e.data.message ?? ''}`);
+  function setScope(scope, { tab, task } = {}) {
+    ui.scope = scope;
+    if (scope.level === 'plan') ui.focus = { root: scope.root, plan: scope.plan };
+    if (tab) ui.tab = tab;
+    ui.overlay = null;
+    ui.scrolls = {};
+    ui.sel = { overview: 0, tasks: 0, plan: 0 };
+    if (task) {
+      const st = cachedPlan(scope.root, scope.plan);
+      for (const pid of st.tasks[task]?.path || []) ui.collapsed.delete(`${keyOf(scope.root, scope.plan)}#${pid}`);
+      buildTaskRows();
+      ui.sel.tasks = Math.max(0, ui.rows.tasks.findIndex((r) => r.task === task));
     }
   }
 
+  /** Esc: plan -> project -> all projects -> (quit) */
+  function widen() {
+    const s = ui.scope;
+    if (s.level === 'plan') return setScope({ level: 'project', root: s.root });
+    if (s.level === 'project') return setScope({ level: 'all' });
+    return quit();
+  }
+
+  // ---------- herdr liveness ----------
   async function refreshAgents() {
     if (!inHerdr()) return;
     ui.agents = await agentIndex();
@@ -177,211 +209,36 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     draw();
   }
 
-  /** Live herdr agent for an ATF actor id (by agent name, else by the pane it last wrote from). */
-  function liveAgent(actorId) {
-    if (!actorId || !ui.state) return null;
-    const actor = ui.state.actors[actorId];
+  /** Live herdr agent of an actor in plan `st` (only for actors of this herdr server). */
+  function liveAgent(st, actorId) {
+    if (!actorId) return null;
+    const actor = st.actors[actorId];
+    if (actor && !sameServer(actor)) return null;
     const a = ui.agents.get(`name:${actorId}`) || (actor?.ctx?.herdr_pane && ui.agents.get(`pane:${actor.ctx.herdr_pane}`));
     if (!a) return null;
     return { ...a, since: ui.agentsSince.get(`pane:${a.pane_id}`)?.since ?? Date.now() };
   }
-
-  function agentFor(t) {
-    const a = liveAgent(t?.owner);
+  function agentFor(st, t) {
+    const a = liveAgent(st, t?.owner);
     if (!a) return null;
     const stale = t.status === 'in_progress' && ['idle', 'done'].includes(a.agent_status) && Date.now() - a.since > STALE_MS;
     return { ...a, stale };
   }
+  const elsewhere = (st, who) => !!st.actors[who] && !sameServer(st.actors[who]);
 
   const effStatus = (t) => t.rollup_status ?? t.status;
-  const packageOf = (t) => (t.assignee ? null : [...t.path].reverse().find((id) => ui.state.tasks[id].assignee) ?? null);
 
-  // ---------- projects / overview ----------
-  /** Open plan `planId` of project `r` (optionally selecting a task). */
-  function switchRoot(r, planId, taskId) {
-    if (r !== root) {
-      for (const p of watched) fs.unwatchFile(p);
-      watched.clear();
-      root = r;
-      hookNotifies = hasHook(root);
-      ui.collapsed.clear();
-      ui.state = null;
-      ui.plans = [];
+  // ---------- inbox ----------
+  /** driverInbox plus stalled agents (needs live herdr state). */
+  function inboxOf(p) {
+    const items = driverInbox(p.st).map((it) => ({ ...it, root: p.root, plan: p.id, st: p.st }));
+    for (const tid of p.st.order) {
+      const t = p.st.tasks[tid];
+      if (t.status !== 'in_progress' || t.children.length || !t.owner) continue;
+      const a = agentFor(p.st, t);
+      if (a?.stale) items.push({ kind: 'stale', task: tid, ts: new Date(a.since).toISOString(), actor: t.owner, message: `${t.owner} idle, task still in progress`, root: p.root, plan: p.id, st: p.st });
     }
-    loadPlans();
-    const idx = ui.plans.findIndex((p) => p.id === planId);
-    if (idx >= 0) ui.planIdx = idx;
-    setPlan();
-    if (taskId) {
-      for (const pid of ui.state?.tasks[taskId]?.path || []) ui.collapsed.delete(pid);
-      setPlan();
-      ui.sel = Math.max(0, ui.rows.indexOf(taskId));
-    }
-    ui.scrolls = {};
-    watchAll();
-  }
-
-  function cachedPlan(r, id) {
-    const key = `${r}#${id}`;
-    let mtime = 0;
-    try {
-      mtime = fs.statSync(eventsPath(r, id)).mtimeMs;
-    } catch {}
-    const hit = ui.cache.get(key);
-    if (hit && hit.mtime === mtime) return hit.state;
-    const state = loadPlan(r, id);
-    ui.cache.set(key, { mtime, state });
-    return state;
-  }
-
-  function scopeRoots() {
-    if (ui.scope === 'all') {
-      const roots = knownRoots();
-      if (root && !roots.includes(root)) roots.unshift(root);
-      return roots;
-    }
-    return root ? [root] : [];
-  }
-
-  /** Plans in scope plus the inbox (what needs the human), as one selectable list. */
-  function buildOverview() {
-    const plans = [];
-    const items = [];
-    for (const r of scopeRoots()) {
-      for (const id of listPlanIds(r)) {
-        const st = cachedPlan(r, id);
-        if (!['active', 'paused'].includes(st.status)) continue;
-        const sum = planSummary(st);
-        let working = 0;
-        let idle = 0;
-        let elsewhere = 0;
-        for (const who of sum.agents) {
-          const actor = st.actors[who];
-          if (actor && !sameServer(actor)) elsewhere++;
-          else {
-            const a = ui.agents.get(`name:${who}`);
-            if (a?.agent_status === 'working') working++;
-            else if (a) idle++;
-          }
-        }
-        plans.push({ type: 'plan', root: r, plan: id, st, sum, working, idle, elsewhere });
-        for (const it of driverInbox(st)) items.push({ type: 'item', root: r, plan: id, st, ...it });
-        // stalled agents: task in progress, its (local) agent idle for a while
-        for (const tid of st.order) {
-          const t = st.tasks[tid];
-          if (t.status !== 'in_progress' || t.children.length || !t.owner) continue;
-          const actor = st.actors[t.owner];
-          if (actor && !sameServer(actor)) continue;
-          const a = ui.agents.get(`name:${t.owner}`);
-          const since = a && ui.agentsSince.get(`pane:${a.pane_id}`)?.since;
-          if (a && ['idle', 'done'].includes(a.agent_status) && since && Date.now() - since > STALE_MS)
-            items.push({ type: 'item', root: r, plan: id, st, kind: 'stale', task: tid, ts: new Date(since).toISOString(), actor: t.owner, message: `${t.owner} idle, task still in progress` });
-        }
-      }
-    }
-    plans.sort((a, b) => b.sum.inbox - a.sum.inbox || (b.st.updated_at || '').localeCompare(a.st.updated_at || ''));
-    items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
-    ui.ov.entries = [...plans, ...items];
-    ui.ov.sel = Math.min(ui.ov.sel, Math.max(0, ui.ov.entries.length - 1));
-    return { plans, items };
-  }
-
-  const KIND_STYLE = { review: ['◎ review', 'magenta'], question: ['⊘ question', 'red'], failed: ['✗ failed', 'red'], stale: ['stale?', 'red bold'], finished: ['● finished', 'green'] };
-
-  function overviewLines(W) {
-    const { plans, items } = buildOverview();
-    const L = [];
-    const sel = ui.ov.entries[ui.ov.sel];
-    let selLine = 0;
-    const many = new Set(plans.map((p) => p.root)).size > 1 || ui.scope === 'all';
-    if (!root && initDir)
-      L.push([[' No ATF project in ', 'yellow'], [initDir, 'cyan'], ['  — press ', 'yellow'], ['i', 'bold green'], [' to create one there', 'yellow']], []);
-    L.push([[` ${plans.length} active plan${plans.length === 1 ? '' : 's'}`, 'bold'], [ui.scope === 'all' ? `  across ${scopeRoots().length} project${scopeRoots().length === 1 ? '' : 's'}` : `  in ${root ? projectName(root) : '-'}`, 'dim']]);
-    if (!plans.length) L.push([['   none. Start one with `atf plan new <title>` (or press a for all projects).', 'dim']]);
-    const projW = many ? Math.min(18, Math.max(...plans.map((p) => projectName(p.root).length), 7)) + 2 : 0;
-    const titleW = Math.max(12, Math.min(40, W - projW - 58));
-    for (const p of plans) {
-      const isSel = p === sel;
-      if (isSel) selLine = L.length;
-      const pct = Math.round(p.sum.progress * 100);
-      const title = [...p.sum.title].length > titleW ? [...p.sum.title].slice(0, titleW - 1).join('') + '…' : p.sum.title.padEnd(titleW);
-      const base = isSel ? 'inverse ' : '';
-      L.push([
-        [isSel ? ' › ' : '   ', isSel ? 'cyan bold' : ''],
-        [many ? projectName(p.root).slice(0, projW - 2).padEnd(projW) : '', (base + 'dim').trim()],
-        [title + ' ', (base + 'bold').trim()],
-        ...bar(p.sum.progress, 10),
-        [` ${String(pct).padStart(3)}% `, 'dim'],
-        [`${p.sum.counts.done}/${p.sum.total} `, 'dim'],
-        [p.working ? `⚙${p.working} ` : '', 'blue'],
-        [p.idle ? `◌${p.idle} ` : '', 'yellow'],
-        [p.elsewhere ? `↗${p.elsewhere} ` : '', 'gray'],
-        [p.sum.ready_unowned ? `${p.sum.ready_unowned} ready ` : '', 'green'],
-        [p.sum.inbox ? `⚑${p.sum.inbox} ` : '', 'red bold'],
-        [p.st.status === 'paused' ? 'paused ' : '', 'yellow'],
-        [ago(p.st.updated_at), 'dim'],
-      ]);
-    }
-    L.push([], [[' inbox', 'bold'], [items.length ? `  ${items.length} item${items.length === 1 ? ' needs' : 's need'} you, oldest first` : '  nothing needs you', 'dim']]);
-    for (const it of items) {
-      const isSel = it === sel;
-      if (isSel) selLine = L.length;
-      const [label, color] = KIND_STYLE[it.kind] || [it.kind, ''];
-      const t = it.task ? it.st.tasks[it.task] : null;
-      const where = `${many ? projectName(it.root) + ' / ' : ''}${it.st.title}`;
-      L.push([
-        [isSel ? ' › ' : '   ', isSel ? 'cyan bold' : ''],
-        [label.padEnd(11), isSel ? `inverse ${color}`.trim() : color],
-        [` ${where}  `, 'dim'],
-        [t ? `${t.id} ${t.title} ` : '', 'bold'],
-        [it.actor ? `@${it.actor} ` : '', 'cyan'],
-        [it.message ? `— ${it.message} ` : '', 'dim'],
-        [ago(it.ts), 'dim'],
-      ]);
-    }
-    return { lines: L, selLine };
-  }
-
-  /**
-   * `g` in the overview: jump to where the selected entry is being worked on.
-   *  inbox item -> its agent's pane
-   *  plan row   -> the plan's coordinator, else one of its live agents (working first),
-   *                else any pane whose directory is inside the project (its workspace/tab)
-   */
-  async function goToEntry() {
-    const e = ui.ov.entries[ui.ov.sel];
-    if (!e) return;
-    const done = () => (popup ? quit() : draw());
-    const local = (who) => who && sameServer(e.st.actors[who] || {});
-    if (e.type === 'item' && e.actor) {
-      if (!local(e.actor)) return flash(`${e.actor} runs in another herdr session`, 'red');
-      if (await herdrAsync(['agent', 'focus', e.actor])) return done();
-      return flash(`no live herdr agent for ${e.actor}; press ⏎ to open the task instead`, 'red');
-    }
-    const actors = Object.values(e.st.actors).filter((a) => local(a.id));
-    const live = (a) => ui.agents.get(`name:${a.id}`);
-    const candidates = [
-      ...actors.filter((a) => a.role === 'coordinator' && live(a)),
-      ...actors.filter((a) => a.role !== 'coordinator' && live(a)?.agent_status === 'working'),
-      ...actors.filter((a) => a.role !== 'coordinator' && live(a)),
-    ];
-    for (const a of candidates) if (await herdrAsync(['agent', 'focus', a.id])) return done();
-    // nobody running: any pane in the project's directory
-    const projDir = path.dirname(e.root);
-    const panes = (await herdrAsync(['pane', 'list']))?.panes || [];
-    const inside = (d) => d && (d === projDir || d.startsWith(projDir + path.sep));
-    const pane = panes.find((p) => !p.label && (inside(p.foreground_cwd) || inside(p.cwd)));
-    if (pane && (await herdrAsync(['workspace', 'focus', pane.workspace_id])) && (await herdrAsync(['tab', 'focus', pane.tab_id]))) return done();
-    flash(`no herdr pane is open in ${projectName(e.root)}`, 'yellow');
-  }
-
-  function openEntry() {
-    const e = ui.ov.entries[ui.ov.sel];
-    if (!e) return;
-    switchRoot(e.root, e.plan, e.type === 'item' ? e.task : null);
-    ui.tab = 'tasks';
-    ui.overlay = e.type === 'item' && e.task ? 'detail' : null;
-    ui.scrolls.detail = 0;
+    return items;
   }
 
   // ---------- rendering helpers ----------
@@ -392,6 +249,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       ['░'.repeat(w - fill), 'gray'],
     ];
   }
+  const clip = (s, w) => ([...s].length > w ? [...s].slice(0, Math.max(1, w - 1)).join('') + '…' : s.padEnd(w));
 
   function tabBar() {
     const tabs = [[' ', '']];
@@ -399,80 +257,134 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     return tabs;
   }
 
-  function header(W) {
-    const s = ui.state;
-    if (ui.tab === 'overview' && !ui.overlay)
-      return [
-        [[' ATF ', 'inverse bold'], [' overview', 'bold'], [ui.scope === 'all' ? '  · all projects' : `  · ${root ? projectName(root) : 'no project'}`, 'dim'], ['   a: ' + (ui.scope === 'all' ? 'this project' : 'all projects'), 'dim']],
-        [[' ', '']],
-        tabBar(),
-      ];
-    if (!s) return [[[' ATF ', 'inverse bold'], [root ? ' no plans in ' + root : ' no project selected: press 0 for the overview', 'dim']], [], tabBar()];
-    const pct = Math.round(s.progress * 100);
-    const planNav = ui.plans.length > 1 ? `  plan ${ui.planIdx + 1}/${ui.plans.length} [p]` : '';
-    const tabs = tabBar();
+  function header(W, plans) {
+    const s = ui.scope;
+    const crumbs = [['all projects', s.level === 'all' ? 'bold' : 'dim']];
+    if (s.level !== 'all') crumbs.push([' › ', 'dim'], [projectName(s.root), s.level === 'project' ? 'bold' : 'dim']);
+    if (s.level === 'plan') {
+      const st = plans[0]?.st;
+      crumbs.push([' › ', 'dim'], [st?.title ?? s.plan, 'bold']);
+      if (st && st.status !== 'active') crumbs.push([`  (${st.status})`, 'yellow']);
+    }
+    const leaves = plans.reduce((n, p) => n + planSummary(p.st).total - (p.st.counts.cancelled || 0), 0);
+    const done = plans.reduce((n, p) => n + (p.st.counts.done || 0), 0);
+    const frac = leaves ? done / leaves : 0;
+    const inbox = plans.reduce((n, p) => n + inboxOf(p).length, 0);
+    const line2 =
+      s.level === 'plan' && plans[0]
+        ? [[' ', ''], ...bar(plans[0].st.progress, Math.max(8, Math.min(30, W - 40))), [` ${Math.round(plans[0].st.progress * 100)}%  `, 'bold'], [progressText(plans[0].st), 'dim'], [inbox ? `   ⚑ ${inbox} need${inbox === 1 ? 's' : ''} you` : '', 'red bold']]
+        : (() => {
+            const open = plans.filter((p) => isOpenStatus(p.st)).length;
+            const closed = plans.length - open;
+            return [[' ', ''], ...bar(frac, Math.max(8, Math.min(30, W - 50))), [` ${Math.round(frac * 100)}%  `, 'bold'], [`${open} active plan${open === 1 ? '' : 's'}${closed ? ` + ${closed} closed` : ''} · ${done}/${leaves} tasks done`, 'dim'], [inbox ? `   ⚑ ${inbox} need${inbox === 1 ? 's' : ''} you` : '', 'red bold']];
+          })();
+    const nav = s.level === 'plan' ? '   esc: project' : s.level === 'project' ? '   esc: all projects' : '';
+    // no "ATF" badge: herdr already titles both the pane and the popup "ATF board"
+    return [[[' ', ''], ...crumbs, [nav, 'dim']], line2, tabBar()];
+  }
+
+  /** A selected-row aware line: highlight marker + base style. */
+  const mark = (selected) => [selected ? ' › ' : '   ', selected ? 'cyan bold' : ''];
+
+  function planHeaderRow(p, W, selected, { open }) {
+    const sum = planSummary(p.st);
+    const inbox = inboxOf(p).length;
+    const pct = Math.round(sum.progress * 100);
+    const label = `${ui.scope.level === 'all' ? projectName(p.root) + ' / ' : ''}${p.st.title}`;
     return [
-      [[' ATF ', 'inverse bold'], [' ' + s.title, 'bold'], [s.status !== 'active' ? `  (${s.status})` : '', 'yellow'], [planNav, 'dim']],
-      [[' ', ''], ...bar(s.progress, Math.max(8, Math.min(30, W - 40))), [` ${pct}%  `, 'bold'], [progressText(s), 'dim']],
-      tabs,
+      mark(selected),
+      [open ? '▾ ' : '▸ ', 'bold'],
+      [clip(label, Math.max(12, Math.min(48, W - 50))) + ' ', (selected ? 'inverse bold' : 'bold')],
+      ...bar(sum.progress, 8),
+      [` ${String(pct).padStart(3)}% ${p.st.counts.done}/${sum.total} `, 'dim'],
+      [inbox ? `⚑${inbox} ` : '', 'red bold'],
+      [p.st.status === 'paused' ? 'paused ' : '', 'yellow'],
+      [ago(p.st.updated_at), 'dim'],
     ];
   }
 
-  function taskRow(id, W, selected) {
-    const s = ui.state;
-    const t = s.tasks[id];
-    const st = effStatus(t);
-    const [g, color] = STATUS[st];
-    const a = agentFor(t);
+  function taskRowLine(row, W, selected) {
+    const { st, task: id } = row;
+    const t = st.tasks[id];
+    const s = effStatus(t);
+    const [g, color] = STATUS[s];
+    const a = agentFor(st, t);
     const right = [];
     if (t.children.length) {
-      const done = t.children.filter((c) => effStatus(s.tasks[c]) === 'done').length;
+      const done = t.children.filter((c) => effStatus(st.tasks[c]) === 'done').length;
       right.push([`${done}/${t.children.length}`, 'dim']);
-      if (t.assignee) right.push([`▣ ${t.assignee}`, 'cyan bold']); // work package owner
+      if (t.assignee) right.push([`▣ ${t.assignee}`, 'cyan bold']);
     } else {
       if (t.status === 'todo' && t.waiting_on.length) right.push([`⧗ ${t.waiting_on.join(',')}`, 'dim']);
+      if (t.status === 'blocked' && t.blocked_on.length) right.push([t.can_resume ? 'can resume' : `⧗ on ${t.blocked_on.join(',')}`, t.can_resume ? 'green' : 'dim']);
       if (t.ready && !t.owner) right.push(['ready', 'green']);
       if (t.status === 'in_progress' && t.percent != null) right.push([`${t.percent}%`, 'yellow']);
       if (t.assignee) right.push([t.assignee, 'cyan']);
-      else if (t.owner) right.push([`↳${t.owner}`, 'cyan dim']); // inherited from package
+      else if (t.owner) right.push([`↳${t.owner}`, 'cyan dim']);
       if (a) {
         const [ag, ac] = AGENT_GLYPH[a.agent_status] || AGENT_GLYPH.unknown;
         right.push([ag, ac]);
-      }
+      } else if (t.owner && elsewhere(st, t.owner)) right.push(['↗', 'gray']);
       if (a?.stale) right.push(['stale?', 'red bold']);
     }
     for (let i = right.length - 1; i > 0; i--) right.splice(i, 0, [' ', '']);
     const rightLen = right.reduce((n, [x]) => n + [...x].length, 0);
-    const fold = t.children.length ? (ui.collapsed.has(id) ? '▸' : '▾') : ' ';
-    const lead = `${selected ? '›' : ' '}${ui.prefix[id] || ''}`;
+    const fold = t.children.length ? (ui.collapsed.has(row.k) ? '▸' : '▾') : ' ';
+    const lead = `${selected ? ' › ' : '   '}${multi() ? '  ' : ''}${row.prefix}`;
     const left = `${fold}${t.id} `;
-    // -1: leave a margin column; some terminals (herdr included) draw ○ ⊘ ◐ etc. double-width
     const titleW = Math.max(4, W - 1 - [...lead].length - [...left].length - 2 - rightLen - 2);
-    const title = [...t.title].length > titleW ? [...t.title].slice(0, titleW - 1).join('') + '…' : t.title.padEnd(titleW);
     const base = selected ? 'inverse ' : '';
     return [
-      [lead, selected ? 'inverse cyan bold' : 'gray'],
+      [lead, selected ? 'cyan bold' : 'gray'],
       [left, base + 'bold'],
       [g + ' ', (base + color).trim()],
-      [title + '  ', (base + (t.children.length ? 'bold' : TERMINAL.has(t.status) && t.status !== 'failed' ? 'dim' : '')).trim()],
+      [clip(t.title, titleW) + '  ', (base + (t.children.length ? 'bold' : TERMINAL.has(t.status) && t.status !== 'failed' ? 'dim' : '')).trim()],
       ...right,
     ];
   }
 
-  function detailLines(id, W) {
-    const s = ui.state;
-    const t = s.tasks[id];
+  /** Selectable rows of the Tasks tab: plan headers (multi-plan scopes) and task rows. */
+  function buildTaskRows() {
+    const rows = [];
+    for (const p of scopePlans()) {
+      const open = !multi() || (ui.open.has(p.key) ? ui.open.get(p.key) : inboxOf(p).length > 0 || p.st.counts.in_progress > 0 || p.st.counts.blocked > 0 || p.st.counts.review > 0);
+      if (multi()) rows.push({ type: 'plan', root: p.root, plan: p.id, id: p.id, st: p.st, key: p.key, open, k: p.key });
+      if (!open) continue;
+      const visit = (id, prefix, isLast, depth) => {
+        const k = `${p.key}#${id}`;
+        rows.push({ type: 'task', root: p.root, plan: p.id, st: p.st, key: p.key, task: id, k, prefix: depth ? prefix + (isLast ? '└─' : '├─') : '' });
+        if (ui.collapsed.has(k)) return;
+        const kids = p.st.tasks[id].children;
+        kids.forEach((c, i) => visit(c, depth ? prefix + (isLast ? '  ' : '│ ') : '', i === kids.length - 1, depth + 1));
+      };
+      const roots = p.st.order.filter((id) => !p.st.tasks[id].parent || !p.st.tasks[p.st.tasks[id].parent]);
+      roots.forEach((id, i) => visit(id, '', i === roots.length - 1, 0));
+      if (!roots.length && multi()) rows.push({ type: 'note', text: '     no tasks yet', key: p.key, k: p.key + '#empty' });
+    }
+    // keep the selection on the same row when rows change
+    const prev = ui.rows.tasks[ui.sel.tasks]?.k;
+    ui.rows.tasks = rows;
+    const i = prev ? rows.findIndex((r) => r.k === prev) : -1;
+    ui.sel.tasks = i >= 0 ? i : Math.min(ui.sel.tasks, Math.max(0, rows.length - 1));
+    return rows;
+  }
+
+  function detailLines(st, id, W) {
+    const t = st.tasks[id];
     if (!t) return [];
     const L = [];
-    if (t.path.length) L.push([[t.path.map((p) => `${p} ${s.tasks[p].title}`).join(' › ') + ' ›', 'dim']]);
-    const st = effStatus(t);
-    L.push([[`${t.id} `, 'bold'], [`${STATUS[st][0]} ${st}`, STATUS[st][1]], ['  ' + t.title, 'bold']]);
+    if (multi()) L.push([[`${projectName(ui.rows.tasks[ui.sel.tasks]?.root ?? '')} / ${st.title}`, 'dim']]);
+    if (t.path.length) L.push([[t.path.map((p) => `${p} ${st.tasks[p].title}`).join(' › ') + ' ›', 'dim']]);
+    const s = effStatus(t);
+    L.push([[`${t.id} `, 'bold'], [`${STATUS[s][0]} ${s}`, STATUS[s][1]], ['  ' + t.title, 'bold']]);
     const meta = [];
     if (t.assignee) meta.push([(t.children.length ? '▣ package owner @' : '@') + t.assignee + '  ', 'cyan']);
-    else if (t.owner) meta.push([`↳ @${t.owner} via package ${packageOf(t)}  `, 'cyan']);
-    const a = agentFor(t);
+    else if (t.owner) meta.push([`↳ @${t.owner} (package)  `, 'cyan']);
+    const a = agentFor(st, t);
     if (a) meta.push([`herdr ${a.pane_id} ${a.agent_status}  `, a.stale ? 'red' : 'dim']);
-    if (t.deps.length) meta.push([`deps ${t.deps.map((d) => `${d}${effStatus(s.tasks[d] || {}) === 'done' ? '✓' : ''}`).join(' ')}  `, 'dim']);
+    else if (t.owner && elsewhere(st, t.owner)) meta.push(['in another herdr session  ', 'gray']);
+    if (t.deps.length) meta.push([`deps ${t.deps.map((d) => `${d}${effStatus(st.tasks[d] || {}) === 'done' ? '✓' : ''}`).join(' ')}  `, 'dim']);
+    if (t.blocked_on.length) meta.push([`blocked on ${t.blocked_on.join(',')}${t.can_resume ? ' (done: can resume)' : ''}  `, t.can_resume ? 'green' : 'dim']);
     if (t.labels.length) meta.push([`#${t.labels.join(' #')}  `, 'magenta']);
     meta.push([`updated ${ago(t.updated_at)} ago`, 'dim']);
     L.push(meta);
@@ -485,7 +397,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (t.children.length) {
       L.push([], [['subtasks', 'bold'], t.rollup_percent != null ? [`  ${t.rollup_percent}%`, 'dim'] : ['', '']]);
       for (const c of t.children) {
-        const ct = s.tasks[c];
+        const ct = st.tasks[c];
         const cs = effStatus(ct);
         L.push([[`  ${STATUS[cs][0]} `, STATUS[cs][1]], [`${c} `, 'bold'], [ct.title + ' ', ''], [ct.owner && ct.owner !== t.owner ? '@' + ct.owner : '', 'cyan'], [ct.children.length ? `  (${ct.children.length} subtasks)` : '', 'dim']]);
       }
@@ -493,6 +405,10 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (t.acceptance.length) {
       L.push([], [['acceptance', 'bold']]);
       for (const ac of t.acceptance) for (const [i, l] of wrap(ac, W - 6).entries()) L.push([[i ? '      ' : `  [${t.status === 'done' ? 'x' : ' '}] `, 'dim'], [l, '']]);
+    }
+    if (t.checkpoint && !TERMINAL.has(t.status)) {
+      L.push([], [['checkpoint', 'bold'], [`  ${t.checkpoint.actor ?? ''} ${ago(t.checkpoint.ts)} ago`, 'dim']]);
+      for (const l of wrap(t.checkpoint.message, W - 2)) L.push([[l, '']]);
     }
     if (t.result) {
       L.push([], [['result', 'bold']]);
@@ -519,89 +435,149 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     return L;
   }
 
-  /** Agents tab: what each agent owns, grouped by work package, with the path to each task. */
-  function agentLines(W) {
-    const s = ui.state;
+  /** Agents of one plan, grouped by work package. `ind` indents for multi-plan scopes. */
+  function planAgentLines(st, W, ind = '') {
     const L = [];
-    const actors = Object.values(s.actors).filter((a) => a.owned.length || a.packages.length || a.tasks.length);
-    const unowned = s.order.filter((id) => !s.tasks[id].owner && !s.tasks[id].children.length);
-    if (!actors.length) L.push([[' No assignments yet.', 'dim']]);
+    const actors = Object.values(st.actors).filter((a) => a.owned.length || a.packages.length || a.tasks.length);
+    const unowned = st.order.filter((id) => !st.tasks[id].owner && !st.tasks[id].children.length && !TERMINAL.has(st.tasks[id].status));
+    const pkgOf = (t, who) => [...t.path].reverse().find((id) => st.tasks[id].assignee === who) ?? null;
+    if (!actors.length && !unowned.length) L.push([[ind + ' No assignments yet.', 'dim']]);
     for (const a of actors) {
-      const owned = a.owned.map((id) => s.tasks[id]);
+      const owned = a.owned.map((id) => st.tasks[id]);
       const done = owned.filter((t) => t.status === 'done').length;
-      const live = liveAgent(a.id);
-      const [ag, ac] = live ? AGENT_GLYPH[live.agent_status] || AGENT_GLYPH.unknown : [' ', ''];
-      L.push([]);
-      L.push([[' ' + a.id + ' ', 'bold cyan'], [`${a.role ?? ''} `, 'dim'], [ag + ' ', ac], [live ? `${live.agent_status} in ${live.pane_id}  ` : a.inferred ? 'not started  ' : 'no live pane  ', 'dim'], ...bar(owned.length ? done / owned.length : 0, 12), [` ${done}/${owned.length}`, 'dim'], [a.last_seen ? `  seen ${ago(a.last_seen)}` : '', 'dim']]);
-      // group owned leaves by the package (assigned ancestor) they belong to
+      const live = liveAgent(st, a.id);
+      const away = elsewhere(st, a.id);
+      const [ag, ac] = live ? AGENT_GLYPH[live.agent_status] || AGENT_GLYPH.unknown : away ? ['↗', 'gray'] : [' ', ''];
+      const state = live ? `${live.agent_status} in ${live.pane_id}` : away ? 'another herdr session' : a.inferred ? 'not started' : 'no live pane';
+      L.push([[ind + ' ' + a.id + ' ', 'bold cyan'], [`${a.role ?? ''} `, 'dim'], [ag + ' ', ac], [state + '  ', 'dim'], ...bar(owned.length ? done / owned.length : 0, 10), [` ${done}/${owned.length}`, 'dim'], [a.last_seen ? `  seen ${ago(a.last_seen)}` : '', 'dim']]);
       const groups = new Map();
       for (const t of owned) {
-        const pkg = packageOfOwner(t, a.id) ?? '';
+        const pkg = pkgOf(t, a.id) ?? '';
         if (!groups.has(pkg)) groups.set(pkg, []);
         groups.get(pkg).push(t);
       }
       for (const [pkg, ts] of groups) {
         if (pkg) {
-          const p = s.tasks[pkg];
-          const crumb = p.path.length ? p.path.map((x) => `${x} ${s.tasks[x].title}`).join(' › ') + ' › ' : '';
-          L.push([['   ▣ ', 'cyan'], [crumb, 'dim'], [`${pkg} ${p.title}`, 'bold'], [`  ${STATUS[effStatus(p)][0]} ${p.rollup_percent ?? 0}%`, STATUS[effStatus(p)][1]]]);
-        } else L.push([['   individual tasks', 'dim']]);
+          const p = st.tasks[pkg];
+          const crumb = p.path.length ? p.path.map((x) => `${x} ${st.tasks[x].title}`).join(' › ') + ' › ' : '';
+          L.push([[ind + '   ▣ ', 'cyan'], [crumb, 'dim'], [`${pkg} ${p.title}`, 'bold'], [`  ${STATUS[effStatus(p)][0]} ${p.rollup_percent ?? 0}%`, STATUS[effStatus(p)][1]]]);
+        }
         for (const t of ts) {
-          const st = t.status;
           const rel = pkg ? t.path.slice(t.path.indexOf(pkg) + 1) : t.path;
-          const crumb = rel.length ? rel.map((x) => s.tasks[x].title).join(' › ') + ' › ' : '';
-          L.push([[`     ${STATUS[st][0]} `, STATUS[st][1]], [`${t.id} `, 'bold'], [crumb, 'dim'], [t.title, TERMINAL.has(st) && st !== 'failed' ? 'dim' : ''], [st === 'in_progress' && t.percent != null ? `  ${t.percent}%` : '', 'yellow'], [st === 'todo' && t.waiting_on.length ? `  ⧗ ${t.waiting_on.join(',')}` : '', 'dim']]);
+          const crumb = rel.length ? rel.map((x) => st.tasks[x].title).join(' › ') + ' › ' : '';
+          L.push([[ind + `     ${STATUS[t.status][0]} `, STATUS[t.status][1]], [`${t.id} `, 'bold'], [crumb, 'dim'], [t.title, TERMINAL.has(t.status) && t.status !== 'failed' ? 'dim' : ''], [t.status === 'in_progress' && t.percent != null ? `  ${t.percent}%` : '', 'yellow'], [t.status === 'todo' && t.waiting_on.length ? `  ⧗ ${t.waiting_on.join(',')}` : '', 'dim']]);
         }
       }
     }
     if (unowned.length) {
-      L.push([], [[' unassigned', 'bold'], [`  ${unowned.filter((id) => s.tasks[id].ready).length} ready`, 'green']]);
+      L.push([[ind + ' unassigned', 'bold'], [`  ${unowned.filter((id) => st.tasks[id].ready).length} ready`, 'green']]);
       for (const id of unowned) {
-        const t = s.tasks[id];
-        const crumb = t.path.length ? t.path.map((x) => s.tasks[x].title).join(' › ') + ' › ' : '';
-        L.push([[`     ${STATUS[t.status][0]} `, STATUS[t.status][1]], [`${t.id} `, 'bold'], [crumb, 'dim'], [t.title, ''], [t.ready ? '  ready' : '', 'green']]);
+        const t = st.tasks[id];
+        const crumb = t.path.length ? t.path.map((x) => st.tasks[x].title).join(' › ') + ' › ' : '';
+        L.push([[ind + `     ${STATUS[t.status][0]} `, STATUS[t.status][1]], [`${t.id} `, 'bold'], [crumb, 'dim'], [t.title, ''], [t.ready ? '  ready' : '', 'green']]);
       }
     }
     return L;
   }
 
-  /** Nearest ancestor-or-self parent task assigned to `who` (the package a task belongs to). */
-  function packageOfOwner(t, who) {
-    for (const id of [...t.path].reverse()) if (ui.state.tasks[id].assignee === who) return id;
-    return null;
+  function agentsTabLines(W, plans) {
+    if (!multi()) return plans[0] ? planAgentLines(plans[0].st, W) : [];
+    const L = [];
+    // who is working right now, across everything in scope
+    const live = [];
+    for (const p of plans)
+      for (const a of Object.values(p.st.actors)) {
+        const la = liveAgent(p.st, a.id);
+        if (la && (a.owned.length || a.packages.length)) live.push({ p, a, la });
+      }
+    const working = live.filter((x) => x.la.agent_status === 'working').length;
+    L.push([[` ${live.length} live agent${live.length === 1 ? '' : 's'}`, 'bold'], [`  ${working} working · ${live.length - working} idle`, 'dim']]);
+    for (const p of plans) {
+      L.push([], [[` ${ui.scope.level === 'all' ? projectName(p.root) + ' / ' : ''}${p.st.title}`, 'bold'], [`  ${Math.round(p.st.progress * 100)}%`, 'dim']]);
+      L.push(...planAgentLines(p.st, W, '  '));
+    }
+    return L;
   }
 
-  /** Plan tab: goal/description, per-branch progress, ownership summary, decisions, questions, artifacts. */
-  function planLines(W) {
-    const s = ui.state;
+  /**
+   * Plan tab at wider scopes: every plan in scope as a compact card (what and why:
+   * goal, outcome, branch progress, decision/question/artifact counts). ⏎ opens the
+   * plan's full details. Returns {lines, selLine}; fills ui.rows.plan.
+   */
+  function planCardsLines(W, plans) {
+    const L = [];
+    const rows = [];
+    if (!plans.length) L.push([[ui.showClosed ? ' No plans in scope.' : ' No active plans in scope (f: include closed).', 'dim']]);
+    for (const p of plans) {
+      const s = p.st;
+      const row = { type: 'plan', root: p.root, plan: p.id, id: p.id, st: s, key: p.key, k: p.key, line: L.push(null) - 1 };
+      rows.push(row);
+      const sum = planSummary(s);
+      const field = (label, text, color = '') => {
+        if (!text) return;
+        const ls = wrap(text, Math.max(20, W - 18));
+        if (ls.length > 2) ls[1] = ls[1].replace(/\s*\S*$/, '') + ' …'; // cut: full text in the plan's details
+        ls.slice(0, 2).forEach((l, i) => L.push([[i ? '               ' : `      ${label.padEnd(9)}`, 'dim'], [l, color]]));
+      };
+      field('goal', s.goal);
+      if (!isOpenStatus(s)) field('outcome', s.status_message, s.status === 'completed' ? 'green' : 'yellow');
+      const roots = s.order.filter((id) => !s.tasks[id].parent || !s.tasks[s.tasks[id].parent]);
+      const nameW = Math.min(30, Math.max(8, ...roots.map((id) => [...`${id} ${s.tasks[id].title}`].length)));
+      for (const id of roots.slice(0, 6)) {
+        const t = s.tasks[id];
+        const es = effStatus(t);
+        const pct = t.children.length ? (t.rollup_percent ?? 0) : es === 'done' ? 100 : (t.percent ?? 0);
+        const owners = [...new Set(s.order.filter((x) => (x === id || s.tasks[x].path.includes(id)) && s.tasks[x].owner).map((x) => s.tasks[x].owner))];
+        L.push([[`      ${STATUS[es][0]} `, STATUS[es][1]], [clip(`${id} ${t.title}`, nameW) + ' ', t.children.length ? 'bold' : ''], ...bar(pct / 100, 8), [` ${String(pct).padStart(3)}%  `, 'dim'], [owners.join(', '), 'cyan']]);
+      }
+      if (roots.length > 6) L.push([[`        … ${roots.length - 6} more branches`, 'dim']]);
+      const notes = s.order.flatMap((id) => s.tasks[id].notes);
+      const n = (k) => notes.filter((x) => x.kind === k).length;
+      const arts = s.order.reduce((a, id) => a + s.tasks[id].artifacts.length, 0);
+      const counts = [n('decision') && `${n('decision')} decision${n('decision') === 1 ? '' : 's'}`, n('question') && `${n('question')} question${n('question') === 1 ? '' : 's'}`, n('warning') && `${n('warning')} warning${n('warning') === 1 ? '' : 's'}`, arts && `${arts} artifact${arts === 1 ? '' : 's'}`].filter(Boolean);
+      if (counts.length) L.push([[`      ${counts.join(' · ')}`, 'dim']]);
+      L.push([]);
+      row.render = (sel) => [
+        mark(sel),
+        [clip(`${ui.scope.level === 'all' ? projectName(p.root) + ' / ' : ''}${s.title}`, Math.max(14, Math.min(50, W - 45))) + ' ', sel ? 'inverse bold' : isOpenStatus(s) ? 'bold' : 'dim'],
+        [`${s.status} · ${s.counts.done}/${sum.total} tasks · ${ago(s.updated_at)} ago`, s.status === 'completed' ? 'green' : s.status === 'active' ? 'blue' : 'yellow'],
+      ];
+    }
+    const prevK = ui.rows.plan[ui.sel.plan]?.k;
+    const keep = prevK ? rows.findIndex((r) => r.k === prevK) : -1;
+    ui.sel.plan = keep >= 0 ? keep : Math.min(ui.sel.plan, Math.max(0, rows.length - 1));
+    ui.rows.plan = rows;
+    rows.forEach((r, i) => (L[r.line] = r.render(i === ui.sel.plan)));
+    return { lines: L, selLine: rows[ui.sel.plan]?.line ?? 0 };
+  }
+
+  /** Plan tab at plan scope: the plan's full details. */
+  function planTabLines(W, plans) {
+    const p = plans[0];
+    if (!p) return [[[' No plan in scope.', 'dim']]];
+    const s = p.st;
     const L = [];
     L.push([[' ' + s.title, 'bold'], [`  ${s.status}`, s.status === 'completed' ? 'green' : s.status === 'active' ? 'blue' : 'yellow']]);
     L.push([[` ${s.id} · created ${s.created_at?.slice(0, 16).replace('T', ' ') ?? '?'} by ${s.created_by ?? '?'} · updated ${ago(s.updated_at)} ago`, 'dim']]);
-    if (s.goal) {
-      L.push([], [[' goal', 'bold']]);
-      for (const l of wrap(s.goal, W - 3)) L.push([['  ' + l, '']]);
+    for (const [label, text, color] of [
+      ['goal', s.goal, ''],
+      ['description', s.description, ''],
+      ['outcome', s.status_message, 'green'],
+    ]) {
+      if (!text) continue;
+      L.push([], [[` ${label}`, 'bold']]);
+      for (const l of wrap(text, W - 3)) L.push([['  ' + l, color]]);
     }
-    if (s.description) {
-      L.push([], [[' description', 'bold']]);
-      for (const l of wrap(s.description, W - 3)) L.push([['  ' + l, '']]);
-    }
-    if (s.status_message) {
-      L.push([], [[' outcome', 'bold']]);
-      for (const l of wrap(s.status_message, W - 3)) L.push([['  ' + l, 'green']]);
-    }
-    // per top-level branch progress
     const roots = s.order.filter((id) => !s.tasks[id].parent || !s.tasks[s.tasks[id].parent]);
     if (roots.length) {
       L.push([], [[' breakdown', 'bold'], ['  (top-level branches)', 'dim']]);
       const nameW = Math.min(36, Math.max(...roots.map((id) => [...`${id} ${s.tasks[id].title}`].length)));
       for (const id of roots) {
         const t = s.tasks[id];
-        const st = effStatus(t);
-        const pct = t.children.length ? (t.rollup_percent ?? 0) : st === 'done' ? 100 : (t.percent ?? 0);
-        const label = `${id} ${t.title}`;
-        const name = [...label].length > nameW ? [...label].slice(0, nameW - 1).join('') + '…' : label.padEnd(nameW);
+        const es = effStatus(t);
+        const pct = t.children.length ? (t.rollup_percent ?? 0) : es === 'done' ? 100 : (t.percent ?? 0);
         const owners = [...new Set(s.order.filter((x) => (x === id || s.tasks[x].path.includes(id)) && s.tasks[x].owner).map((x) => s.tasks[x].owner))];
-        L.push([[`  ${STATUS[st][0]} `, STATUS[st][1]], [name + ' ', t.children.length ? 'bold' : ''], ...bar(pct / 100, 10), [` ${String(pct).padStart(3)}%  `, 'dim'], [owners.join(', '), 'cyan']]);
+        L.push([[`  ${STATUS[es][0]} `, STATUS[es][1]], [clip(`${id} ${t.title}`, nameW) + ' ', t.children.length ? 'bold' : ''], ...bar(pct / 100, 10), [` ${String(pct).padStart(3)}%  `, 'dim'], [owners.join(', '), 'cyan']]);
       }
     }
     const notes = s.order.flatMap((id) => s.tasks[id].notes.map((n) => ({ ...n, task: id })));
@@ -628,13 +604,197 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     return L;
   }
 
-  function logLines() {
-    const evs = readEvents(root, ui.state.id).slice(-300).reverse();
-    return evs.map((e) => {
+  /** Log tab: events of all plans in scope, newest first, tagged with their plan. */
+  function logTabLines(plans) {
+    const evs = [];
+    for (const p of plans) for (const e of readEvents(p.root, p.id).slice(-200)) evs.push({ e, p });
+    evs.sort((a, b) => (b.e.ts || '').localeCompare(a.e.ts || ''));
+    return evs.slice(0, 400).map(({ e, p }) => {
       const d = e.data || {};
       const bits = [d.status, d.percent != null ? d.percent + '%' : null, d.assignee !== undefined ? '→ ' + (d.assignee ?? '-') : null, d.title, d.ref, d.message].filter((x) => x != null && x !== '');
-      return [[`${ago(e.ts).padStart(4)} `, 'dim'], [(e.actor?.id ?? '?').slice(0, 10).padEnd(11), 'cyan'], [e.type.replace(/^task\./, '').padEnd(9), 'bold'], [e.task ? e.task + ' ' : '', ''], [bits.join(' · '), 'dim']];
+      const tag = multi() ? clip(`${ui.scope.level === 'all' ? projectName(p.root) + '/' : ''}${p.st.title}`, 22) + ' ' : '';
+      return [[`${ago(e.ts).padStart(4)} `, 'dim'], [tag, 'magenta'], [(e.actor?.id ?? '?').slice(0, 10).padEnd(11), 'cyan'], [e.type.replace(/^task\./, '').padEnd(9), 'bold'], [e.task ? e.task + ' ' : '', ''], [bits.join(' · '), 'dim']];
     });
+  }
+
+  const KIND_STYLE = { review: ['◎ review', 'magenta'], question: ['⊘ question', 'red'], failed: ['✗ failed', 'red'], stale: ['stale?', 'red bold'], finished: ['● finished', 'green'] };
+
+  const foldOf = (p) => ui.fold.get(p.key) ?? (isOpenStatus(p.st) ? 'live' : 'folded');
+
+  /** The "live" slice of a plan: tasks that are moving or need someone, most urgent first. */
+  function liveTasks(p) {
+    const res = [];
+    for (const id of p.st.order) {
+      const t = p.st.tasks[id];
+      if (t.children.length) continue;
+      const a = agentFor(p.st, t);
+      const rank =
+        t.status === 'review' ? 0 : t.status === 'blocked' && !t.blocked_on.length ? 1 : t.status === 'failed' ? 2 : a?.stale ? 3 : t.status === 'in_progress' ? 4 : t.status === 'blocked' ? 5 : null;
+      if (rank !== null) res.push({ t, a, rank });
+    }
+    return res.sort((x, y) => x.rank - y.rank);
+  }
+
+  /** Compact line for a live task: status, parent path, id, title, owner + agent, detail. */
+  function liveTaskLine(p, t, a, W, selected) {
+    const st = p.st;
+    const s = effStatus(t);
+    const [g, color] = STATUS[s];
+    const crumb = t.path.length ? t.path.map((x) => st.tasks[x].title).join(' › ') + ' › ' : '';
+    const right = [];
+    if (t.owner) right.push([t.owner, t.assignee ? 'cyan' : 'cyan dim']);
+    if (a) right.push([' ' + (AGENT_GLYPH[a.agent_status] || AGENT_GLYPH.unknown)[0], (AGENT_GLYPH[a.agent_status] || AGENT_GLYPH.unknown)[1]]);
+    else if (t.owner && elsewhere(st, t.owner)) right.push([' ↗', 'gray']);
+    if (a?.stale) right.push([' stale?', 'red bold']);
+    if (t.status === 'in_progress' && t.percent != null) right.push([` ${t.percent}%`, 'yellow']);
+    if (t.status === 'blocked' && t.blocked_on.length) right.push([t.can_resume ? '  can resume' : `  ⧗ on ${t.blocked_on.join(',')}`, t.can_resume ? 'green' : 'dim']);
+    if (t.answered) right.push(['  answered', 'green']);
+    const msg = ['review', 'blocked', 'failed'].includes(t.status) && !t.blocked_on.length && t.last_message ? `  — ${t.last_message}` : '';
+    const fixed = 7 + [...crumb].length + t.id.length + 1 + right.reduce((n, [x]) => n + [...x].length, 0) + 2;
+    const titleW = Math.max(8, Math.min([...t.title].length, W - fixed - 10));
+    return [
+      mark(selected),
+      ['    ', ''],
+      [g + ' ', color],
+      [crumb, 'gray'],
+      [t.id + ' ', selected ? 'inverse bold' : 'bold'],
+      [clip(t.title, titleW) + '  ', TERMINAL.has(t.status) && t.status !== 'failed' ? 'dim' : ''],
+      ...right,
+      [msg, 'dim'],
+    ];
+  }
+
+  /** Summary of a plan's remaining tasks (those not shown in the live slice). */
+  function planRest(p, shown) {
+    const leaves = p.st.order.map((id) => p.st.tasks[id]).filter((t) => !t.children.length && !shown.has(t.id));
+    const n = (f) => leaves.filter(f).length;
+    const done = n((t) => t.status === 'done');
+    const todo = n((t) => t.status === 'todo');
+    const ready = n((t) => t.ready);
+    const cancelled = n((t) => t.status === 'cancelled');
+    const parts = [];
+    if (done) parts.push([`✓ ${done} done`, 'green']);
+    if (todo) parts.push([`○ ${todo} todo${ready ? ` (${ready} ready)` : ''}`, 'gray']);
+    if (cancelled) parts.push([`– ${cancelled} cancelled`, 'gray']);
+    if (!parts.length) return null;
+    const segs = [['       ', '']];
+    parts.forEach((x, i) => segs.push(...(i ? [[' · ', 'dim']] : []), x));
+    return segs;
+  }
+
+  /**
+   * Overview tab: each plan in scope (unfolded by default to its live slice: what is
+   * moving or needs someone), then the cross-plan inbox. Fold per plan: ←/→/space,
+   * all: z. Returns {lines, selLine}; fills ui.rows.overview with selectable rows.
+   */
+  function overviewTabLines(W, plans) {
+    const L = [];
+    const rows = [];
+    const s = ui.scope;
+    const add = (row, render) => rows.push({ ...row, line: L.push(null) - 1, render });
+    if (s.level === 'all' && initDir && !findRoot(initDir))
+      L.push([[' No ATF project in ', 'yellow'], [initDir, 'cyan'], ['  — press ', 'yellow'], ['i', 'bold green'], [' to create one there', 'yellow']], []);
+    if (!plans.length) L.push([[ui.showClosed ? ' No plans in scope.' : ' No active plans in scope (f: include closed). A coordinator starts one with `atf plan new <title>`.', 'dim']]);
+    for (const p of plans) {
+      const level = foldOf(p);
+      const closed = !isOpenStatus(p.st);
+      add({ type: 'plan', root: p.root, plan: p.id, id: p.id, st: p.st, key: p.key, k: p.key }, (sel) => {
+        const sum = planSummary(p.st);
+        let working = 0;
+        let idle = 0;
+        let away = 0;
+        for (const who of sum.agents) {
+          if (elsewhere(p.st, who)) away++;
+          else {
+            const a = liveAgent(p.st, who);
+            if (a?.agent_status === 'working') working++;
+            else if (a) idle++;
+          }
+        }
+        const inbox = inboxOf(p).length;
+        const label = `${s.level === 'all' ? projectName(p.root) + ' / ' : ''}${p.st.title}`;
+        const titleW = Math.max(14, Math.min(46, W - 60));
+        return [
+          mark(sel),
+          [level === 'folded' ? '▸ ' : level === 'live' ? '▾ ' : '▿ ', 'bold'],
+          [clip(label, titleW) + ' ', sel ? 'inverse bold' : closed ? 'dim' : 'bold'],
+          ...bar(sum.progress, 10),
+          [` ${String(Math.round(sum.progress * 100)).padStart(3)}% ${p.st.counts.done}/${sum.total} `, 'dim'],
+          [working ? `⚙${working} ` : '', 'blue'],
+          [idle ? `◌${idle} ` : '', 'yellow'],
+          [away ? `↗${away} ` : '', 'gray'],
+          [sum.ready_unowned ? `${sum.ready_unowned} ready ` : '', 'green'],
+          [inbox ? `⚑${inbox} ` : '', 'red bold'],
+          [p.st.status !== 'active' ? `${p.st.status} ` : '', p.st.status === 'paused' ? 'yellow' : 'dim'],
+          [ago(p.st.updated_at), 'dim'],
+        ];
+      });
+      if (level === 'live') {
+        const live = liveTasks(p);
+        for (const { t, a } of live) add({ type: 'task', root: p.root, plan: p.id, st: p.st, key: p.key, task: t.id, k: `${p.key}#${t.id}` }, (sel) => liveTaskLine(p, t, a, W, sel));
+        const rest = planRest(p, new Set(live.map((x) => x.t.id)));
+        if (rest) L.push(rest);
+        else if (!live.length) L.push([['       no tasks yet', 'dim']]);
+      } else if (level === 'full') {
+        const visit = (id, prefix, isLast, depth) => {
+          const k = `${p.key}#${id}`;
+          const row = { type: 'task', root: p.root, plan: p.id, st: p.st, key: p.key, task: id, k, prefix: depth ? prefix + (isLast ? '└─' : '├─') : '' };
+          add(row, (sel) => taskRowLine(row, W, sel));
+          const kids = p.st.tasks[id].children;
+          kids.forEach((c, i) => visit(c, depth ? prefix + (isLast ? '  ' : '│ ') : '', i === kids.length - 1, depth + 1));
+        };
+        const roots = p.st.order.filter((id) => !p.st.tasks[id].parent || !p.st.tasks[p.st.tasks[id].parent]);
+        roots.forEach((id, i) => visit(id, '', i === roots.length - 1, 0));
+      }
+    }
+    // cross-plan inbox: the same attention items, oldest first
+    const items = plans.flatMap(inboxOf).sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+    L.push([], [[' inbox', 'bold'], [items.length ? `  ${items.length} item${items.length === 1 ? ' needs' : 's need'} you, oldest first` : '  nothing needs you', 'dim']]);
+    for (const it of items)
+      add({ type: 'item', ...it, k: `item#${it.root}#${it.plan}#${it.task}#${it.kind}` }, (sel) => {
+        const [label, color] = KIND_STYLE[it.kind] || [it.kind, ''];
+        const t = it.task ? it.st.tasks[it.task] : null;
+        const where = multi() ? `${s.level === 'all' ? projectName(it.root) + ' / ' : ''}${it.st.title}  ` : '';
+        return [mark(sel), [label.padEnd(11), sel ? `inverse ${color}`.trim() : color], [' ' + where, 'dim'], [t ? `${t.id} ${t.title} ` : '', 'bold'], [it.actor ? `@${it.actor} ` : '', 'cyan'], [it.message ? `— ${it.message} ` : '', 'dim'], [ago(it.ts), 'dim']];
+      });
+    // keep the selection on the same row across redraws
+    const prevK = ui.rows.overview[ui.sel.overview]?.k;
+    const keep = prevK ? rows.findIndex((r) => r.k === prevK) : -1;
+    ui.sel.overview = keep >= 0 ? keep : Math.min(ui.sel.overview, Math.max(0, rows.length - 1));
+    ui.rows.overview = rows;
+    rows.forEach((r, i) => (L[r.line] = r.render(i === ui.sel.overview)));
+    return { lines: L, selLine: rows[ui.sel.overview]?.line ?? 0 };
+  }
+
+  /** Overview folding: plan rows cycle folded -> live -> full; task rows fold their plan. */
+  function foldPlan(r, dir) {
+    if (!r?.key) return;
+    const p = { key: r.key, st: r.st, root: r.root, id: r.plan };
+    // a plan with nothing live (closed or idle) has no useful middle level: folded <-> full
+    const order = liveTasks(p).length ? ['folded', 'live', 'full'] : ['folded', 'full'];
+    let cur = order.indexOf(foldOf(p));
+    if (cur < 0) cur = 0; // was 'live' but nothing is live any more
+    const next = dir === 'cycle' ? order[(cur + 1) % order.length] : order[Math.max(0, Math.min(order.length - 1, cur + (dir === 'open' ? 1 : -1)))];
+    ui.fold.set(r.key, next);
+  }
+
+  /** c: close a plan (completed). Second press within 3 s confirms. */
+  function closePlan(r) {
+    if (!r?.root || !r?.plan) return flash('select a plan');
+    if (!isOpenStatus(r.st)) return flash(`${r.st.title} is already ${r.st.status}`);
+    const key = keyOf(r.root, r.plan);
+    if (!(ui.confirm?.action === 'close' && ui.confirm.key === key && ui.confirm.until > Date.now())) {
+      ui.confirm = { action: 'close', key, until: Date.now() + 3000 };
+      const open = r.st.order.filter((id) => !r.st.tasks[id].children.length && !TERMINAL.has(r.st.tasks[id].status)).length;
+      return flash(`close plan "${r.st.title}"${open ? ` (${open} task${open === 1 ? '' : 's'} still open!)` : ''}? press c again`, open ? 'red' : 'yellow');
+    }
+    ui.confirm = null;
+    try {
+      transact(r.root, r.plan, resolveActor({ role: 'coordinator' }), () => [{ type: 'plan.status', data: { status: 'completed', message: 'closed via board' } }]);
+      flash(`closed "${r.st.title}"${ui.showClosed ? '' : ' (f shows closed plans)'}`, 'green');
+    } catch (e) {
+      flash(e.message, 'red');
+    }
   }
 
   function helpLines() {
@@ -642,15 +802,23 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const T = (t, st = '') => [['   ' + t, st]];
     const sym = (g, color, name, desc) => [['   ' + g + ' ', color], [name.padEnd(13), color], [desc, '']];
     return [
+      H('Scope (header): all projects › project › plan'),
+      T('Every tab shows its content for the scope. ⏎ on a plan narrows to it; esc widens'),
+      T('(plan -> project -> all projects -> quit); A jumps straight to all projects.'),
+      T('At wider scopes Tasks and Agents group by project and plan, Plan shows one card per'),
+      T('plan (goal, outcome, branches; ⏎ for full details), Log merges all plans\' events.'),
+      [],
       H('Views'),
       T('Tab / 0-4    Overview · Tasks · Agents · Plan · Log    p / P  next / previous plan'),
-      T('esc          walks up: details -> Tasks -> Overview -> quit'),
       [],
       H('Overview (0)'),
-      T('active plans of this project (a: all known projects), then the inbox: everything'),
-      T('that needs you, oldest first. ↑↓ select   ⏎ open plan / task inside the board'),
-      T('g  jump in herdr: item -> its agent; plan -> its coordinator, else an agent of the'),
-      T('   plan, else a pane in the project directory (its workspace and tab)'),
+      T('every plan in scope, unfolded to its live slice: tasks in progress, in review,'),
+      T('blocked or failed (with their parent path), plus a summary of the rest. Below,'),
+      T('the inbox: everything that needs you across plans, oldest first.'),
+      T('←/→/space  fold a plan: ▸ folded  ▾ live  ▿ full tree      z  fold/unfold all'),
+      T('c  close the selected plan (press twice)     f  show/hide closed plans (all tabs)'),
+      T('⏎ open plan / task   g jump in herdr: item -> its agent; plan -> its coordinator,'),
+      T('else an agent of the plan, else a pane in the project directory'),
       [['   ◎ review  ', 'magenta'], ['agent finished, approve or reopen', '']],
       [['   ⊘ question', 'red'], [' agent blocked on a question (not on another task)', '']],
       [['   ✗ failed  ', 'red'], ['agent gave up', '']],
@@ -658,28 +826,27 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       [['   ● finished', 'green'], [' all tasks done, plan still open', '']],
       [['   ⚙2 ◌1 ↗1  ', ''], ['agents working / idle / in another herdr session; ⚑ inbox items', '']],
       [],
-      H('Keys (Tasks view)'),
-      T('↑↓ j/k  move        ←→ h/l  collapse / expand        space  toggle subtree'),
-      T('⏎  details          g  go to the owning agent\'s pane'),
-      T('s  spawn a subagent for the selected task or work package'),
-      T('a  approve a task in review          ? help          q / esc  back / quit'),
+      H('Tasks (1)'),
+      T('↑↓ j/k  move        ←→ h/l  collapse / expand (tasks and plans)   space  toggle'),
+      T('⏎  task details / open plan      g  go to the owning agent’s pane'),
+      T('s  spawn a subagent for the selected task or work package     a  approve a review'),
       [],
       H('Task status: the symbol before a task'),
       sym(STATUS.todo[0], STATUS.todo[1], 'todo', 'not started (⧗ T3 = waits on dependencies)'),
       sym(STATUS.in_progress[0], STATUS.in_progress[1], 'in progress', 'an agent is working on it'),
       sym(STATUS.review[0], STATUS.review[1], 'review', 'agent finished, waiting for the coordinator to approve'),
       sym(STATUS.done[0], STATUS.done[1], 'done', 'finished (approved if it went through review)'),
-      sym(STATUS.blocked[0], STATUS.blocked[1], 'blocked', 'agent cannot continue: a question, or "blocked on T8"'),
+      sym(STATUS.blocked[0], STATUS.blocked[1], 'blocked', 'agent cannot continue: a question, or "⧗ on T8"'),
       sym(STATUS.failed[0], STATUS.failed[1], 'failed', 'agent gave up; coordinator can reopen it'),
       sym(STATUS.cancelled[0], STATUS.cancelled[1], 'cancelled', 'dropped'),
-      T('Parent tasks show the combined status of their subtasks', 'dim'),
-      T('(blocked if any subtask is blocked, done when all are done).', 'dim'),
+      T('Parent tasks show the combined status of their subtasks.', 'dim'),
       [],
       H('Agent state: the symbol after an agent name (live from herdr)'),
       sym(AGENT_GLYPH.working[0], AGENT_GLYPH.working[1], 'working', 'the agent is running'),
       sym(AGENT_GLYPH.idle[0], AGENT_GLYPH.idle[1], 'idle', 'the agent waits for input'),
       sym(AGENT_GLYPH.done[0], AGENT_GLYPH.done[1], 'done', 'the agent finished its turn'),
       sym(AGENT_GLYPH.blocked[0], AGENT_GLYPH.blocked[1], 'prompt', 'stuck at an approval/question prompt in its terminal'),
+      sym('↗', 'gray', 'elsewhere', 'runs in another herdr session (read-only here)'),
       [['   stale?         ', 'red bold'], ['task in progress but its agent idle > 90s: probably stopped without reporting', '']],
       [],
       H('Ownership and labels'),
@@ -689,19 +856,18 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       [['   ready          ', 'green'], ['can start now and nobody owns it yet', '']],
       [['   40%            ', 'yellow'], ['progress last reported by the agent', '']],
       [['   2/3            ', 'dim'], ['finished / total subtasks of a parent', '']],
-      [],
-      T(`root: ${root}`, 'dim'),
     ];
   }
 
   function footer() {
     if (ui.flash && ui.flash.until > Date.now()) return [[' ' + ui.flash.msg, ui.flash.style]];
+    const esc = ui.scope.level === 'all' ? 'esc quit' : 'esc widen';
     const keys = {
-      overview: `↑↓ select  ⏎ open in board  g jump to pane  a ${ui.scope === 'all' ? 'this project' : 'all projects'}  ? help  q quit`,
-      tasks: '↑↓ move  ←→ fold  ⏎ details  g agent  s spawn  a approve  tab views  ? help  q quit',
-      agents: '↑↓ scroll  tab views  ? help  q quit',
-      plan: '↑↓ scroll  tab views  ? help  q quit',
-      log: '↑↓ scroll  tab views  ? help  q quit',
+      overview: `↑↓ select  ←→ fold  z all  ⏎ open  g jump  a approve  c close plan  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}  ? help`,
+      tasks: `↑↓ move  ←→ fold  ⏎ details/open  g agent  s spawn  a approve  ${esc}  ? help`,
+      agents: `↑↓ scroll  ${esc}  A all projects  tab views  ? help  q quit`,
+      plan: multi() ? `↑↓ select  ⏎ open plan  g jump  c close plan  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}  ? help` : `↑↓ scroll  ${esc}  tab views  ? help  q quit`,
+      log: `↑↓ scroll  ${esc}  tab views  ? help  q quit`,
       detail: '↑↓ scroll  ⏎/esc back  g agent  s spawn  a approve',
       help: '↑↓ scroll  any other key: back',
     }[view()];
@@ -714,48 +880,58 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     lines.push(...all.slice(ui.scrolls[key], ui.scrolls[key] + bodyH));
   }
 
+  /** Keep a selected line visible in a list view. */
+  function list(lines, all, selLine, key, bodyH) {
+    let sc = ui.scrolls[key] ?? 0;
+    if (selLine < sc + 1) sc = Math.max(0, selLine - 1);
+    if (selLine >= sc + bodyH - 1) sc = selLine - bodyH + 2;
+    ui.scrolls[key] = sc;
+    lines.push(...all.slice(sc, sc + bodyH));
+  }
+
   function draw() {
     const W = out.columns || 80;
     const H = out.rows || 24;
-    const lines = [...header(W), [['─'.repeat(W), 'gray']]];
+    const plans = scopePlans();
+    const lines = [...header(W, plans), [['─'.repeat(W), 'gray']]];
     const bodyH = H - lines.length - 1;
     const v = view();
 
-    if (v === 'overview') {
-      const { lines: all, selLine } = overviewLines(W);
-      if (selLine < ui.ov.scroll + 1) ui.ov.scroll = Math.max(0, selLine - 1);
-      if (selLine >= ui.ov.scroll + bodyH - 1) ui.ov.scroll = selLine - bodyH + 2;
-      lines.push(...all.slice(ui.ov.scroll, ui.ov.scroll + bodyH));
-    } else if (v === 'help') scrolled(lines, helpLines(), 'help', bodyH);
-    else if (!ui.state) lines.push([[' No plans yet. Create one with `atf plan new <title>`.', 'dim']]);
-    else if (v === 'help') scrolled(lines, helpLines(), 'help', bodyH); else if (v === 'detail') scrolled(lines, detailLines(ui.rows[ui.sel], W), 'detail', bodyH);
-    else if (v === 'agents') scrolled(lines, agentLines(W), 'agents', bodyH);
-    else if (v === 'plan') scrolled(lines, planLines(W), 'plan', bodyH);
-    else if (v === 'log') scrolled(lines, logLines(), 'log', bodyH);
+    if (v === 'help') scrolled(lines, helpLines(), 'help', bodyH);
+    else if (v === 'overview') {
+      const { lines: all, selLine } = overviewTabLines(W, plans);
+      list(lines, all, selLine, 'overview', bodyH);
+    } else if (v === 'detail') {
+      const r = ui.rows.tasks[ui.sel.tasks];
+      if (r?.type === 'task') scrolled(lines, detailLines(r.st, r.task, W), 'detail', bodyH);
+      else ui.overlay = null;
+    } else if (v === 'agents') scrolled(lines, agentsTabLines(W, plans), 'agents', bodyH);
+    else if (v === 'plan' && multi()) {
+      const { lines: all, selLine } = planCardsLines(W, plans);
+      list(lines, all, selLine, 'plan', bodyH);
+    } else if (v === 'plan') scrolled(lines, planTabLines(W, plans), 'plan', bodyH);
+    else if (v === 'log') scrolled(lines, logTabLines(plans), 'log', bodyH);
     else {
-      // tasks: tree on top, attention + preview of the selected task below if room
-      const attention = ui.state.order.map((id) => ui.state.tasks[id]).filter((t) => t.status === 'blocked' || t.status === 'review' || agentFor(t)?.stale);
-      const listH = Math.min(ui.rows.length, Math.max(3, Math.floor(bodyH * 0.6)));
-      if (ui.sel < ui.scroll) ui.scroll = ui.sel;
-      if (ui.sel >= ui.scroll + listH) ui.scroll = ui.sel - listH + 1;
-      for (let i = ui.scroll; i < Math.min(ui.rows.length, ui.scroll + listH); i++) lines.push(taskRow(ui.rows[i], W, i === ui.sel));
-      if (!ui.rows.length) lines.push([[' No tasks yet. Add with `atf add <title>`.', 'dim']]);
-      if (ui.rows.length > listH) lines.push([[`  … ${ui.rows.length - listH} more (${ui.scroll + 1}-${ui.scroll + listH})`, 'dim']]);
-      let room = bodyH - (lines.length - 4);
-      if (attention.length && room > 2) {
-        const att = [
-          [['─ needs attention ', 'red bold'], ['─'.repeat(Math.max(0, W - 18)), 'gray']],
-          ...attention.map((t) => {
-            const kind = agentFor(t)?.stale ? 'stale?' : t.status;
-            return [[` ${t.id} `, 'bold'], [`${kind} `, kind === 'review' ? 'magenta' : 'red'], [t.last_message || t.title, 'dim']];
-          }),
-        ];
-        lines.push(...att.slice(0, room));
-        room -= att.length;
-      }
-      if (room > 3 && ui.rows.length) {
-        lines.push([['─'.repeat(W), 'gray']]);
-        lines.push(...detailLines(ui.rows[ui.sel], W).slice(0, room - 1));
+      // tasks: rows on top; attention + preview of the selected task below (plan scope)
+      const rows = buildTaskRows();
+      if (!rows.length) lines.push([[multi() ? ' No active plans in scope.' : ' No tasks yet. Add with `atf add <title>`.', 'dim']]);
+      const all = rows.map((r, i) => (r.type === 'plan' ? planHeaderRow(r, W, i === ui.sel.tasks, r) : r.type === 'note' ? [[r.text, 'dim']] : taskRowLine(r, W, i === ui.sel.tasks)));
+      const listH = multi() ? bodyH : Math.min(rows.length, Math.max(3, Math.floor(bodyH * 0.6)));
+      list(lines, all, ui.sel.tasks, 'tasks', listH);
+      if (!multi() && plans[0]) {
+        const st = plans[0].st;
+        let room = bodyH - Math.min(rows.length, listH);
+        const attention = st.order.map((id) => st.tasks[id]).filter((t) => (t.status === 'blocked' && !t.blocked_on.length) || t.status === 'review' || agentFor(st, t)?.stale);
+        if (attention.length && room > 2) {
+          const att = [[['─ needs attention ', 'red bold'], ['─'.repeat(Math.max(0, W - 18)), 'gray']], ...attention.map((t) => [[` ${t.id} `, 'bold'], [`${agentFor(st, t)?.stale ? 'stale?' : t.status} `, t.status === 'review' ? 'magenta' : 'red'], [t.last_message || t.title, 'dim']])];
+          lines.push(...att.slice(0, room));
+          room -= att.length;
+        }
+        const r = rows[ui.sel.tasks];
+        if (room > 3 && r?.type === 'task') {
+          lines.push([['─'.repeat(W), 'gray']]);
+          lines.push(...detailLines(r.st, r.task, W).slice(0, room - 1));
+        }
       }
     }
     while (lines.length < H - 1) lines.push([]);
@@ -765,29 +941,53 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   // ---------- actions ----------
-  const selected = () => ui.state?.tasks[ui.rows[ui.sel]];
+  const selectedRow = () => {
+    const v = view() === 'detail' ? 'tasks' : view();
+    return ui.rows[v]?.[ui.sel[v]];
+  };
 
-  async function goToAgent() {
-    const t = selected();
-    if (!t?.owner) return flash('task has no owner');
-    const pane = ui.state.actors[t.owner]?.ctx?.herdr_pane;
-    let ok = await herdrAsync(['agent', 'focus', t.owner]);
-    if (!ok && pane) ok = await herdrAsync(['agent', 'focus', pane]);
-    if (!ok) return flash(`no live herdr agent for ${t.owner}`, 'red');
-    if (popup) quit(); // let the popup close so the agent pane is visible
+  async function focusAgent(st, who) {
+    if (elsewhere(st, who)) return flash(`${who} runs in another herdr session`, 'red');
+    if (!(await herdrAsync(['agent', 'focus', who]))) return flash(`no live herdr agent for ${who}`, 'red');
+    if (popup) quit();
+  }
+
+  /** g on a plan: its coordinator, else one of its agents (working first), else a pane in the project. */
+  async function focusPlan(r, st) {
+    const local = Object.values(st.actors).filter((a) => !elsewhere(st, a.id) && ui.agents.get(`name:${a.id}`));
+    const order = [...local.filter((a) => a.role === 'coordinator'), ...local.filter((a) => a.role !== 'coordinator' && ui.agents.get(`name:${a.id}`)?.agent_status === 'working'), ...local.filter((a) => a.role !== 'coordinator')];
+    for (const a of order) if (await herdrAsync(['agent', 'focus', a.id])) return popup ? quit() : draw();
+    const projDir = path.dirname(r);
+    const inside = (d) => d && (d === projDir || d.startsWith(projDir + path.sep));
+    const pane = ((await herdrAsync(['pane', 'list']))?.panes || []).find((p) => !p.label && (inside(p.foreground_cwd) || inside(p.cwd)));
+    if (pane && (await herdrAsync(['workspace', 'focus', pane.workspace_id])) && (await herdrAsync(['tab', 'focus', pane.tab_id]))) return popup ? quit() : draw();
+    flash(`no herdr pane is open in ${projectName(r)}`);
+  }
+
+  async function goTo() {
+    const r = selectedRow();
+    if (!r) return;
+    if (r.type === 'plan') return focusPlan(r.root, r.st);
+    if (r.type === 'item') return r.actor ? focusAgent(r.st, r.actor) : focusPlan(r.root, r.st);
+    if (r.type === 'task') {
+      const t = r.st.tasks[r.task];
+      if (!t.owner) return flash('task has no owner');
+      return focusAgent(r.st, t.owner);
+    }
   }
 
   function spawnAgent() {
-    const t = selected();
-    if (!t) return;
+    const r = selectedRow();
+    if (r?.type !== 'task') return flash('select a task');
+    const t = r.st.tasks[r.task];
     const isPackage = t.children.length > 0;
     if (isPackage && TERMINAL.has(effStatus(t))) return flash(`${t.id} is already ${effStatus(t)}`);
     if (!isPackage && !t.ready) return flash(`${t.id} is not ready (${t.status}${t.waiting_on.length ? ', waits on ' + t.waiting_on.join(',') : ''})`);
     if (!spawnCmd) return flash('spawn unavailable');
     flash(`spawning agent for ${isPackage ? 'package ' : ''}${t.id}…`, 'blue');
-    const args = [...spawnCmd, 'spawn', t.id, '--plan', ui.state.id];
+    const args = [...spawnCmd, 'spawn', t.id, '--plan', r.plan];
     if (targetPane) args.push('--target-pane', targetPane);
-    const p = spawn(args[0], args.slice(1), { env: { ...process.env, ATF_DIR: root }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(args[0], args.slice(1), { env: { ...process.env, ATF_DIR: r.root }, stdio: ['ignore', 'pipe', 'pipe'] });
     let buf = '';
     p.stdout.on('data', (d) => (buf += d));
     p.stderr.on('data', (d) => (buf += d));
@@ -796,47 +996,68 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   function approve() {
-    const t = selected();
+    const r = selectedRow();
+    const t = r?.type === 'task' || r?.type === 'item' ? r.st.tasks[r.task] : null;
     if (!t || t.status !== 'review') return flash('only tasks in review can be approved');
     try {
-      transact(root, ui.state.id, resolveActor({ role: 'coordinator' }), (st) =>
+      transact(r.root, r.plan, resolveActor({ role: 'coordinator' }), (st) =>
         st.tasks[t.id].status === 'review' ? [{ type: 'task.status', task: t.id, data: { status: 'done', message: `approved via board: ${t.last_message ?? ''}`.trim() } }] : [],
       );
       flash(`${t.id} approved`, 'green');
-      reloadCurrent();
     } catch (e) {
       flash(e.message, 'red');
     }
   }
 
-  function setCollapsed(id, on) {
-    const t = ui.state?.tasks[id];
-    if (!t?.children.length) return false;
-    if (on) ui.collapsed.add(id);
-    else ui.collapsed.delete(id);
-    setPlan();
+  /** ⏎ */
+  function open() {
+    const r = selectedRow();
+    if (!r) return;
+    if (r.type === 'plan') return setScope({ level: 'plan', root: r.root, plan: r.plan }, { tab: view() === 'plan' ? 'plan' : 'tasks' });
+    if (r.type === 'item' || (r.type === 'task' && view() === 'overview')) {
+      setScope({ level: 'plan', root: r.root, plan: r.plan }, { tab: 'tasks', task: r.task });
+      if (r.task) (ui.overlay = 'detail'), (ui.scrolls.detail = 0);
+      return;
+    }
+    if (r.type === 'task') (ui.overlay = 'detail'), (ui.scrolls.detail = 0);
+  }
+
+  function fold(r, wantOpen) {
+    if (!r) return false;
+    if (r.type === 'plan') {
+      ui.open.set(r.key, wantOpen ?? !r.open);
+      return true;
+    }
+    if (r.type !== 'task' || !r.st.tasks[r.task].children.length) return false;
+    const isOpen = !ui.collapsed.has(r.k);
+    const target = wantOpen ?? !isOpen;
+    if (target === isOpen) return false;
+    if (target) ui.collapsed.delete(r.k);
+    else ui.collapsed.add(r.k);
     return true;
   }
 
   // ---------- lifecycle ----------
-  const watched = new Set();
-  function watchAll() {
-    if (!root) return;
-    for (const id of listPlanIds(root)) {
-      const p = eventsPath(root, id);
-      if (watched.has(p)) continue;
-      watched.add(p);
-      fs.watchFile(p, { interval: 250 }, () => {
-        if (ui.state?.id === id) reloadCurrent();
-        else loadPlans();
-        if (inHerdr() && !hookNotifies) sync(root);
-        draw();
-      });
+  /** Poll: plans in scope changed on disk? -> notify (if no hook), sync, redraw. */
+  function poll() {
+    const plans = scopePlans();
+    let changed = false;
+    for (const p of plans) {
+      const seen = ui.lastSeq.get(p.key);
+      ui.lastSeq.set(p.key, p.st.last_seq);
+      if (seen === undefined || p.st.last_seq === seen) continue;
+      changed = true;
+      if (inHerdr() && !hasHook(p.root)) {
+        for (const e of readEvents(p.root, p.id).filter((e) => e.seq > seen))
+          if (e.type === 'task.status' && ['blocked', 'review', 'failed'].includes(e.data?.status))
+            notify(`ATF ${e.task} ${e.data.status}: ${p.st.tasks[e.task]?.title ?? ''}`, `${e.actor?.id ?? '?'}: ${e.data.message ?? ''}`);
+      }
     }
+    if (changed && inHerdr()) for (const r of new Set(plans.map((p) => p.root))) if (!hasHook(r)) sync(r);
+    draw();
   }
 
   function quit() {
-    for (const p of watched) fs.unwatchFile(p);
     out.write(`${ESC}?25h${ESC}?1049l`);
     process.exit(0);
   }
@@ -844,23 +1065,19 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   const UP = ['\x1b[A', 'k'];
   const DOWN = ['\x1b[B', 'j'];
   function onKey(k) {
-    const n = ui.rows.length;
     const page = Math.max(1, (out.rows || 24) - 8);
     const v = view();
-    if (k === 'q' || k === '\x03') {
-      if (ui.overlay && k === 'q') ui.overlay = null;
+    if (k === '\x03') return quit();
+    if (k === 'q') {
+      if (ui.overlay) ui.overlay = null;
       else return quit();
     } else if (v === 'help') {
       if (UP.includes(k)) ui.scrolls.help = Math.max(0, (ui.scrolls.help ?? 0) - 1);
       else if (DOWN.includes(k)) ui.scrolls.help = (ui.scrolls.help ?? 0) + 1;
       else ui.overlay = null;
-    }
-    else if (k === '\x1b') {
-      // Esc walks up: overlay -> plan tab -> Tasks -> Overview -> quit
+    } else if (k === '\x1b') {
       if (ui.overlay) ui.overlay = null;
-      else if (ui.tab === 'overview') return quit();
-      else if (ui.tab !== 'tasks') ui.tab = 'tasks';
-      else ui.tab = 'overview';
+      else widen();
     } else if (k === '\t' || k === '\x1b[Z') {
       const i = TABS.findIndex(([id]) => id === ui.tab);
       ui.tab = TABS[(i + (k === '\t' ? 1 : TABS.length - 1)) % TABS.length][0];
@@ -868,66 +1085,79 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     } else if (/^[0-4]$/.test(k)) {
       ui.tab = TABS[Number(k)][0];
       ui.overlay = null;
-    } else if (v === 'overview') {
-      const n2 = ui.ov.entries.length;
-      if (UP.includes(k)) ui.ov.sel = Math.max(0, ui.ov.sel - 1);
-      else if (DOWN.includes(k)) ui.ov.sel = Math.min(n2 - 1, ui.ov.sel + 1);
-      else if (k === '\x1b[5~') ui.ov.sel = Math.max(0, ui.ov.sel - page);
-      else if (k === '\x1b[6~') ui.ov.sel = Math.min(n2 - 1, ui.ov.sel + page);
-      else if (k === '\r') openEntry();
-      else if (k === 'g') return goToEntry();
-      else if (k === 'i' && !root && initDir) {
-        switchRoot(initRoot(initDir), null);
-        ui.tab = 'tasks';
-        flash(`created ${initDir}/.atf — your coordinator can now start a plan (atf plan new …)`, 'green');
-      } else if (k === 'a') {
-        ui.scope = ui.scope === 'all' ? 'project' : 'all';
-        if (ui.scope === 'all' && inHerdr()) discoverRoots();
-        ui.ov.sel = 0;
-        ui.ov.scroll = 0;
-      } else if (k === '?') ui.overlay = 'help';
     } else if (k === '?') ui.overlay = 'help';
-    else if (k === 'p' || k === 'P') {
-      if (ui.plans.length > 1) {
-        ui.planIdx = (ui.planIdx + (k === 'p' ? 1 : ui.plans.length - 1)) % ui.plans.length;
-        ui.sel = 0;
-        ui.scrolls = {};
-        setPlan();
+    else if (k === 'A') setScope({ level: 'all' });
+    else if ((k === 'p' || k === 'P') && ui.scope.level === 'plan') {
+      const sibs = listPlanIds(ui.scope.root).map((id) => cachedPlan(ui.scope.root, id)).filter((st) => isOpenStatus(st) || st.id === ui.scope.plan);
+      if (sibs.length > 1) {
+        const i = sibs.findIndex((st) => st.id === ui.scope.plan);
+        const next = sibs[(i + (k === 'p' ? 1 : sibs.length - 1)) % sibs.length];
+        setScope({ level: 'plan', root: ui.scope.root, plan: next.id });
       }
-    } else if (v === 'tasks') {
-      const t = selected();
-      if (UP.includes(k)) ui.sel = Math.max(0, ui.sel - 1);
-      else if (DOWN.includes(k)) ui.sel = Math.min(n - 1, ui.sel + 1);
-      else if (k === '\x1b[5~') ui.sel = Math.max(0, ui.sel - page);
-      else if (k === '\x1b[6~') ui.sel = Math.min(n - 1, ui.sel + page);
-      else if (k === '\x1b[H') ui.sel = 0;
-      else if (k === 'G' || k === '\x1b[F') ui.sel = n - 1;
-      else if (k === '\x1b[D' || k === 'h') {
-        // collapse, or jump to parent
-        if (!(t?.children.length && !ui.collapsed.has(t.id) && setCollapsed(t.id, true)) && t?.parent) ui.sel = Math.max(0, ui.rows.indexOf(t.parent));
-      } else if (k === '\x1b[C' || k === 'l') {
-        if (t && ui.collapsed.has(t.id)) setCollapsed(t.id, false);
-        else if (t?.children.length) ui.sel = Math.min(n - 1, ui.sel + 1);
-      } else if (k === ' ') t && setCollapsed(t.id, !ui.collapsed.has(t.id));
-      else if (k === '\r') (ui.overlay = 'detail'), (ui.scrolls.detail = 0);
-      else if (k === 'g') return goToAgent();
+    } else if (k === 'i' && ui.scope.level === 'all' && initDir && !findRoot(initDir)) {
+      const r = initRoot(initDir);
+      setScope({ level: 'project', root: r }, { tab: 'overview' });
+      flash(`created ${initDir}/.atf — a coordinator can now start a plan (atf plan new …)`, 'green');
+    } else if (v === 'overview' || v === 'tasks' || (v === 'plan' && multi())) {
+      const key = v;
+      const n = ui.rows[v].length;
+      const r = selectedRow();
+      if (UP.includes(k)) ui.sel[key] = Math.max(0, ui.sel[key] - 1);
+      else if (DOWN.includes(k)) ui.sel[key] = Math.min(n - 1, ui.sel[key] + 1);
+      else if (k === '\x1b[5~') ui.sel[key] = Math.max(0, ui.sel[key] - page);
+      else if (k === '\x1b[6~') ui.sel[key] = Math.min(n - 1, ui.sel[key] + page);
+      else if (k === '\x1b[H') ui.sel[key] = 0;
+      else if (k === 'G' || k === '\x1b[F') ui.sel[key] = n - 1;
+      else if (k === '\r') open();
+      else if (k === 'g') return goTo();
       else if (k === 's') return spawnAgent();
       else if (k === 'a') return approve();
-      else if (k === 'r') loadPlans();
+      else if (v === 'overview' && (k === '\x1b[C' || k === 'l')) r?.type === 'plan' && foldPlan(r, 'open');
+      else if (v === 'overview' && (k === '\x1b[D' || k === 'h')) {
+        if (r?.type === 'plan') foldPlan(r, 'close');
+        else if (r?.type === 'task') ui.sel.overview = Math.max(0, ui.rows.overview.findIndex((x) => x.type === 'plan' && x.key === r.key));
+      } else if (v === 'overview' && k === ' ') r?.type === 'plan' && foldPlan(r, 'cycle');
+      else if (v === 'overview' && k === 'z') {
+        const plans = scopePlans();
+        const anyOpen = plans.some((p) => foldOf(p) !== 'folded');
+        for (const p of plans) ui.fold.set(p.key, anyOpen ? 'folded' : 'live');
+      } else if (k === 'c') return closePlan(r?.type === 'item' || r?.type === 'task' || r?.type === 'plan' ? r : null);
+      else if (k === 'f') {
+        ui.showClosed = !ui.showClosed;
+        flash(ui.showClosed ? 'showing closed plans too' : 'showing active plans only', 'blue');
+      } else if (v === 'tasks' && (k === '\x1b[D' || k === 'h')) {
+        if (!fold(r, false) && r?.type === 'task') {
+          // jump to the parent task, or the plan header
+          const parent = r.st.tasks[r.task].parent;
+          const idx = ui.rows.tasks.findIndex((x) => (parent ? x.k === `${r.key}#${parent}` : x.type === 'plan' && x.key === r.key));
+          if (idx >= 0) ui.sel.tasks = idx;
+        }
+      } else if (v === 'tasks' && (k === '\x1b[C' || k === 'l')) fold(r, true);
+      else if (v === 'tasks' && k === ' ') fold(r);
+      if (r?.root && r?.plan) ui.focus = { root: r.root, plan: r.plan };
     } else {
-      // scrollable views
       const key = v;
       if (UP.includes(k)) ui.scrolls[key] = Math.max(0, (ui.scrolls[key] ?? 0) - 1);
       else if (DOWN.includes(k)) ui.scrolls[key] = (ui.scrolls[key] ?? 0) + 1;
       else if (k === '\x1b[5~') ui.scrolls[key] = Math.max(0, (ui.scrolls[key] ?? 0) - page);
       else if (k === '\x1b[6~') ui.scrolls[key] = (ui.scrolls[key] ?? 0) + page;
       else if (k === '\r' && v === 'detail') ui.overlay = null;
-      else if (v === 'detail' && k === 'g') return goToAgent();
+      else if (v === 'detail' && k === 'g') return goTo();
       else if (v === 'detail' && k === 's') return spawnAgent();
       else if (v === 'detail' && k === 'a') return approve();
+      else if (k === 'A') setScope({ level: 'all' });
     }
     draw();
   }
+
+  // ---------- start ----------
+  if (initialRoot && start !== 'overview-all') {
+    const plan = pickPlan(initialRoot);
+    // open the plan only if it is still open; a project with only closed plans starts at project scope
+    if (plan && isOpenStatus(cachedPlan(initialRoot, plan))) setScope({ level: 'plan', root: initialRoot, plan }, { tab: 'tasks' });
+    else setScope({ level: 'project', root: initialRoot }, { tab: 'overview' });
+  } else setScope({ level: 'all' }, { tab: 'overview' });
+  if (initialRoot) ui.focus = ui.focus || { root: initialRoot, plan: pickPlan(initialRoot) };
 
   out.write(`${ESC}?1049h${ESC}?25l${ESC}2J`);
   process.on('SIGTERM', quit);
@@ -936,24 +1166,17 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (d) => {
-    // split bursts of keys, keeping escape sequences together
     const keys = d.match(/\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-Za-z]|\x1b|[\s\S]/g) || [];
     for (const k of keys) onKey(k);
   });
 
-  loadPlans();
-  watchAll();
-  if (root && inHerdr() && !hookNotifies) sync(root);
-  if (ui.scope === 'all' && inHerdr()) discoverRoots();
-  for (const s of ui.plans) ui.lastSeqSeen.set(s.id, s.last_seq);
+  if (ui.scope.level === 'all' && inHerdr()) discoverRoots();
+  for (const p of scopePlans()) ui.lastSeq.set(p.key, p.st.last_seq);
+  if (inHerdr()) for (const r of new Set(scopePlans().map((p) => p.root))) if (!hasHook(r)) sync(r);
   draw();
   refreshAgents();
   setInterval(refreshAgents, 3000);
-  // agents go idle after their last write (no hook fires then): sweep periodically too
-  if (inHerdr()) setInterval(() => root && lifecycleSweep(root), 20_000);
-  setInterval(() => {
-    if (root && listPlanIds(root).length !== ui.plans.length) loadPlans(); // plan created/removed
-    watchAll();
-    draw(); // refresh relative times / flash expiry
-  }, 2000);
+  setInterval(poll, 1000);
+  // agents go idle after their last write (no hook fires then): sweep projects in scope
+  if (inHerdr()) setInterval(() => new Set(scopePlans().map((p) => p.root)).forEach((r) => lifecycleSweep(r)), 20_000);
 }

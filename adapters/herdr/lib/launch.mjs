@@ -50,11 +50,43 @@ const readJson = (f, d = {}) => {
     return d;
   }
 };
-const writeJson = (f, v) => fs.writeFileSync(path.join(stateDir(), f), JSON.stringify(v, null, 2));
+const writeJson = (f, v) => {
+  const p = path.join(stateDir(), f);
+  const tmp = `${p}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(v, null, 2));
+  fs.renameSync(tmp, p); // atomic: readers never see a half-written file
+};
 /** Agents launched by ATF (only these are ever closed or relaunched automatically). */
 const regKey = (root, name) => `${root}#${name}`;
 export const readRegistry = () => readJson('agents.json');
-export const writeRegistry = (r) => writeJson('agents.json', r);
+/**
+ * Read-modify-write of the agent registry under a lock, with a fresh read: parallel
+ * spawns and sweeps each change their own entries without overwriting each other's.
+ */
+export function updateRegistry(fn) {
+  const lock = path.join(stateDir(), 'agents.lock');
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      fs.mkdirSync(lock);
+      break;
+    } catch {
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > 10_000) fs.rmSync(lock, { recursive: true, force: true });
+      } catch {}
+      if (Date.now() - t0 > 10_000) break; // give up waiting rather than block an agent
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  try {
+    const reg = readRegistry();
+    fn(reg);
+    writeJson('agents.json', reg);
+    return reg;
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
 
 // ---------- placement ----------
 /**
@@ -183,6 +215,11 @@ export function launchAgent({ root, planId, taskId, name, kind, refPane, directi
     herdr(['pane', 'close', pane]);
     throw new Error(`herdr could not start ${kind} agent "${name}"`);
   }
+  // register before anything writes to the plan: hooks fired by the assignment below
+  // must already know this agent was just launched (no duplicate kickoff nudge)
+  updateRegistry((reg) => {
+    reg[regKey(root, name)] = { name, kind, root, plan: planId, task: target.id, pane, socket: currentSocket(), launchedAt: Date.now(), idleSince: null };
+  });
   if (assign && target.assignee !== name && !(target.owner === name && !isPackage)) {
     transact(root, planId, { id: process.env.ATF_ACTOR || 'coordinator', role: 'coordinator', harness: 'herdr' }, () => [
       { type: 'task.assigned', task: target.id, data: { assignee: name } },
@@ -191,10 +228,6 @@ export function launchAgent({ root, planId, taskId, name, kind, refPane, directi
   const fresh = loadPlan(root, planId);
   herdr(['agent', 'prompt', name, buildPrompt({ s: fresh, t: fresh.tasks[leaf.id], name, mode, pkg: isPackage ? fresh.tasks[target.id] : null, kindCfg })]);
   recordSession(root, planId, [leaf.id], name, kind);
-
-  const reg = readRegistry();
-  reg[regKey(root, name)] = { name, kind, root, plan: planId, task: target.id, pane, socket: currentSocket(), launchedAt: Date.now(), idleSince: null };
-  writeRegistry(reg);
   return { name, pane, mode, kind, leaf: leaf.id, reason: lp.reason };
 }
 
@@ -240,7 +273,8 @@ export function lifecycleSweep(root) {
 function sweepLocked(root) {
   const actions = [];
   let pending = false;
-  const reg = readRegistry();
+  const reg = readRegistry(); // snapshot; changes are written back per entry at the end
+  const touched = new Set();
   const nudges = readJson('nudges.json');
   const live = liveAgents();
   const now = Date.now();
@@ -252,6 +286,7 @@ function sweepLocked(root) {
       if (!sameServer(actor)) continue; // agents of another herdr session are not ours to manage
       let rec = reg[regKey(root, actor.id)];
       if (rec?.socket && currentSocket() && rec.socket !== currentSocket()) rec = undefined;
+      if (rec) touched.add(regKey(root, actor.id));
       const agent = live.get(actor.id);
       const role = actor.role === 'coordinator' ? 'coordinator' : 'subagent';
       const att = attentionFor(s, actor.id, role);
@@ -314,7 +349,7 @@ function sweepLocked(root) {
       try {
         const refPane = Object.values(reg).find((r) => r.pane && r.root === root && live.has(r.name))?.pane || coordinatorPane(s, live);
         const r = launchAgent({ root, planId: s.id, taskId: pkgId && first.ready && !first.assignee ? pkgId : first.id, name: actor.id, kind: rec.kind, refPane, assign: false });
-        Object.assign(reg, readRegistry()); // launchAgent updated the registry
+        touched.delete(regKey(root, actor.id)); // launchAgent wrote the fresh entry itself
         actions.push(`relaunched ${actor.id} for ${r.leaf} (${r.mode}: ${r.reason})`);
         pending = true;
       } catch (e) {
@@ -322,7 +357,13 @@ function sweepLocked(root) {
       }
     }
   }
-  writeRegistry({ ...readRegistry(), ...reg });
+  updateRegistry((fresh) => {
+    for (const k of touched) {
+      if (!fresh[k] || !reg[k]) continue;
+      if (fresh[k].launchedAt !== reg[k].launchedAt) continue; // relaunched meanwhile: keep the newer entry
+      for (const f of ['idleSince', 'pane', 'closedAt']) fresh[k][f] = reg[k][f];
+    }
+  });
   writeJson('nudges.json', nudges);
   return { actions, pending };
 }

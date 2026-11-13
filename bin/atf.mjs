@@ -93,7 +93,7 @@ Global flags
 `;
 
 // ---------- args ----------
-const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package']);
+const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed']);
 const MULTI = new Set(['accept', 'dep', 'label']);
 const SHORT = { m: 'message', n: 'limit', h: 'help', j: 'json' };
 
