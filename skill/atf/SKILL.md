@@ -71,12 +71,16 @@ For each task:
 7. If blocked on a question (no `--on`): write a checkpoint first, then block, and stop
    working on that task. When the coordinator answers with a note, `atf wait` reports
    the task as `answered`. Meanwhile continue with other ready tasks.
-8. **Needs the human?** If finishing your task requires the human to test or check
+8. **Started early?** If your task depends on unfinished tasks and you were told to start
+   early (`atf start <id> --early`), do only what does not need them. Then write a
+   checkpoint and `atf block <id> --on <deps> -m "<what you need>"`; you will be woken
+   (or resumed) when they are done.
+9. **Needs the human?** If finishing your task requires the human to test or check
    something (try the UI, run it on their machine, judge a result), send it to review
    for them, with exact steps: `atf review T3 -m "please test: 1. … 2. … expected: …" --by human`.
    The coordinator will not approve it; the human's verdict comes back as approval or
    change requests.
-9. **Changes requested**: when `atf wait` reports a task as `changes` (or your prompt says
+10. **Changes requested**: when `atf wait` reports a task as `changes` (or your prompt says
    changes were requested), the coordinator sent it back from review. Run `atf show <id>`:
    the feedback is listed under "changes requested". `atf start <id>`, address **every**
    point, record how in a note (`atf note <id> "1. … 2. …"`), and send it to review again
@@ -128,6 +132,13 @@ instead of your transcript, so make it self-contained.
    it automatically. Other subagent tools are fine only for quick work **outside** the
    plan, such as a one-off exploration question whose answer you need right now and
    that is not a task.
+   **Starting a dependent task early**: a task waiting on unfinished dependencies is not
+   ready, and `spawn`/`start` refuse it. If a meaningful part of it can be done without
+   them (e.g. tests or scaffolding against an agreed interface), start it early:
+   `atf-herdr spawn T5 --early` (or `atf start T5 --early`). The agent does what it can,
+   then blocks `--on` the dependency with a checkpoint and is resumed when it is done.
+   If the dependency is not real, remove it instead: `atf edit T5 --dep T2` keeps only T2,
+   `atf edit T5 --dep ''` removes all.
    Delegate **work packages, not loose lists**: when one agent should do several
    related tasks, put them under a parent task and assign the parent
    (`atf assign T2 backend`). The subtree is then visibly that agent's package, other agents

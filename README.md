@@ -152,6 +152,7 @@ pi                                           # coordinator (skill installed: `at
 atf-herdr spawn T1 --name worker-1           # pane + pi + kickoff prompt for task T1
 atf-herdr spawn T2 --name backend            # T2 is a parent task: a whole work package
 atf-herdr spawn T3 --agent reviewer           # run it as a named pi agent definition
+atf-herdr spawn T5 --early                    # before its dependencies are done (then blocks --on them)
 atf-herdr spawn T4 --name worker-2 --kind claude
 ```
 

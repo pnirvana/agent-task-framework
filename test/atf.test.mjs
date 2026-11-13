@@ -476,3 +476,21 @@ test('reviews: --by human tasks are not for the coordinator; feedback drafts sub
   const r = run(['wait', '--timeout', '2000']);
   assert.ok(r.events.some((e) => e.type === 'plan.review'), 'coordinator hears about the review once');
 });
+
+test('start --early: before dependencies, then block --on and resume', () => {
+  const { run, runFail } = sandbox();
+  run(['add', 'api']); // T1
+  run(['add', 'client', '--dep', 'T1']); // T2
+  const w = { ATF_ACTOR: 'w', ATF_ROLE: 'subagent' };
+  assert.match(runFail(['start', 'T2'], w).error, /--early/);
+  run(['start', 'T2', '--early'], w);
+  const t = run(['show', 'T2']);
+  assert.equal(t.status, 'in_progress');
+  assert.match(t.last_message, /started early: T1/);
+  run(['block', 'T2', '--on', 'T1', '-m', 'needs the api'], w);
+  run(['start', 'T1']);
+  run(['done', 'T1', '-m', 'ok']);
+  assert.deepEqual(run(['wait', '--timeout', '2000'], w).attention, [{ task: 'T2', reason: 'unblocked' }]);
+  run(['edit', 'T2', '--dep', '']);
+  assert.deepEqual(run(['show', 'T2']).deps, [], "--dep '' removes all dependencies");
+});

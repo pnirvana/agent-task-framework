@@ -71,6 +71,7 @@ Then `herdr server reload-config`.
    atf-herdr spawn T3 --name worker-1            # pi, placed in the tab's balanced grid
    atf-herdr spawn T2 --name backend             # a parent task: the whole work package
    atf-herdr spawn T4 --agent reviewer           # run it as a named agent definition
+   atf-herdr spawn T7 --early                    # start before its dependencies are done
    atf-herdr spawn T6 --kind claude              # another agent kind
    atf-herdr spawn T5 --dry-run                  # show placement mode, args, resume decision
    ```

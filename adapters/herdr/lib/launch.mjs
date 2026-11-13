@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TERMINAL, attentionFor, launchPlan } from '../../../src/core.mjs';
-import { listPlanIds, loadPlan, transact, skillInstalled } from '../../../src/store.mjs';
+import { listPlanIds, loadPlan, transact, skillInstalled, resolveActor } from '../../../src/store.mjs';
 import { herdr, pluginConfig, sameServer, currentSocket, liveAgents, boardPaneIds } from './herdr.mjs';
 import { chooseSplit, tabLayout, withPlacementLock } from './layout.mjs';
 import { resolveAgentDef, piArgsForAgent } from './agents.mjs';
@@ -142,13 +142,19 @@ function situation(s, t) {
   return null;
 }
 
-export function buildPrompt({ s, t, name, mode, pkg, kindCfg }) {
+export function buildPrompt({ s, t, name, mode, pkg, kindCfg, early = false }) {
   const skill = kindCfg.nativeSkill || skillInstalled() ? 'Follow the atf skill (load it if it is not loaded yet).' : `First read ${SKILL_FILE} and follow its subagent section.`;
   const why = situation(s, t);
   if (mode === 'resume')
     return (
       `[ATF] You are resumed in your earlier session for ${t.id} (${t.title})${why ? `: ${why}` : '.'} ` +
       `Run \`atf show ${t.id}\` to see what changed, then \`atf start ${t.id}\` and continue where you left off. ${skill}`
+    );
+  if (early && t.waiting_on?.length)
+    return (
+      `You are subagent "${name}". Your ATF task is ${t.id}: ${t.title}. It is started EARLY: it depends on ${t.waiting_on.join(', ')}, which ${t.waiting_on.length > 1 ? 'are' : 'is'} not done yet. ` +
+      `Run \`atf show ${t.id}\`, then \`atf start ${t.id} --early\` and do everything that does not need ${t.waiting_on.join(', ')}. ` +
+      `When you reach what does, write a checkpoint (\`atf note ${t.id} --kind checkpoint "done: … left: …"\`) and run \`atf block ${t.id} --on ${t.waiting_on.join(',')} -m "<what you need>"\`; you will be resumed when it is done. ${skill}`
     );
   const history = t.started_at
     ? ` This task was worked on before by another session: \`atf show ${t.id}\` has its checkpoint, notes and earlier result${why ? `, and ${why}` : '.'} Continue from there instead of starting over.`
@@ -184,7 +190,7 @@ function recordSession(root, planId, taskIds, name, kind) {
  * Start an agent for `taskId` (a leaf or a work package). Mode comes from ATF's
  * launchPlan unless forced. Returns {name, pane, mode, kind}.
  */
-export function launchAgent({ root, planId, taskId, name, kind, agent, refPane, direction, force, extraArgs = [], assign = true }) {
+export function launchAgent({ root, planId, taskId, name, kind, agent, early = false, refPane, direction, force, extraArgs = [], assign = true }) {
   const s = loadPlan(root, planId);
   const target = s.tasks[taskId];
   if (!target) throw new Error(`unknown task ${taskId}`);
@@ -239,12 +245,14 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, refPane, 
     reg[regKey(root, name)] = { name, kind, agent, root, plan: planId, task: target.id, pane, socket: currentSocket(), launchedAt: Date.now(), idleSince: null };
   });
   if (assign && target.assignee !== name && !(target.owner === name && !isPackage)) {
-    transact(root, planId, { id: process.env.ATF_ACTOR || 'coordinator', role: 'coordinator', harness: 'herdr' }, () => [
+    // write as whoever called spawn, with the same identity the atf CLI uses for them
+    // (ATF_ACTOR, else the user name), so the coordinator appears under one name
+    transact(root, planId, { ...resolveActor(), role: 'coordinator' }, () => [
       { type: 'task.assigned', task: target.id, data: { assignee: name } },
     ]);
   }
   const fresh = loadPlan(root, planId);
-  herdr(['agent', 'prompt', name, buildPrompt({ s: fresh, t: fresh.tasks[leaf.id], name, mode, pkg: isPackage ? fresh.tasks[target.id] : null, kindCfg })]);
+  herdr(['agent', 'prompt', name, buildPrompt({ s: fresh, t: fresh.tasks[leaf.id], name, mode, pkg: isPackage ? fresh.tasks[target.id] : null, kindCfg, early })]);
   recordSession(root, planId, [leaf.id], name, kind);
   return { name, pane, mode, kind, agent, leaf: leaf.id, reason: lp.reason };
 }

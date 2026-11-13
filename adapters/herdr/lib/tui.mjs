@@ -1017,7 +1017,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const t = r.st.tasks[r.task];
     const isPackage = t.children.length > 0;
     if (isPackage && TERMINAL.has(effStatus(t))) return flash(`${t.id} is already ${effStatus(t)}`);
-    if (!isPackage && !t.ready) return flash(`${t.id} is not ready (${t.status}${t.waiting_on.length ? ', waits on ' + t.waiting_on.join(',') : ''})`);
+    if (!isPackage && !t.ready) return flash(`${t.id} is not ready (${t.status}${t.waiting_on.length ? `, waits on ${t.waiting_on.join(',')}; to start it early: atf-herdr spawn ${t.id} --early` : ''})`);
     if (!spawnCmd) return flash('spawn unavailable');
     flash(`spawning agent for ${isPackage ? 'package ' : ''}${t.id}…`, 'blue');
     const args = [...spawnCmd, 'spawn', t.id, '--plan', r.plan];

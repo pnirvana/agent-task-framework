@@ -66,7 +66,9 @@ Tasks (coordinator)
 Tasks (worker)
   atf next [--package] [-m msg]         start next ready task: assigned to you, then inside your
                                         work packages, then unowned (--package: never unowned)
-  atf start <task> [-m msg]             -> in_progress (claims it if unassigned)
+  atf start <task> [-m msg] [--early]   -> in_progress (claims it if unassigned); --early:
+                                        before its dependencies are done (do what you can,
+                                        then block --on them)
   atf progress <task> <msg> [--pct N]   heartbeat / milestone
   atf note <task> <msg> [--kind ${NOTE_KINDS.join('|')}]
   atf artifact <task> <ref> [--kind ${ARTIFACT_KINDS.join('|')}] [--desc D]
@@ -121,7 +123,7 @@ Global flags
 `;
 
 // ---------- args ----------
-const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh']);
+const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early']);
 const MULTI = new Set(['accept', 'dep', 'label']);
 const SHORT = { m: 'message', n: 'limit', h: 'help', j: 'json' };
 
@@ -444,7 +446,8 @@ function statusCmd(target, msgRequired) {
       const t = requireTask(st, pos[0]);
       if (!FLAGS.force) {
         if (!canTransition(t.status, target)) die(`cannot move ${t.id} from ${t.status} to ${target} (use --force)`);
-        if (target === 'in_progress' && t.waiting_on.length) die(`${t.id} waits on ${t.waiting_on.join(', ')} (use --force)`);
+        if (target === 'in_progress' && t.waiting_on.length && !FLAGS.early)
+          die(`${t.id} waits on ${t.waiting_on.join(', ')} (--early starts it anyway, for work that does not need them yet)`);
         if (target === 'in_progress' && t.children.length) die(`${t.id} has subtasks; start those instead (use --force)`);
         if (t.owner && t.owner !== actor.id && actor.role !== 'coordinator' && target !== 'todo')
           die(`${t.id} is ${t.assignee ? 'assigned to' : 'in a work package owned by'} ${t.owner} (use --force)`);
@@ -456,7 +459,8 @@ function statusCmd(target, msgRequired) {
         if (target !== 'review') die('--by only applies to review');
         evs.push({ type: 'task.updated', task: t.id, data: { reviewer: FLAGS.by === '-' ? null : FLAGS.by } });
       }
-      const data = { status: target, ...(msg ? { message: msg } : {}) };
+      const early = target === 'in_progress' && FLAGS.early && t.waiting_on.length;
+      const data = { status: target, ...(msg || early ? { message: msg || `started early: ${t.waiting_on.join(', ')} not done yet` } : {}), ...(early ? { early: t.waiting_on } : {}) };
       if (FLAGS.on) {
         if (target !== 'blocked') die('--on only applies to block');
         data.on = FLAGS.on.split(',').map((x) => x.trim()).filter(Boolean);

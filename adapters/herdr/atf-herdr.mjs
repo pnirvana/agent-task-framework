@@ -20,7 +20,7 @@ const PLUGIN_ID = 'atf.herdr';
 const HELP = `atf-herdr — run and watch ATF agents inside herdr
 
   atf-herdr spawn <task> [--name NAME] [--kind pi] [--direction right|down]
-                  [--agent DEF] [--target-pane ID | --workspace WS] [--fresh|--resume]
+                  [--agent DEF] [--early] [--target-pane ID | --workspace WS] [--fresh|--resume]
                   [--dry-run] [-- <agent args>]
       start an agent for a task or work package: place a pane (largest pane of the
       tab, split along its long side; an "agents" tab when full), resume the task's
@@ -52,7 +52,7 @@ const argv = process.argv.slice(2);
 const sep = argv.indexOf('--');
 const agentArgs = sep >= 0 ? argv.slice(sep + 1) : [];
 const main = sep >= 0 ? argv.slice(0, sep) : argv;
-const BOOL = new Set(['dry-run', 'fresh', 'resume']);
+const BOOL = new Set(['dry-run', 'fresh', 'resume', 'early']);
 const flags = {};
 const pos = [];
 for (let i = 0; i < main.length; i++) {
@@ -105,7 +105,8 @@ function spawnAgent() {
   const eff = t.rollup_status ?? t.status;
   if (['done', 'cancelled'].includes(eff)) fail(`${t.id} is already ${eff}`);
   // A parent task is a work package: the agent owns the whole subtree and works through it.
-  if (!t.children.length && t.status === 'todo' && !t.ready) fail(`${t.id} is not ready (waits on ${t.waiting_on.join(', ')})`);
+  if (!t.children.length && t.status === 'todo' && !t.ready && !flags.early)
+    fail(`${t.id} is not ready (waits on ${t.waiting_on.join(', ')}); --early starts it anyway for work that does not need them yet`);
   const agentName = flags.agent || t.agent || [...t.path].reverse().map((id) => s.tasks[id].agent).find(Boolean) || null;
   const name = (flags.name || t.assignee || (agentName ? `${agentName}-${t.id}` : `w-${t.id}`))
     .toLowerCase()
@@ -143,6 +144,7 @@ function spawnAgent() {
       name,
       kind: flags.kind,
       agent: agentName,
+      early: !!flags.early,
       refPane: flags['target-pane'] || workspacePane(flags.workspace) || process.env.HERDR_PANE_ID,
       direction: flags.direction,
       force,
