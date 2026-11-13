@@ -29,13 +29,67 @@ plans, break them into tasks, and report progress, in a format any frontend can 
 | `src/store.mjs` | file store: root discovery, locking, transactions, actor identity |
 | `bin/atf.mjs` | reference CLI (`bin/atf` is a PATH shim) |
 | `skill/atf/SKILL.md` | agent instructions for coordinator and subagent roles (Agent Skills format) |
-| `adapters/herdr/` | herdr plugin: board TUI, pane labels, sidebar progress, notifications, spawn |
+| `adapters/herdr/` | herdr plugin: board TUI, pane labels, sidebar progress, notifications, spawn, agent lifecycle |
 | `test/` | `npm test` (fold semantics, transitions, a 12-way concurrent-claim race, wait) |
+
+## Install
+
+No build step and no npm dependencies; Node.js ≥ 18 and `git` are enough for the core.
+herdr and pi are only needed for the herdr plugin and agents.
+
+```sh
+# 1. clone
+cd ~/Dev
+git clone https://github.com/pnirvana/agent-task-framework.git
+cd agent-task-framework
+npm test                       # optional sanity check
+
+# 2. put `atf` and `atf-herdr` on PATH (pick one)
+npm link
+# or in ~/.zshrc:  export PATH="$HOME/Dev/agent-task-framework/bin:$PATH"
+
+# 3. herdr plugin (board, pane labels, notifications, agent lifecycle)
+herdr plugin link ~/Dev/agent-task-framework/adapters/herdr
+```
+
+4. Keybindings in `~/.config/herdr/config.toml`, then `herdr server reload-config`:
+
+```toml
+[[keys.command]]
+key = "prefix+t"
+type = "plugin_action"
+command = "atf.herdr.board"
+description = "ATF: task board (this project)"
+
+[[keys.command]]
+key = "prefix+alt+t"
+type = "plugin_action"
+command = "atf.herdr.board-popup"
+description = "ATF: overview of all plans"
+```
+
+5. Start the coordinator with the skill: `pi --skill ~/Dev/agent-task-framework/skill/atf`
+   (subagents launched by `atf-herdr spawn` get it automatically).
+
+6. Once per project:
+
+```sh
+cd ~/Dev/myproject
+atf init                       # creates .atf/ and registers the project
+atf-herdr enable-sync          # pane labels, notifications, agent lifecycle
+```
+
+(or press `prefix+t` in a pane without a project and `i` to create one).
+
+Machine-local state starts empty on a new machine and fills itself: the project registry
+(`~/.config/atf/roots.json`), plugin state (`~/.local/state/herdr/plugins/atf.herdr/`)
+and optional plugin config (`$(herdr plugin config-dir atf.herdr)/config.json`; defaults:
+pi agents, ephemeral lifecycle, full-height board). Plans live in each project's `.atf/`
+and move with the project only if you copy or commit that directory.
 
 ## Quick start
 
 ```sh
-npm link                     # or: export PATH="$PWD/bin:$PATH"
 cd ~/code/myproject
 atf init
 atf plan new "Add OAuth login" --goal "Users can sign in with GitHub"
@@ -118,3 +172,7 @@ stalled agents, and jumps into any plan, task or agent (see `adapters/herdr/READ
 | `ATF_CTX_*` | extra harness context recorded on every event |
 | `ATF_REGISTRY` | project registry file (default `~/.config/atf/roots.json`); `ATF_NO_REGISTRY=1` disables updates |
 | `ATF_LIFECYCLE` | set by launchers: `ephemeral` makes `atf wait` tell idle agents to end their turn |
+
+## License
+
+MIT, see [LICENSE](LICENSE).
