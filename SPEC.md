@@ -87,7 +87,7 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 ### Task events
 | type | data | notes |
 |------|------|-------|
-| `task.created`  | `{title, description?, acceptance?: string[], deps?: id[], parent?: id, labels?: string[], priority?: number, assignee?: string, meta?: object}` | |
+| `task.created`  | `{title, description?, acceptance?: string[], deps?: id[], parent?: id, labels?: string[], priority?: number, assignee?: string, agent?: string, meta?: object}` | `agent`: name of the agent definition to run the task with (opaque; resolved by the launcher, e.g. a pi agent named `reviewer`) |
 | `task.updated`  | any subset of the definition fields | lists are replaced, not merged |
 | `task.assigned` | `{assignee: string\|null}` | `null` = unassign |
 | `task.status`   | `{status, message?, on?: id[]}` | `message` on `done` is the task's **result summary**; `on` with `blocked`: tasks it is blocked on |

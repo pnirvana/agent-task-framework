@@ -333,3 +333,41 @@ test('herdr layout: planRebuild recovers the split tree from pane rectangles', a
   }
   assert.throws(() => planRebuild([P('a', 0, 0, 10, 10), P('b', 5, 5, 10, 10)]), /clean split tree/);
 });
+
+test('task agent definition: stored, editable, clearable', () => {
+  const { run } = sandbox();
+  run(['add', 'review it', '--agent', 'reviewer']);
+  assert.equal(run(['show', 'T1']).agent, 'reviewer');
+  run(['edit', 'T1', '--agent', 'scout']);
+  assert.equal(run(['show', 'T1']).agent, 'scout');
+  run(['edit', 'T1', '--agent', '-']);
+  assert.equal(run(['show', 'T1']).agent, null);
+});
+
+test('herdr agents: both definition formats, project overrides user, bash added for atf', async () => {
+  const { discoverAgents, piArgsForAgent } = await import('../adapters/herdr/lib/agents.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-agents-'));
+  const user = path.join(dir, 'user');
+  const proj = path.join(dir, 'proj');
+  fs.mkdirSync(path.join(user, 'agents'), { recursive: true });
+  fs.mkdirSync(path.join(proj, '.pi', 'agents'), { recursive: true });
+  fs.writeFileSync(path.join(user, 'agents', 'reviewer.md'), '---\nname: reviewer\ndescription: user reviewer\ntools: read, grep\n---\nUser prompt.\n');
+  fs.writeFileSync(path.join(user, 'agents.json'), JSON.stringify({ agents: [{ id: 'explorer', description: 'json agent', tools: ['read'], model: 'p/m' }] }));
+  fs.writeFileSync(path.join(proj, '.pi', 'agents', 'reviewer.md'), '---\nname: reviewer\ndescription: project reviewer\ntools: [read, grep, ls]\nmodel: p/x\n---\nProject prompt.\n');
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = user;
+  try {
+    const defs = discoverAgents(proj);
+    assert.equal(defs.get('reviewer').description, 'project reviewer');
+    assert.deepEqual(defs.get('reviewer').tools, ['read', 'grep', 'ls']);
+    assert.equal(defs.get('explorer').model, 'p/m');
+    const { args, notes } = piArgsForAgent(defs.get('reviewer'), dir);
+    assert.deepEqual(args.slice(0, 4), ['--model', 'p/x', '--tools', 'read,grep,ls,bash']);
+    assert.equal(args[4], '--append-system-prompt');
+    assert.equal(fs.readFileSync(args[5], 'utf8'), 'Project prompt.');
+    assert.equal(notes.length, 1);
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+  }
+});

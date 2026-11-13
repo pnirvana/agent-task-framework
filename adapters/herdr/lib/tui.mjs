@@ -387,6 +387,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (t.deps.length) meta.push([`deps ${t.deps.map((d) => `${d}${effStatus(st.tasks[d] || {}) === 'done' ? '✓' : ''}`).join(' ')}  `, 'dim']);
     if (t.blocked_on.length) meta.push([`blocked on ${t.blocked_on.join(',')}${t.can_resume ? ' (done: can resume)' : ''}  `, t.can_resume ? 'green' : 'dim']);
     if (t.labels.length) meta.push([`#${t.labels.join(' #')}  `, 'magenta']);
+    if (t.agent) meta.push([`agent ${t.agent}  `, 'magenta']);
     meta.push([`updated ${ago(t.updated_at)} ago`, 'dim']);
     L.push(meta);
     if (a?.stale) L.push([['⚠ agent is idle but the task is still in progress: it may have stopped without reporting', 'red']]);

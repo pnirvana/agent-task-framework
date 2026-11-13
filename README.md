@@ -130,14 +130,17 @@ atf status                    # board + "needs attention" + active agents
 pi                                           # coordinator (skill installed: `atf skill install`)
 atf-herdr spawn T1 --name worker-1           # pane + pi + kickoff prompt for task T1
 atf-herdr spawn T2 --name backend            # T2 is a parent task: a whole work package
-atf-herdr spawn T3 --name worker-2 --kind claude
+atf-herdr spawn T3 --agent reviewer           # run it as a named pi agent definition
+atf-herdr spawn T4 --name worker-2 --kind claude
 ```
 
 `spawn` places a pane next to the others (balanced grid, overflow into an `agents` tab),
 starts the agent with `ATF_DIR/ATF_PLAN/ATF_ACTOR/ATF_ROLE` and `atf` on PATH, assigns the
 task or package and sends the kickoff prompt. With `atf skill install` agents discover the
 skill themselves; otherwise pi gets `--skill` and other kinds are told to read
-`skill/atf/SKILL.md`. Agents launched this way are ephemeral by default: closed when idle
+`skill/atf/SKILL.md`. `--agent NAME` (or `atf add … --agent NAME` on the task) runs it as one
+of your pi agent definitions (`~/.pi/agent/agents/*.md`, `.pi/agents/*.md`, `agents.json`;
+list them with `atf-herdr agents`). Agents launched this way are ephemeral by default: closed when idle
 with nothing to do, and relaunched (resuming their session when they come back to a task
 they already worked on) when work appears. Details: [adapters/herdr/README.md](adapters/herdr/README.md).
 

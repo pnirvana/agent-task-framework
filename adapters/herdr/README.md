@@ -69,7 +69,8 @@ Then `herdr server reload-config`.
    ```sh
    atf-herdr spawn T3 --name worker-1            # pi, placed in the tab's balanced grid
    atf-herdr spawn T2 --name backend             # a parent task: the whole work package
-   atf-herdr spawn T4 --kind claude              # another agent kind
+   atf-herdr spawn T4 --agent reviewer           # run it as a named agent definition
+   atf-herdr spawn T6 --kind claude              # another agent kind
    atf-herdr spawn T5 --dry-run                  # show placement mode, args, resume decision
    ```
 
@@ -192,6 +193,32 @@ then discovers it itself:
 The session reference comes from herdr (`agent_session` of the agent's pane), so it works
 for any agent kind herdr integrates. A kind without `resume` always starts fresh.
 The pi entry is verified; the claude/codex resume arguments are untested defaults.
+
+### Named agent definitions
+
+Tasks can run as a named **agent definition** (role, model, tools, system prompt) instead
+of a generic pi. Definitions are read from the places pi's agent tooling uses:
+
+- pi's subagent extension: `~/.pi/agent/agents/*.md` and the nearest project
+  `.pi/agents/*.md` (frontmatter `name`, `description`, `tools`, `model`; the body is the
+  system prompt)
+- the pi-agent-handoff extension: `~/.pi/agent/agents.json`, `<project>/agents.json`,
+  `<project>/.pi/agents.json`
+
+Project definitions override user ones with the same name. `atf-herdr agents` lists them.
+
+```sh
+atf add "Review the auth module" --agent reviewer   # record the definition on the task
+atf-herdr spawn T7                                   # uses the task's definition
+atf-herdr spawn T8 --agent scout                     # or choose one explicitly
+```
+
+The agent is started as pi with the definition's `--model`, `--tools` and system prompt
+(`--append-system-prompt`), named `<definition>-<task>` (e.g. `reviewer-t7`). A parent
+task's definition applies to its whole package; relaunches keep the definition. ATF
+agents report through the `atf` CLI, so `bash` is added to a tool list that lacks it (a
+note is printed); the definition's prompt still sets its boundaries. Definitions are
+supported for pi agents.
 
 ### Pane layout for agents
 

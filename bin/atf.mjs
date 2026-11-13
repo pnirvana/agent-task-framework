@@ -48,6 +48,7 @@ Setup / plans
 Tasks (coordinator)
   atf add <title> [--desc D] [--accept A]... [--dep T1]... [--parent T1]
                   [--label L]... [--priority N] [--assign WHO] [--resume auto|resume|fresh]
+                  [--agent NAME]   agent definition to run the task with (e.g. reviewer)
   atf edit <task> [same flags as add; --dep/--accept/--label replace lists]
   atf assign <task> <who|->            assign / unassign. Assigning a parent task hands the
                                         whole subtree (work package) to that agent
@@ -226,6 +227,7 @@ function taskFieldsFromFlags(f, state, selfId) {
   if (f.desc !== undefined) d.description = f.desc;
   if (f.accept) d.acceptance = f.accept;
   if (f.label) d.labels = f.label.flatMap((l) => l.split(',')).map((s) => s.trim()).filter(Boolean);
+  if (f.agent !== undefined) d.agent = f.agent === '-' || f.agent === '' ? null : f.agent;
   if (f.resume !== undefined) {
     if (!RESUME_POLICIES.includes(f.resume)) die(`--resume must be one of ${RESUME_POLICIES.join(', ')}`);
     d.resume = f.resume;
@@ -346,6 +348,7 @@ function renderTask(t, state) {
   if (t.path.length) L.push(dim(breadcrumb(t, state) + ' ›'));
   L.push(`${bold(t.id)} ${badge(t.rollup_status ?? t.status)}  ${bold(t.title)}`);
   if (t.assignee) L.push(`assignee: ${cyan(t.assignee)}${t.children.length ? dim(' (owns this work package)') : ''}`);
+  if (t.agent) L.push(`agent:    ${magenta(t.agent)} ${dim('(agent definition to run it with)')}`);
   else if (t.owner) L.push(`owner:    ${cyan(t.owner)} ${dim(`(via package ${[...t.path].reverse().find((id) => state.tasks[id].assignee)})`)}`);
   if (t.children.length)
     L.push(`subtasks: ${t.children.map((id) => `${id}(${state.tasks[id].rollup_status ?? state.tasks[id].status}${state.tasks[id].owner && state.tasks[id].owner !== t.owner ? ' @' + state.tasks[id].owner : ''})`).join(', ')}`);

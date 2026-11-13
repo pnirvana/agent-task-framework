@@ -10,6 +10,7 @@ import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig, skillInsta
 import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isBoardPane } from './lib/herdr.mjs';
 import { sync, notifyForEvents } from './lib/sync.mjs';
 import { chooseBoardSplit, tabLayout, planRebuild, withPlacementLock } from './lib/layout.mjs';
+import { discoverAgents, resolveAgentDef, piArgsForAgent } from './lib/agents.mjs';
 import { agentKinds, launchAgent, lifecycle, lifecycleSweep, stateDir } from './lib/launch.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -19,7 +20,8 @@ const PLUGIN_ID = 'atf.herdr';
 const HELP = `atf-herdr — run and watch ATF agents inside herdr
 
   atf-herdr spawn <task> [--name NAME] [--kind pi] [--direction right|down]
-                  [--target-pane ID | --workspace WS] [--fresh|--resume] [--dry-run] [-- <agent args>]
+                  [--agent DEF] [--target-pane ID | --workspace WS] [--fresh|--resume]
+                  [--dry-run] [-- <agent args>]
       start an agent for a task or work package: place a pane (largest pane of the
       tab, split along its long side; an "agents" tab when full), resume the task's
       earlier session or start fresh (ATF decides; --fresh/--resume force), assign
@@ -29,6 +31,8 @@ const HELP = `atf-herdr — run and watch ATF agents inside herdr
                                relaunch/resume agents when work appears for them
   atf-herdr board              open the task board (toggle) for this project
   atf-herdr overview           open the overview of all known projects (popup)
+  atf-herdr agents             agent definitions spawn --agent can use (pi: ~/.pi/agent/agents/*.md,
+                               .pi/agents/*.md, agents.json); a task's --agent picks one by default
   atf-herdr discover           register ATF projects found in any herdr pane
   atf-herdr recover            repair an interrupted board rearrangement (parked panes)
   atf-herdr tui                run the board in the current terminal
@@ -102,7 +106,8 @@ function spawnAgent() {
   if (['done', 'cancelled'].includes(eff)) fail(`${t.id} is already ${eff}`);
   // A parent task is a work package: the agent owns the whole subtree and works through it.
   if (!t.children.length && t.status === 'todo' && !t.ready) fail(`${t.id} is not ready (waits on ${t.waiting_on.join(', ')})`);
-  const name = (flags.name || t.assignee || `w-${t.id}`)
+  const agentName = flags.agent || t.agent || [...t.path].reverse().map((id) => s.tasks[id].agent).find(Boolean) || null;
+  const name = (flags.name || t.assignee || (agentName ? `${agentName}-${t.id}` : `w-${t.id}`))
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, '-')
     .replace(/^[^a-z]+/, 'w-')
@@ -114,7 +119,15 @@ function spawnAgent() {
     const kind = flags.kind || pluginConfig().agent_kind || 'pi';
     const cfg = agentKinds()[kind] || {};
     const raw = ((force || lp.mode) === 'resume' ? cfg.resume : cfg.start) || [];
-    const used = skillInstalled() ? raw.filter((a, i) => a !== '{skill}' && raw[i + 1] !== '{skill}') : raw;
+    let used = skillInstalled() ? raw.filter((a, i) => a !== '{skill}' && raw[i + 1] !== '{skill}') : raw;
+    if (agentName) {
+      const def = resolveAgentDef(agentName, path.dirname(root));
+      if (!def) fail(`unknown agent definition "${agentName}" (see \`atf-herdr agents\`)`);
+      const r = piArgsForAgent(def, stateDir());
+      used = [...used, ...r.args];
+      for (const n of r.notes) process.stdout.write(`  note: ${n}\n`);
+      process.stdout.write(`  agent: ${agentName} (${def.source})\n`);
+    }
     process.stdout.write(
       `${t.id} → ${name} (${kind}): ${force || lp.mode} (${lp.reason})\n` +
         `  args: ${JSON.stringify(used)}${skillInstalled() ? '  (skill installed: discovered by the agent)' : ''}${lp.session ? `  session: ${lp.session.ref}` : ''}\n` +
@@ -129,6 +142,7 @@ function spawnAgent() {
       taskId: t.id,
       name,
       kind: flags.kind,
+      agent: agentName,
       refPane: flags['target-pane'] || workspacePane(flags.workspace) || process.env.HERDR_PANE_ID,
       direction: flags.direction,
       force,
@@ -136,7 +150,7 @@ function spawnAgent() {
     });
     sync(root);
     scheduleSweep(root, 20);
-    process.stdout.write(`${t.id} → ${r.name} (${r.kind}, ${r.mode}) in pane ${r.pane}\n`);
+    process.stdout.write(`${t.id} → ${r.name} (${r.kind}${r.agent ? `, agent ${r.agent}` : ''}, ${r.mode}) in pane ${r.pane}\n`);
   } catch (e) {
     fail(e.message);
   }
@@ -427,6 +441,19 @@ switch (pos[0]) {
     discoverRoots();
     openBoard('popup', { start: 'overview-all' }); // quick look: everything that needs you
     break;
+  case 'agents': {
+    // agent definitions spawn can use: atf-herdr spawn <task> --agent NAME
+    const cwd = flags.root ? path.dirname(flags.root) : resolveRoot({ optional: true }) ? path.dirname(resolveRoot({ optional: true })) : process.cwd();
+    const defs = [...discoverAgents(cwd).values()];
+    if (flags.json !== undefined || process.argv.includes('--json')) process.stdout.write(JSON.stringify(defs.map(({ systemPrompt, ...d }) => d), null, 2) + '\n');
+    else
+      process.stdout.write(
+        (defs.length
+          ? defs.map((d) => `${d.name.padEnd(16)} ${d.description}\n${' '.repeat(17)}${[d.model && `model ${d.model}`, d.tools?.length && `tools ${d.tools.join(',')}`, d.source].filter(Boolean).join(' · ')}`).join('\n')
+          : 'no agent definitions found (~/.pi/agent/agents/*.md, .pi/agents/*.md, agents.json)') + '\n',
+      );
+    break;
+  }
   case 'recover':
     process.stdout.write(recoverRebuild() ? 'recovered an interrupted board rearrangement\n' : 'nothing to recover\n');
     break;

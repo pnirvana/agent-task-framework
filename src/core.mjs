@@ -25,7 +25,7 @@ export function canTransition(from, to) {
   return from === to ? false : (TRANSITIONS[from] || []).includes(to);
 }
 
-const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume'];
+const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume', 'agent'];
 const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume'];
 
 function pick(obj, keys) {
@@ -49,6 +49,7 @@ function newTask(id, ev) {
     blocked_on: [],
     blocked_seq: null,
     resume: null, // per-task resume policy (overrides the plan's)
+    agent: null, // name of the agent definition to run this task with (opaque; launchers resolve it)
     checkpoint: null, // latest checkpoint note: where the work stands
     sessions: {}, // actor -> {kind, ref, ts}: opaque harness session references
     session: null, // latest session reference

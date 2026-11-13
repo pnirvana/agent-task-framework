@@ -1,6 +1,6 @@
 ---
 name: atf
-description: "Track plans and task progress with the `atf` CLI (Agent Task Framework). Use when you are a coordinator breaking work into subtasks for other agents, or a subagent assigned an ATF task (your prompt mentions a task id like T3, or $ATF_PLAN is set)."
+description: "Plan, delegate and track multi-agent work with the `atf` CLI (Agent Task Framework). Use when coordinating work that other agents should do (breaking it into tasks and delegating them: inside an ATF plan, delegate via ATF instead of other subagent tools), or when you are a subagent assigned an ATF task (your prompt mentions a task id like T3, or $ATF_PLAN is set)."
 ---
 
 # ATF: shared task board for multi-agent work
@@ -85,15 +85,26 @@ instead of your transcript, so make it self-contained.
    Declare every dependency that crosses packages (e.g. backend tests that check a page the
    frontend builds depend on that frontend task). Undeclared cross-package dependencies are
    the main cause of agents waiting on each other.
-3. Dispatch. Delegate **work packages, not loose lists**: when one agent should do several
+3. Dispatch. **Every task of a plan is delegated through ATF**, never through another
+   subagent mechanism (e.g. pi's `subagent` tool or agent handoffs): work started that way
+   is invisible to ATF (no status, no board, no review flow, no lifecycle). In herdr the
+   launcher is `atf-herdr spawn <task>`; it can run a task as a **named agent
+   definition**: `atf-herdr agents` lists them (pi agent definitions such as `reviewer`,
+   `scout`, `worker`), and `atf-herdr spawn T7 --agent reviewer` runs T7 with that
+   definition's model, tools and prompt. Record the choice on the task when you create it
+   (`atf add "Review auth" --agent reviewer`): spawning, the board and relaunches then use
+   it automatically. Other subagent tools are fine only for quick work **outside** the
+   plan, such as a one-off exploration question whose answer you need right now and
+   that is not a task.
+   Delegate **work packages, not loose lists**: when one agent should do several
    related tasks, put them under a parent task and assign the parent
    (`atf assign T2 backend`). The subtree is then visibly that agent's package, other agents
    cannot start its tasks, and progress rolls up per package. Assign single leaves only for
    one-off tasks. `atf list --ready` shows what can start now.
-   Launch subagents with `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR=<name>`, `ATF_ROLE=subagent` in
-   their environment (in herdr: `atf-herdr spawn T2 --name backend` does all of it, for a
-   package or a single task), and a prompt like
-   *"You are backend. You own ATF work package T2. Follow the atf skill."*
+   Outside herdr, launch subagents with `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR=<name>`,
+   `ATF_ROLE=subagent` in their environment and a prompt like *"You are backend. You own
+   ATF work package T2. Follow the atf skill."* (in herdr, `atf-herdr spawn T2 --name
+   backend` does all of it, for a package or a single task).
 4. Monitor without polling agents directly:
    - `atf wait --timeout 600000` returns as soon as something needs you: a task in review,
      a blocker without `--on`, a finished task, or your own ready work. It returns

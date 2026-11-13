@@ -12,6 +12,7 @@ import { TERMINAL, attentionFor, launchPlan } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, transact, skillInstalled } from '../../../src/store.mjs';
 import { herdr, pluginConfig, sameServer, currentSocket, liveAgents, boardPaneIds } from './herdr.mjs';
 import { chooseSplit, tabLayout, withPlacementLock } from './layout.mjs';
+import { resolveAgentDef, piArgsForAgent } from './agents.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ATF_BIN = path.resolve(HERE, '../../../bin');
@@ -179,7 +180,7 @@ function recordSession(root, planId, taskIds, name, kind) {
  * Start an agent for `taskId` (a leaf or a work package). Mode comes from ATF's
  * launchPlan unless forced. Returns {name, pane, mode, kind}.
  */
-export function launchAgent({ root, planId, taskId, name, kind, refPane, direction, force, extraArgs = [], assign = true }) {
+export function launchAgent({ root, planId, taskId, name, kind, agent, refPane, direction, force, extraArgs = [], assign = true }) {
   const s = loadPlan(root, planId);
   const target = s.tasks[taskId];
   if (!target) throw new Error(`unknown task ${taskId}`);
@@ -191,6 +192,17 @@ export function launchAgent({ root, planId, taskId, name, kind, refPane, directi
   const leaf = isPackage
     ? s.order.map((id) => s.tasks[id]).find((t) => !t.children.length && t.path.includes(target.id) && (t.ready || t.can_resume || t.answered)) || target
     : target;
+  // agent definition: explicit, else the task's, else its work package's
+  agent = agent || leaf.agent || target.agent || [...leaf.path].reverse().map((id) => s.tasks[id].agent).find(Boolean) || null;
+  let agentArgs = [];
+  if (agent) {
+    if (kind !== 'pi') throw new Error(`agent definitions are supported for pi only (task wants "${agent}", kind is ${kind})`);
+    const def = resolveAgentDef(agent, path.dirname(root));
+    if (!def) throw new Error(`unknown agent definition "${agent}" (see \`atf-herdr agents\`)`);
+    const r = piArgsForAgent(def, stateDir());
+    agentArgs = r.args;
+    for (const n of r.notes) process.stderr.write(`atf-herdr: note: ${n}\n`);
+  }
   const lp = launchPlan(s, leaf.id, name);
   let mode = force || lp.mode;
   if (mode === 'resume' && (!lp.session && !force)) mode = 'fresh';
@@ -211,7 +223,7 @@ export function launchAgent({ root, planId, taskId, name, kind, refPane, directi
   const sub = (a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session ?? '');
   // an installed skill is discovered by the agent itself: don't pass it again
   const withoutSkill = (list) => (skillInstalled() ? list.filter((a, i) => a !== '{skill}' && list[i + 1] !== '{skill}') : list);
-  const args = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []).map(sub), ...extraArgs];
+  const args = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []).map(sub), ...agentArgs, ...extraArgs];
   const started = herdr(['agent', 'start', name, '--kind', kind, '--pane', pane, ...(args.length ? ['--', ...args] : [])], { timeout: 60_000 });
   if (!started) {
     herdr(['pane', 'close', pane]);
@@ -220,7 +232,7 @@ export function launchAgent({ root, planId, taskId, name, kind, refPane, directi
   // register before anything writes to the plan: hooks fired by the assignment below
   // must already know this agent was just launched (no duplicate kickoff nudge)
   updateRegistry((reg) => {
-    reg[regKey(root, name)] = { name, kind, root, plan: planId, task: target.id, pane, socket: currentSocket(), launchedAt: Date.now(), idleSince: null };
+    reg[regKey(root, name)] = { name, kind, agent, root, plan: planId, task: target.id, pane, socket: currentSocket(), launchedAt: Date.now(), idleSince: null };
   });
   if (assign && target.assignee !== name && !(target.owner === name && !isPackage)) {
     transact(root, planId, { id: process.env.ATF_ACTOR || 'coordinator', role: 'coordinator', harness: 'herdr' }, () => [
@@ -230,7 +242,7 @@ export function launchAgent({ root, planId, taskId, name, kind, refPane, directi
   const fresh = loadPlan(root, planId);
   herdr(['agent', 'prompt', name, buildPrompt({ s: fresh, t: fresh.tasks[leaf.id], name, mode, pkg: isPackage ? fresh.tasks[target.id] : null, kindCfg })]);
   recordSession(root, planId, [leaf.id], name, kind);
-  return { name, pane, mode, kind, leaf: leaf.id, reason: lp.reason };
+  return { name, pane, mode, kind, agent, leaf: leaf.id, reason: lp.reason };
 }
 
 // ---------- lifecycle sweep ----------
@@ -353,7 +365,7 @@ function sweepLocked(root) {
       const pkgId = [...first.path].reverse().find((pid) => s.tasks[pid].assignee === actor.id);
       try {
         const refPane = Object.values(reg).find((r) => r.pane && r.root === root && live.has(r.name))?.pane || coordinatorPane(s, live);
-        const r = launchAgent({ root, planId: s.id, taskId: pkgId && first.ready && !first.assignee ? pkgId : first.id, name: actor.id, kind: rec.kind, refPane, assign: false });
+        const r = launchAgent({ root, planId: s.id, taskId: pkgId && first.ready && !first.assignee ? pkgId : first.id, name: actor.id, kind: rec.kind, agent: rec.agent, refPane, assign: false });
         touched.delete(regKey(root, actor.id)); // launchAgent wrote the fresh entry itself
         actions.push(`relaunched ${actor.id} for ${r.leaf} (${r.mode}: ${r.reason})`);
         pending = true;
