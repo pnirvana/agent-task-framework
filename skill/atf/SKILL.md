@@ -9,8 +9,17 @@ description: "Plan, delegate and track multi-agent work with the `atf` CLI (Agen
 `.atf/`. Humans and dashboards watch that log, so **your progress only exists if you
 report it.** Every command accepts `--json` for machine-readable output.
 
-Your identity comes from `$ATF_ACTOR` / `$ATF_ROLE` (or `--as NAME --role ROLE`), the
-plan from `$ATF_PLAN` (or `--plan ID`). Check with: `echo $ATF_ACTOR $ATF_PLAN`.
+**Who you are matters** (what `atf wait` reports, who may change which task). Check it
+first with `atf whoami`: it shows your identity, your role and why, and the plan.
+- Identity: `$ATF_ACTOR` (or `--as NAME`), else your user name.
+- Role: `$ATF_ROLE` (or `--role ROLE`); if neither is set, whoever **created the plan is its
+  coordinator**, and others are plain agents. Subagents started by a launcher get
+  `ATF_ACTOR`/`ATF_ROLE=subagent` from it.
+- Plan: `$ATF_PLAN` (or `--plan ID`), else the project's most recently created plan.
+
+`export` in one shell command does not carry over to your next command. Don't rely on
+it: pass `--plan <id>` explicitly (or prefix `ATF_PLAN=<id> atf …`) on every command when
+more than one plan may exist in the project.
 
 ## If you are a SUBAGENT (assigned a task)
 
@@ -71,7 +80,11 @@ instead of your transcript, so make it self-contained.
 ## If you are the COORDINATOR
 
 1. Create the plan: `atf plan new "Add OAuth login" --goal "Users can sign in with GitHub"`.
-   It prints the plan id. Export it: `export ATF_PLAN=<id>`.
+   It prints the plan id, and **you become its coordinator** (recorded on the plan, so it
+   holds without any environment variables). Use `--plan <id>` on your following commands
+   and confirm with `atf whoami --plan <id>` that your role is `coordinator`. If the plan
+   was created by someone else (e.g. the human), ask for it to be handed to you
+   (`atf plan update --coordinator <your name>`) or pass `--role coordinator`.
 2. Decompose into a hierarchy that mirrors the plan: top-level tasks are the plan's
    branches (e.g. Backend, Frontend), leaves are units one agent finishes in one session,
    with verifiable acceptance criteria and explicit dependencies:

@@ -371,3 +371,22 @@ test('herdr agents: both definition formats, project overrides user, bash added 
     else process.env.PI_CODING_AGENT_DIR = prev;
   }
 });
+
+test('roles: plan creator is coordinator without ATF_ROLE; wait sees reviews', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-role-'));
+  const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', NO_COLOR: '1', ATF_NO_REGISTRY: '1' };
+  delete env.ATF_ACTOR;
+  delete env.ATF_ROLE;
+  const run = (args, extra = {}) => JSON.parse(execFileSync('node', [ATF, ...args, '--json'], { cwd: dir, env: { ...env, ...extra } }).toString());
+  run(['init']);
+  run(['plan', 'new', 'Roles']);
+  run(['add', 'x']);
+  assert.equal(run(['whoami']).role, 'coordinator');
+  assert.equal(run(['whoami', '--as', 'someone']).role, 'agent');
+  const w = { ATF_ACTOR: 'w1', ATF_ROLE: 'subagent' };
+  run(['start', 'T1'], w);
+  run(['review', 'T1', '-m', 'check'], w);
+  assert.deepEqual(run(['wait', '--timeout', '3000']).attention, [{ task: 'T1', reason: 'review' }]);
+  run(['plan', 'update', '--coordinator', 'lead']);
+  assert.equal(run(['whoami'], { ATF_ACTOR: 'lead' }).role, 'coordinator');
+});

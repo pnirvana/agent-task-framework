@@ -80,7 +80,7 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 ### Plan events
 | type | data |
 |------|------|
-| `plan.created` | `{title, goal?, description?, labels?, meta?}` |
+| `plan.created` | `{title, goal?, description?, labels?, coordinator?, meta?}` (`coordinator` defaults to the creating actor) |
 | `plan.updated` | any subset of the above (shallow replace) |
 | `plan.status`  | `{status: active\|paused\|completed\|failed\|cancelled, message?}` |
 
@@ -254,6 +254,14 @@ tasks done), `answered` (someone else added a note after a question-block).
 
 With `ATF_LIFECYCLE=ephemeral`, `atf wait` returns immediately when nothing needs the
 agent, telling it to end its turn.
+
+### Roles without configuration
+
+A writer that is given no role (no `--role`, no `$ATF_ROLE`) infers it from the plan
+(`inferRole`): the plan's recorded `coordinator` is `coordinator`; otherwise the role the
+actor used in earlier events of the plan; otherwise `agent`. So an agent started by hand
+that creates a plan is its coordinator without any environment setup. `atf whoami`
+shows identity, role and its source.
 
 ## 10. Multiple plans and projects
 

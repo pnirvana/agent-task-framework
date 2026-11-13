@@ -11,6 +11,7 @@ import {
   canTransition,
   findCycles,
   attentionFor,
+  inferRole,
   launchPlan,
   RESUME_POLICIES,
   driverInbox,
@@ -42,7 +43,9 @@ Setup / plans
   atf plan new <title> [--goal G] [--desc D]   create plan, make it current
   atf plan list | use <id>
   atf plan show [id]                    plan overview: structure, ownership, decisions, artifacts
-  atf plan update [--title T] [--goal G] [--desc D] [--resume auto|resume|fresh]
+  atf plan new <title> ... [--coordinator NAME]   (default: you become its coordinator)
+  atf plan update [--title T] [--goal G] [--desc D] [--resume auto|resume|fresh] [--coordinator NAME]
+  atf whoami                            who ATF thinks you are: identity, role and why, plan
   atf plan status <${PLAN_STATUSES.join('|')}> [-m msg]
 
 Tasks (coordinator)
@@ -202,7 +205,18 @@ function ctx({ needPlan = true } = {}) {
     if (!fs.existsSync(eventsPath(root, planId))) die(`plan not found: ${planId}`);
   }
   const actor = resolveActor({ id: FLAGS.as, role: FLAGS.role });
-  return { root, planId, actor };
+  // No explicit role (--role / $ATF_ROLE): infer it from the plan, so a coordinator that
+  // was started by hand (no ATF env) is still treated as the coordinator.
+  actor.role_source = FLAGS.role ? '--role' : process.env.ATF_ROLE ? '$ATF_ROLE' : null;
+  if (!actor.role_source) {
+    if (planId && fs.existsSync(eventsPath(root, planId))) {
+      const r = inferRole(loadPlan(root, planId), actor.id);
+      actor.role = r.role;
+      actor.role_source = r.source;
+    } else actor.role_source = 'default';
+  }
+  const { role_source, ...written } = actor; // role_source is for whoami only, not stored
+  return { root, planId, actor: written, roleSource: role_source };
 }
 
 function requireTask(state, id) {
@@ -426,7 +440,9 @@ const commands = {
   plan(pos) {
     const sub = pos.shift() || 'show';
     if (sub === 'new' || sub === 'create') {
-      const { root, actor } = ctx({ needPlan: false });
+      const { root, actor: a0 } = ctx({ needPlan: false });
+      // creating a plan makes you its coordinator, unless your role is set explicitly
+      const actor = FLAGS.role || process.env.ATF_ROLE ? a0 : { ...a0, role: 'coordinator' };
       const title = pos.join(' ');
       if (!title) die('plan title required');
       const id = FLAGS.id || newPlanId(title);
@@ -434,6 +450,7 @@ const commands = {
       const data = { title };
       if (FLAGS.goal) data.goal = FLAGS.goal;
       if (FLAGS.desc) data.description = FLAGS.desc;
+      if (FLAGS.coordinator) data.coordinator = FLAGS.coordinator;
       transact(root, id, actor, () => [{ type: 'plan.created', data }]);
       setCurrentPlan(root, id);
       return out({ ok: true, plan: id }, `created plan ${bold(id)} (now current)\n${dim(`export ATF_PLAN=${id}`)}`);
@@ -466,6 +483,7 @@ const commands = {
       if (FLAGS.title) data.title = FLAGS.title;
       if (FLAGS.goal) data.goal = FLAGS.goal;
       if (FLAGS.desc) data.description = FLAGS.desc;
+      if (FLAGS.coordinator) data.coordinator = FLAGS.coordinator;
       if (FLAGS.resume) {
         if (!RESUME_POLICIES.includes(FLAGS.resume)) die(`--resume must be one of ${RESUME_POLICIES.join(', ')}`);
         data.resume = FLAGS.resume;
@@ -652,6 +670,19 @@ const commands = {
     items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
     const color = { review: magenta, question: red, failed: red, finished: green };
     out(items, items.map((i) => `${(color[i.kind] || String)(i.kind.padEnd(9))} ${dim(i.project + ' / ' + i.plan_title)}  ${i.task ? bold(i.task) + ' ' + i.title : ''}${i.message ? dim(' — ' + i.message) : ''} ${dim(ago(i.ts))}`).join('\n') || 'inbox empty');
+  },
+
+  whoami() {
+    // who ATF thinks you are, and why: identity, role (and its source), plan, harness
+    const { root, planId, actor, roleSource } = ctx({ needPlan: false });
+    const st = planId && fs.existsSync(eventsPath(root, planId)) ? loadPlan(root, planId) : null;
+    const info = { actor: actor.id, role: actor.role, role_source: roleSource, plan: planId ?? null, plan_title: st?.title ?? null, coordinator: st?.coordinator ?? null, root, harness: actor.harness, ctx: actor.ctx ?? {} };
+    out(info, [
+      `you are   ${bold(actor.id)} ${dim(process.env.ATF_ACTOR || FLAGS.as ? '' : '(default: $USER; set $ATF_ACTOR or --as to change)')}`,
+      `role      ${actor.role === 'coordinator' ? green(actor.role) : bold(actor.role)} ${dim('(' + roleSource + ')')}`,
+      `plan      ${planId ? `${planId}${st ? ` "${st.title}" · coordinator ${st.coordinator ?? '?'}` : ' (not found)'}` : dim('none (set $ATF_PLAN, --plan, or atf plan new)')}`,
+      `harness   ${actor.harness}${Object.keys(actor.ctx || {}).length ? dim('  ' + Object.entries(actor.ctx).map(([k, v]) => `${k}=${v}`).join(' ')) : ''}`,
+    ].join('\n'));
   },
 
   skill(pos) {

@@ -26,7 +26,7 @@ export function canTransition(from, to) {
 }
 
 const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume', 'agent'];
-const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume'];
+const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume', 'coordinator'];
 
 function pick(obj, keys) {
   const out = {};
@@ -106,6 +106,7 @@ export function fold(events) {
           plan.id = ev.plan;
           plan.created_at = ev.ts;
           plan.created_by = ev.actor?.id ?? null;
+          plan.coordinator = ev.actor?.id ?? null; // whoever creates a plan coordinates it unless named otherwise
           Object.assign(plan, pick(d, PLAN_FIELDS));
           break;
         case 'plan.updated':
@@ -354,6 +355,18 @@ export function launchPlan(plan, taskId, actorId = null) {
   else if (!session) reason = worked ? 'no session reference recorded; continue from checkpoint/notes' : reason;
   else if (policy === 'resume' || worked) (mode = 'resume'), (reason = policy === 'resume' ? 'policy: resume' : 'task was already worked on');
   return { mode, session: mode === 'resume' ? session : null, checkpoint: t.checkpoint, policy, reason, worked };
+}
+
+/**
+ * Role of an actor whose role was not given explicitly (no --role / $ATF_ROLE):
+ * the plan's recorded coordinator is 'coordinator'; otherwise the role the actor used
+ * in earlier events; otherwise 'agent'. Returns {role, source}.
+ */
+export function inferRole(plan, actorId) {
+  if (plan?.coordinator && plan.coordinator === actorId) return { role: 'coordinator', source: 'recorded as this plan\'s coordinator' };
+  const prev = plan?.actors?.[actorId]?.role;
+  if (prev && prev !== 'agent') return { role: prev, source: 'role used in earlier events of this plan' };
+  return { role: 'agent', source: 'default (not the plan\'s coordinator, no ATF_ROLE)' };
 }
 
 /** Status of a parent task derived from its children's (effective) statuses. */

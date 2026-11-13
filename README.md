@@ -184,7 +184,7 @@ stalled agents, and jumps into any plan, task or agent (see `adapters/herdr/READ
 | `ATF_DIR` | `.atf` root (else found upward from cwd, or next to the main git worktree) |
 | `ATF_PLAN` | plan id (else `.atf/current`) |
 | `ATF_ACTOR` | actor id (else `$USER`) |
-| `ATF_ROLE` | `coordinator` \| `subagent` \| … (coordinators may change any task) |
+| `ATF_ROLE` | `coordinator` \| `subagent` \| … (coordinators may change any task). Unset: the plan's creator is its coordinator, others are agents; `atf whoami` shows the result |
 | `ATF_HARNESS` | harness label (auto: `herdr` / `tmux` / `shell`) |
 | `ATF_CTX_*` | extra harness context recorded on every event |
 | `ATF_REGISTRY` | project registry file (default `~/.config/atf/roots.json`); `ATF_NO_REGISTRY=1` disables updates |
