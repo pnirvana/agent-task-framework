@@ -28,7 +28,7 @@ plans, break them into tasks, and report progress, in a format any frontend can 
 | `src/core.mjs` | pure fold: events → plan state (shared by CLI and frontends) |
 | `src/store.mjs` | file store: root discovery, locking, transactions, actor identity |
 | `bin/atf.mjs` | reference CLI (`bin/atf` is a PATH shim) |
-| `skill/atf/SKILL.md` | agent instructions for coordinator and subagent roles (Agent Skills format) |
+| `skill/atf/SKILL.md` | agent instructions for coordinator and subagent roles (Agent Skills format; `atf skill install`) |
 | `adapters/herdr/` | herdr plugin: board TUI, pane labels, sidebar progress, notifications, spawn, agent lifecycle |
 | `test/` | `npm test` (fold semantics, transitions, a 12-way concurrent-claim race, wait) |
 
@@ -68,8 +68,17 @@ command = "atf.herdr.board-popup"
 description = "ATF: overview of all plans"
 ```
 
-5. Start the coordinator with the skill: `pi --skill ~/Dev/agent-task-framework/skill/atf`
-   (subagents launched by `atf-herdr spawn` get it automatically).
+5. Install the agent skill, so agents discover it on their own (no `--skill` needed):
+
+```sh
+atf skill install    # symlinks skill/atf into ~/.agents/skills (pi and other Agent Skills
+                     # agents) and ~/.claude/skills (Claude Code, if ~/.claude exists)
+atf skill            # status;  atf skill uninstall  removes the links
+```
+
+   The links point into the checkout, so `git pull` keeps the skill current. Without it,
+   start the coordinator with `pi --skill ~/Dev/agent-task-framework/skill/atf`
+   (`atf-herdr spawn` then passes `--skill` to subagents itself).
 
 6. Once per project:
 
@@ -118,20 +127,25 @@ atf status                    # board + "needs attention" + active agents
 
 ```sh
 # inside herdr, in your coordinator's pane / project dir
-atf-herdr board                              # live board in a sibling pane
-atf-herdr spawn T1 --name worker-1           # pane + pi (with atf skill) + kickoff prompt
+pi                                           # coordinator (skill installed: `atf skill install`)
+atf-herdr spawn T1 --name worker-1           # pane + pi + kickoff prompt for task T1
+atf-herdr spawn T2 --name backend            # T2 is a parent task: a whole work package
 atf-herdr spawn T3 --name worker-2 --kind claude
 ```
 
-`spawn` splits a pane with `ATF_DIR/ATF_PLAN/ATF_ACTOR/ATF_ROLE` and `atf` on PATH,
-runs `herdr agent start`, assigns the task, and prompts the agent. For `pi` the skill is
-loaded with `--skill`; other kinds are told to read `skill/atf/SKILL.md`. The coordinator
-itself should also run with the skill: `pi --skill <repo>/skill/atf`.
+`spawn` places a pane next to the others (balanced grid, overflow into an `agents` tab),
+starts the agent with `ATF_DIR/ATF_PLAN/ATF_ACTOR/ATF_ROLE` and `atf` on PATH, assigns the
+task or package and sends the kickoff prompt. With `atf skill install` agents discover the
+skill themselves; otherwise pi gets `--skill` and other kinds are told to read
+`skill/atf/SKILL.md`. Agents launched this way are ephemeral by default: closed when idle
+with nothing to do, and relaunched (resuming their session when they come back to a task
+they already worked on) when work appears. Details: [adapters/herdr/README.md](adapters/herdr/README.md).
 
-**herdr plugin** (`herdr plugin link <repo>/adapters/herdr`): interactive task board
-(split or popup), agent panes labelled with their task, plan progress in the sidebar,
-notifications on blocked/review/failed, and stalled-agent detection. See
-[adapters/herdr/README.md](adapters/herdr/README.md).
+**herdr plugin** (`herdr plugin link <repo>/adapters/herdr`): a task board (`prefix+t`, a
+full-height side column; `prefix+alt+t`, a popup) with one scope for all tabs
+(all projects › project › plan), an Overview of what is moving and what needs you,
+agent panes labelled with their task, plan progress in the sidebar, notifications, stalled-agent
+detection and the agent lifecycle. See [adapters/herdr/README.md](adapters/herdr/README.md).
 
 Events written from herdr panes automatically carry `actor.ctx.herdr_pane`, which is how
 the plugin maps tasks to panes. Any `ATF_CTX_<KEY>` env var gets recorded the same way

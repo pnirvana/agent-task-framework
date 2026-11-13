@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TERMINAL, attentionFor, launchPlan } from '../../../src/core.mjs';
-import { listPlanIds, loadPlan, transact } from '../../../src/store.mjs';
+import { listPlanIds, loadPlan, transact, skillInstalled } from '../../../src/store.mjs';
 import { herdr, pluginConfig, sameServer, currentSocket, liveAgents, boardPaneIds } from './herdr.mjs';
 import { chooseSplit, tabLayout, withPlacementLock } from './layout.mjs';
 
@@ -138,7 +138,7 @@ function situation(s, t) {
 }
 
 export function buildPrompt({ s, t, name, mode, pkg, kindCfg }) {
-  const skill = kindCfg.nativeSkill ? 'Follow the atf skill.' : `First read ${SKILL_FILE} and follow its subagent section.`;
+  const skill = kindCfg.nativeSkill || skillInstalled() ? 'Follow the atf skill (load it if it is not loaded yet).' : `First read ${SKILL_FILE} and follow its subagent section.`;
   const why = situation(s, t);
   if (mode === 'resume')
     return (
@@ -209,7 +209,9 @@ export function launchAgent({ root, planId, taskId, name, kind, refPane, directi
   const pane = withPlacementLock(() => placeAgentPane({ cwd: path.dirname(root), env, refPane, direction }));
   if (!pane) throw new Error('could not create a pane');
   const sub = (a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session ?? '');
-  const args = [...(mode === 'resume' ? kindCfg.resume : kindCfg.start || []).map(sub), ...extraArgs];
+  // an installed skill is discovered by the agent itself: don't pass it again
+  const withoutSkill = (list) => (skillInstalled() ? list.filter((a, i) => a !== '{skill}' && list[i + 1] !== '{skill}') : list);
+  const args = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []).map(sub), ...extraArgs];
   const started = herdr(['agent', 'start', name, '--kind', kind, '--pane', pane, ...(args.length ? ['--', ...args] : [])], { timeout: 60_000 });
   if (!started) {
     herdr(['pane', 'close', pane]);

@@ -159,8 +159,12 @@ test('hooks: post_write hook runs detached with seq range env', async () => {
   fs.writeFileSync(cfgPath, JSON.stringify(cfg));
   run(['add', 'one']); // seq 2
   run(['start', 'T1']); // seq 3 (assigned) + 4 (status)
-  await new Promise((r) => setTimeout(r, 500));
-  const lines = fs.readFileSync(outFile, 'utf8').trim().split('\n').sort();
+  // hooks run detached: poll (up to 5 s) instead of a fixed sleep, so a busy machine can't flake this
+  let lines = [];
+  for (let i = 0; i < 50 && lines.length < 2; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    lines = fs.existsSync(outFile) ? fs.readFileSync(outFile, 'utf8').trim().split('\n').filter(Boolean).sort() : [];
+  }
   const plan = run(['status']).id;
   assert.deepEqual(lines, [`${plan} 2 2 task.created`, `${plan} 3 4 task.assigned,task.status`]);
 });

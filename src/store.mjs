@@ -295,3 +295,33 @@ export function knownRoots({ prune = true } = {}) {
 
 /** Project display name for a root: the directory containing .atf. */
 export const projectName = (root) => path.basename(path.dirname(root));
+
+// ---------- skill installation ----------
+// The agent skill (skill/atf/SKILL.md) is installed by symlinking it into the skill
+// directories agents discover automatically: ~/.agents/skills (Agent Skills standard;
+// pi and others) and ~/.claude/skills (Claude Code) when ~/.claude exists. A symlink
+// keeps it current with the checkout.
+export const SKILL_SRC = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'skill', 'atf');
+
+export function skillTargets() {
+  const home = os.homedir();
+  const t = [{ id: 'agents', dir: path.join(home, '.agents', 'skills') }];
+  if (fs.existsSync(path.join(home, '.claude'))) t.push({ id: 'claude', dir: path.join(home, '.claude', 'skills') });
+  return t;
+}
+
+/** Status per target: installed (our symlink), other (something else named atf), missing. */
+export function skillStatus() {
+  return skillTargets().map((t) => {
+    const link = path.join(t.dir, 'atf');
+    let state = 'missing';
+    try {
+      const st = fs.lstatSync(link);
+      state = st.isSymbolicLink() && path.resolve(t.dir, fs.readlinkSync(link)) === SKILL_SRC ? 'installed' : 'other';
+    } catch {}
+    return { ...t, link, state };
+  });
+}
+
+/** Is the skill discoverable without passing its path (any target installed)? */
+export const skillInstalled = () => skillStatus().some((t) => t.state === 'installed');

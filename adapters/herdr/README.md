@@ -5,13 +5,14 @@ actionable inside herdr. Optional: ATF itself does not depend on any of this.
 
 | feature | what you get |
 |---------|--------------|
-| **Task board** | interactive TUI as a split pane (toggle) or popup: task tree, progress, details, event log, "needs attention" |
+| **Task board** | interactive TUI as a full-height side column (`prefix+t`, toggle) or popup (`prefix+alt+t`); one scope for all tabs (all projects › project › plan): Overview, Tasks, Agents, Plan, Log |
 | **Agent pane labels** | each subagent's pane title becomes `T3 · Token endpoint`, with tokens `$atf_task`, `$atf_status` (`◐ in progress 40%`), `$atf_plan` |
 | **Sidebar progress** | workspace tokens `$atf_plan`, `$atf_progress` (`3/5 ✓ 1 ◐ 1 ⊘`) for the Spaces sidebar |
 | **Notifications** | herdr notification when a task becomes blocked, needs review, or fails, and when a plan finishes |
 | **Stall detection** | board flags `stale?` when a task is in progress but its herdr agent has been idle > 90s (an agent that stopped without reporting) |
-| **Overview** | tab `0` of the board: active plans of this project or all known projects (`a`), and an inbox of everything that needs you (reviews, questions, failures, stalled agents, finished plans), oldest first; ⏎ jumps into the plan/task, `g` to the agent |
-| **Spawn** | `s` on a ready task (or `atf-herdr spawn T3`) opens a pane, starts pi with the atf skill, assigns the task, and sends the kickoff prompt |
+| **Overview** | tab `0`: every plan in scope unfolded to its live slice (in progress, review, blocked, failed), plus an inbox of everything that needs you, oldest first; ⏎ opens the plan/task, `g` jumps to the agent or plan, `c` closes a plan |
+| **Spawn** | `s` on a ready task or package (or `atf-herdr spawn T3`) places a pane in a balanced grid, starts the agent (pi by default; the atf skill is discovered once installed with `atf skill install`), assigns the task and sends the kickoff prompt |
+| **Agent lifecycle** | ATF-launched agents are closed when idle with nothing to do and relaunched when work appears for them, resuming their earlier session when they return to a task they worked on |
 
 ## Install
 
@@ -21,6 +22,8 @@ herdr plugin action list --plugin atf.herdr
 ```
 
 Requires Node ≥ 18 on PATH (`run.sh` adds `/opt/homebrew/bin` and `/usr/local/bin`).
+Install the agent skill too, so agents find it without `--skill`: `atf skill install`
+(see the main README).
 
 ### Keybindings (`~/.config/herdr/config.toml`)
 
@@ -29,14 +32,13 @@ Requires Node ≥ 18 on PATH (`run.sh` adds `/opt/homebrew/bin` and `/usr/local/
 key = "prefix+t"
 type = "plugin_action"
 command = "atf.herdr.board"
-description = "ATF task board"
+description = "ATF: task board (this project)"
 
 [[keys.command]]
 key = "prefix+alt+t"
 type = "plugin_action"
 command = "atf.herdr.board-popup"
-description = "ATF overview (all plans)"
-
+description = "ATF: overview of all plans"
 ```
 
 ### Sidebar rows (optional, same file)
@@ -61,13 +63,14 @@ Then `herdr server reload-config`.
    walking up to parents and the main git worktree). In a pane without a project it
    opens the overview of all projects and offers `i` to create one there.
    `prefix+alt+t` is the quick look: a popup with the overview of all projects and the
-   inbox; ⏎ drills into any plan or task. Inside either, `0`/Esc reach the overview and
-   `a` switches between this project and all projects.
+   inbox; ⏎ drills into any plan or task. Inside either, ⏎ narrows the scope to a plan,
+   Esc widens it again and `A` jumps to all projects.
 3. Spawn workers from the board (`s`) or the CLI:
    ```sh
-   atf-herdr spawn T3 --name worker-1            # pi + atf skill, split right
-   atf-herdr spawn T4 --kind claude --direction down
-   atf-herdr spawn T5 --dry-run                  # print the herdr commands only
+   atf-herdr spawn T3 --name worker-1            # pi, placed in the tab's balanced grid
+   atf-herdr spawn T2 --name backend             # a parent task: the whole work package
+   atf-herdr spawn T4 --kind claude              # another agent kind
+   atf-herdr spawn T5 --dry-run                  # show placement mode, args, resume decision
    ```
 
 ### Several workspaces, sessions and projects
@@ -171,7 +174,9 @@ always in a separate `atf-herdr` process, so the board never blocks on herdr. Se
 keeps launched agents alive (they are prompted instead). Every action is logged to
 `~/.local/state/herdr/plugins/atf.herdr/lifecycle.log`.
 
-Agent kinds (override or add in the plugin config under `"agents"`):
+Agent kinds (override or add in the plugin config under `"agents"`). Arguments with
+`{skill}` are dropped when the skill is installed (`atf skill install`), since the agent
+then discovers it itself:
 
 ```json
 {
@@ -190,10 +195,13 @@ The pi entry is verified; the claude/codex resume arguments are untested default
 
 ### Pane layout for agents
 
-`atf-herdr spawn` splits the **largest** pane in the tab along its visually longer side,
-never the board, so agents form a balanced grid (side by side, then 2×2). When no split
-would leave both halves at least 70×14, it opens an `agents` tab instead. `--direction`
-restores the old behaviour (split the current pane in that direction).
+`atf-herdr spawn` splits the **largest** pane in the tab, preferring its visually longer
+side and trying the other side if that leaves a pane too small; it never splits the board.
+Agents therefore form a balanced grid (side by side, then 2×2). When no split would leave
+both halves at least 60×12, it reuses an `agents` tab with room, or opens a new one.
+Placement is serialized, so agents spawned in parallel see each other's panes.
+`--direction` forces a plain split of the current pane; `--workspace` places the agent in
+another workspace.
 
 ## How it works
 

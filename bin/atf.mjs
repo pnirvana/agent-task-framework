@@ -31,6 +31,8 @@ import {
   knownRoots,
   registerRoot,
   projectName,
+  skillStatus,
+  SKILL_SRC,
 } from '../src/store.mjs';
 
 const HELP = `atf — Agent Task Framework
@@ -78,6 +80,8 @@ Viewing
   atf plans [--all] [--closed]          active plans in this project / all known projects
   atf inbox [--all]                     what needs you: reviews, questions, failures, finished plans
   atf projects [add [dir]]              known projects (registered on init / plan creation)
+  atf skill [status|install|uninstall]  link the agent skill into ~/.agents/skills (and
+                                        ~/.claude/skills) so agents discover it automatically
   atf wait [--timeout MS]               block until something needs YOU: ready/unblocked work in
                                         your packages, or (coordinator) reviews/blockers/finished tasks.
                                         Returns at once if something already does.
@@ -645,6 +649,29 @@ const commands = {
     items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
     const color = { review: magenta, question: red, failed: red, finished: green };
     out(items, items.map((i) => `${(color[i.kind] || String)(i.kind.padEnd(9))} ${dim(i.project + ' / ' + i.plan_title)}  ${i.task ? bold(i.task) + ' ' + i.title : ''}${i.message ? dim(' — ' + i.message) : ''} ${dim(ago(i.ts))}`).join('\n') || 'inbox empty');
+  },
+
+  skill(pos) {
+    const sub = pos[0] || 'status';
+    if (sub === 'install' || sub === 'uninstall') {
+      const done = [];
+      for (const t of skillStatus()) {
+        if (sub === 'install') {
+          if (t.state === 'installed') continue;
+          if (t.state === 'other') die(`${t.link} exists and is not this skill; remove it first`);
+          fs.mkdirSync(t.dir, { recursive: true });
+          fs.symlinkSync(SKILL_SRC, t.link);
+          done.push(`linked ${t.link} -> ${SKILL_SRC}`);
+        } else if (t.state === 'installed') {
+          fs.unlinkSync(t.link);
+          done.push(`removed ${t.link}`);
+        }
+      }
+      return out({ ok: true, changes: done, status: skillStatus() }, done.join('\n') || `nothing to ${sub}`);
+    }
+    if (sub !== 'status') die('usage: atf skill [status|install|uninstall]');
+    const st = skillStatus();
+    out(st, st.map((t) => `${t.state === 'installed' ? green('✓') : t.state === 'other' ? yellow('!') : dim('·')} ${t.id.padEnd(7)} ${t.link} ${dim(t.state)}`).join('\n'));
   },
 
   projects(pos) {

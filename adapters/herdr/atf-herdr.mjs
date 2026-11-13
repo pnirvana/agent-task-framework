@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchPlan } from '../../src/core.mjs';
-import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig } from '../../src/store.mjs';
+import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig, skillInstalled } from '../../src/store.mjs';
 import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isBoardPane } from './lib/herdr.mjs';
 import { sync, notifyForEvents } from './lib/sync.mjs';
 import { chooseBoardSplit, tabLayout, planRebuild, withPlacementLock } from './lib/layout.mjs';
@@ -113,9 +113,11 @@ function spawnAgent() {
     const lp = launchPlan(s, t.id, name);
     const kind = flags.kind || pluginConfig().agent_kind || 'pi';
     const cfg = agentKinds()[kind] || {};
+    const raw = ((force || lp.mode) === 'resume' ? cfg.resume : cfg.start) || [];
+    const used = skillInstalled() ? raw.filter((a, i) => a !== '{skill}' && raw[i + 1] !== '{skill}') : raw;
     process.stdout.write(
       `${t.id} → ${name} (${kind}): ${force || lp.mode} (${lp.reason})\n` +
-        `  args: ${JSON.stringify((force || lp.mode) === 'resume' ? cfg.resume : cfg.start)}${lp.session ? `  session: ${lp.session.ref}` : ''}\n` +
+        `  args: ${JSON.stringify(used)}${skillInstalled() ? '  (skill installed: discovered by the agent)' : ''}${lp.session ? `  session: ${lp.session.ref}` : ''}\n` +
         `  lifecycle: ${lifecycle()}\n`,
     );
     return;
