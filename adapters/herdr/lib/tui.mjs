@@ -146,6 +146,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   function scopePlans() {
     const s = ui.scope;
     if (s.level === 'plan') {
+      if (!fs.existsSync(eventsPath(s.root, s.plan))) return [];
       try {
         return [{ root: s.root, id: s.plan, st: cachedPlan(s.root, s.plan), key: keyOf(s.root, s.plan) }];
       } catch {
@@ -1072,6 +1073,18 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   function pollOnce() {
+    const s = ui.scope;
+    if (s.level === 'plan' && !fs.existsSync(eventsPath(s.root, s.plan))) {
+      const title = ui.cache.get(keyOf(s.root, s.plan))?.state?.title || s.plan;
+      ui.cache.delete(keyOf(s.root, s.plan));
+      setScope({ level: 'project', root: s.root });
+      flash(`plan "${title}" was deleted`);
+    }
+    if (ui.scope.level === 'project' && !fs.existsSync(path.join(ui.scope.root, 'plans'))) {
+      const name = projectName(ui.scope.root);
+      setScope({ level: 'all' });
+      flash(`project ${name} no longer has an .atf directory`);
+    }
     const plans = scopePlans();
     let changed = false;
     for (const p of plans) {
