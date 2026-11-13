@@ -101,6 +101,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     lastSeq: new Map(), // plan key -> last seq seen (board notifications)
     rows: { overview: [], tasks: [], plan: [] }, // selectable rows of the current draw
     fold: new Map(), // overview: plan key -> 'folded' | 'live' | 'full' (default live; closed plans folded)
+    cardFolded: new Set(), // plan tab: plan keys whose card is folded to its title line
     showClosed: false, // wider scopes: also list completed / cancelled plans
     confirm: null, // {action, key, until}: second press confirms
   };
@@ -512,6 +513,14 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       const s = p.st;
       const row = { type: 'plan', root: p.root, plan: p.id, id: p.id, st: s, key: p.key, k: p.key, line: L.push(null) - 1 };
       rows.push(row);
+      const folded = ui.cardFolded.has(p.key);
+      row.render = (sel) => [
+        mark(sel),
+        [folded ? '▸ ' : '▾ ', 'bold'],
+        [clip(`${ui.scope.level === 'all' ? projectName(p.root) + ' / ' : ''}${s.title}`, Math.max(14, Math.min(50, W - 47))) + ' ', sel ? 'inverse bold' : isOpenStatus(s) ? 'bold' : 'dim'],
+        [`${s.status} · ${s.counts.done}/${planSummary(s).total} tasks · ${ago(s.updated_at)} ago`, s.status === 'completed' ? 'green' : s.status === 'active' ? 'blue' : 'yellow'],
+      ];
+      if (folded) continue;
       const sum = planSummary(s);
       const field = (label, text, color = '') => {
         if (!text) return;
@@ -537,11 +546,6 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       const counts = [n('decision') && `${n('decision')} decision${n('decision') === 1 ? '' : 's'}`, n('question') && `${n('question')} question${n('question') === 1 ? '' : 's'}`, n('warning') && `${n('warning')} warning${n('warning') === 1 ? '' : 's'}`, arts && `${arts} artifact${arts === 1 ? '' : 's'}`].filter(Boolean);
       if (counts.length) L.push([[`      ${counts.join(' · ')}`, 'dim']]);
       L.push([]);
-      row.render = (sel) => [
-        mark(sel),
-        [clip(`${ui.scope.level === 'all' ? projectName(p.root) + ' / ' : ''}${s.title}`, Math.max(14, Math.min(50, W - 45))) + ' ', sel ? 'inverse bold' : isOpenStatus(s) ? 'bold' : 'dim'],
-        [`${s.status} · ${s.counts.done}/${sum.total} tasks · ${ago(s.updated_at)} ago`, s.status === 'completed' ? 'green' : s.status === 'active' ? 'blue' : 'yellow'],
-      ];
     }
     const prevK = ui.rows.plan[ui.sel.plan]?.k;
     const keep = prevK ? rows.findIndex((r) => r.k === prevK) : -1;
@@ -806,7 +810,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       T('Every tab shows its content for the scope. ⏎ on a plan narrows to it; esc widens'),
       T('(plan -> project -> all projects -> quit); A jumps straight to all projects.'),
       T('At wider scopes Tasks and Agents group by project and plan, Plan shows one card per'),
-      T('plan (goal, outcome, branches; ⏎ for full details), Log merges all plans\' events.'),
+      T('plan (goal, outcome, branches; ←→/space fold a card, z all; ⏎ for full details),'),
+      T('Log merges the events of all plans in scope.'),
       [],
       H('Views'),
       T('Tab / 0-4    Overview · Tasks · Agents · Plan · Log    p / P  next / previous plan'),
@@ -866,7 +871,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       overview: `↑↓ select  ←→ fold  z all  ⏎ open  g jump  a approve  c close plan  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}  ? help`,
       tasks: `↑↓ move  ←→ fold  ⏎ details/open  g agent  s spawn  a approve  ${esc}  ? help`,
       agents: `↑↓ scroll  ${esc}  A all projects  tab views  ? help  q quit`,
-      plan: multi() ? `↑↓ select  ⏎ open plan  g jump  c close plan  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}  ? help` : `↑↓ scroll  ${esc}  tab views  ? help  q quit`,
+      plan: multi() ? `↑↓ select  ←→ fold  z all  ⏎ open plan  g jump  c close plan  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}  ? help` : `↑↓ scroll  ${esc}  tab views  ? help  q quit`,
       log: `↑↓ scroll  ${esc}  tab views  ? help  q quit`,
       detail: '↑↓ scroll  ⏎/esc back  g agent  s spawn  a approve',
       help: '↑↓ scroll  any other key: back',
@@ -1117,7 +1122,15 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
         if (r?.type === 'plan') foldPlan(r, 'close');
         else if (r?.type === 'task') ui.sel.overview = Math.max(0, ui.rows.overview.findIndex((x) => x.type === 'plan' && x.key === r.key));
       } else if (v === 'overview' && k === ' ') r?.type === 'plan' && foldPlan(r, 'cycle');
-      else if (v === 'overview' && k === 'z') {
+      else if (v === 'plan' && r?.type === 'plan' && ['\x1b[C', 'l', '\x1b[D', 'h', ' '].includes(k)) {
+        const fold = k === ' ' ? !ui.cardFolded.has(r.key) : k === '\x1b[D' || k === 'h';
+        if (fold) ui.cardFolded.add(r.key);
+        else ui.cardFolded.delete(r.key);
+      } else if (v === 'plan' && k === 'z') {
+        const keys = ui.rows.plan.map((x) => x.key);
+        const anyOpen = keys.some((key) => !ui.cardFolded.has(key));
+        for (const key of keys) anyOpen ? ui.cardFolded.add(key) : ui.cardFolded.delete(key);
+      } else if (v === 'overview' && k === 'z') {
         const plans = scopePlans();
         const anyOpen = plans.some((p) => foldOf(p) !== 'folded');
         for (const p of plans) ui.fold.set(p.key, anyOpen ? 'folded' : 'live');

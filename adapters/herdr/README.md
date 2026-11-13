@@ -108,8 +108,9 @@ Every tab shows its content for the scope (`Tab` / `0`–`4`):
   state and progress; at wider scopes grouped by project and plan, headed by how many
   agents are live and working.
 - **Plan**: one plan: goal, description, outcome, per-branch progress with owners,
-  questions, decisions, warnings, blockers, artifacts. At wider scopes it shows the plan
-  selected in Overview or Tasks.
+  questions, decisions, warnings, blockers, artifacts. At wider scopes: one card per plan
+  (goal, outcome, branch progress, counts); ←/→/space fold a card, `z` folds all, ⏎ opens
+  the plan's full details.
 - **Log**: events of all plans in scope, newest first, tagged with their plan.
 
 Rows always know their project and plan, so `g`, `s`, `a` and ⏎ work at any scope.
