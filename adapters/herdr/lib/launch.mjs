@@ -281,15 +281,18 @@ function sweepLocked(root) {
 
   for (const id of listPlanIds(root)) {
     const s = loadPlan(root, id);
-    if (s.status !== 'active') continue;
+    // closed plans: nothing to nudge or relaunch, but their idle ATF agents still get closed
+    const planOpen = s.status === 'active';
+    if (!planOpen && !Object.values(s.actors).some((a) => live.has(a.id) && reg[regKey(root, a.id)])) continue;
     for (const actor of Object.values(s.actors)) {
       if (!sameServer(actor)) continue; // agents of another herdr session are not ours to manage
       let rec = reg[regKey(root, actor.id)];
       if (rec?.socket && currentSocket() && rec.socket !== currentSocket()) rec = undefined;
+      if (!planOpen && rec?.plan !== s.id) continue; // closed plan: only agents launched for it
       if (rec) touched.add(regKey(root, actor.id));
       const agent = live.get(actor.id);
       const role = actor.role === 'coordinator' ? 'coordinator' : 'subagent';
-      const att = attentionFor(s, actor.id, role);
+      const att = planOpen ? attentionFor(s, actor.id, role) : [];
       const nkey = `${root}#${s.id}#${actor.id}`;
       const attKey = att.map((a) => `${a.task}:${a.reason}`).join(',');
       if (!att.length) delete nudges[nkey];
