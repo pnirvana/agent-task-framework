@@ -255,7 +255,29 @@ tasks done), `answered` (someone else added a note after a question-block).
 With `ATF_LIFECYCLE=ephemeral`, `atf wait` returns immediately when nothing needs the
 agent, telling it to end its turn.
 
-## 10. Versioning
+## 10. Multiple plans and projects
+
+A project (one `.atf` root) holds any number of plans; agents of different plans never
+interfere. To see plans across projects, a **user-level registry** lists known roots:
+`$ATF_REGISTRY`, else `$XDG_CONFIG_HOME/atf/roots.json` (default `~/.config/atf/roots.json`),
+`{"roots": [{"path", "added", "seen"}]}`. Writers add their root on `atf init` and on
+`plan.created`; harness adapters may add roots they discover (e.g. from pane working
+directories). Readers prune roots that no longer exist. The registry is a convenience:
+failing to update it never fails a write.
+
+`driverInbox(plan)` lists what needs the *human* driving the agents (as opposed to
+`attentionFor`, which is per agent): tasks in `review`, question-blocks (blocked without
+`on` and not yet answered), `failed` tasks, and an active plan whose tasks are all
+finished. Oldest first. Frontends may add harness signals (e.g. stalled agents).
+`planSummary(plan)` gives the per-plan row for overviews. CLI: `atf plans [--all]`,
+`atf inbox [--all]`, `atf projects`.
+
+**Harness sessions.** Ids such as pane ids and agent names are only unique within one
+harness server. Writers record a server identity in `actor.ctx` (herdr:
+`herdr_socket`); a launcher must only control actors whose identity matches its own
+(actors without one are treated as local), and show others read-only.
+
+## 11. Versioning
 
 `v` is bumped only for incompatible envelope or semantics changes. New event types,
 new optional `data` fields and new `ctx` keys are minor, non-breaking additions.

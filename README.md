@@ -95,6 +95,17 @@ const plan = fold(events);
 // plan.{progress, counts, actors, order}
 ```
 
+## Many plans, many projects
+
+```sh
+atf plans --all      # active plans across all known projects (progress, agents, inbox count)
+atf inbox --all      # what needs you: reviews, questions, failed tasks, finished plans
+atf projects         # known projects (registered automatically on init / plan creation)
+```
+
+In herdr, the board's **Overview** tab (`0`) shows the same across projects, including
+stalled agents, and jumps into any plan, task or agent (see `adapters/herdr/README.md`).
+
 ## Configuration (env)
 
 | var | meaning |
@@ -105,3 +116,5 @@ const plan = fold(events);
 | `ATF_ROLE` | `coordinator` \| `subagent` \| … (coordinators may change any task) |
 | `ATF_HARNESS` | harness label (auto: `herdr` / `tmux` / `shell`) |
 | `ATF_CTX_*` | extra harness context recorded on every event |
+| `ATF_REGISTRY` | project registry file (default `~/.config/atf/roots.json`); `ATF_NO_REGISTRY=1` disables updates |
+| `ATF_LIFECYCLE` | set by launchers: `ephemeral` makes `atf wait` tell idle agents to end their turn |

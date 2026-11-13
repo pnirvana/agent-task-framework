@@ -11,7 +11,7 @@ const ATF = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin',
 
 function sandbox() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-test-'));
-  const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', NO_COLOR: '1' };
+  const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', NO_COLOR: '1', ATF_REGISTRY: path.join(dir, 'registry.json') };
   delete env.HERDR_PANE_ID;
   const run = (args, extraEnv = {}) =>
     JSON.parse(execFileSync('node', [ATF, ...args, '--json'], { cwd: dir, env: { ...env, ...extraEnv } }).toString());
@@ -273,4 +273,59 @@ test('wait: ephemeral lifecycle tells an idle agent to end its turn', () => {
   run(['block', 'T1', '-m', 'needs b', '--on', 'T2'], be);
   const r = run(['wait', '--timeout', '3000'], be);
   assert.match(r.note, /end your turn/);
+});
+
+test('registry + plans/inbox across projects', () => {
+  const a = sandbox();
+  const b = sandbox();
+  const reg = path.join(a.dir, 'registry.json');
+  const inA = (args) => a.run(args, { ATF_REGISTRY: reg });
+  const inB = (args, env = {}) => b.run(args, { ATF_REGISTRY: reg, ...env });
+  inA(['projects', 'add']); // a was created before it shared the registry
+  inB(['plan', 'new', 'Second plan']); // plan creation registers b
+  inB(['add', 'x']);
+  inB(['start', 'T1'], { ATF_ACTOR: 'w', ATF_ROLE: 'subagent' });
+  inB(['review', 'T1', '-m', 'please check'], { ATF_ACTOR: 'w', ATF_ROLE: 'subagent' });
+  inA(['add', 'y']);
+  assert.equal(inA(['projects']).length, 2);
+  const plans = inA(['plans', '--all']);
+  assert.equal(plans.length, 3, 'two plans in b (Test plan + Second plan), one in a');
+  const inbox = inA(['inbox', '--all']);
+  assert.deepEqual(inbox.map((i) => [i.kind, i.task]), [['review', 'T1']]);
+  fs.rmSync(b.dir, { recursive: true, force: true });
+  assert.equal(inA(['projects']).length, 1, 'missing projects are pruned');
+});
+
+test('herdr layout: planRebuild recovers the split tree from pane rectangles', async () => {
+  const { planRebuild } = await import('../adapters/herdr/lib/layout.mjs');
+  const P = (id, x, y, w, h) => ({ pane_id: id, rect: { x, y, width: w, height: h } });
+  // replay the steps on rectangles and check we get the original layout back
+  const replay = (plan, area) => {
+    const r = { [plan.anchor]: { ...area } };
+    for (const s of plan.steps) {
+      const t = r[s.target];
+      if (s.dir === 'right') {
+        const w = Math.round(t.w * s.ratio);
+        r[s.pane] = { x: t.x + w, y: t.y, w: t.w - w, h: t.h };
+        t.w = w;
+      } else {
+        const h = Math.round(t.h * s.ratio);
+        r[s.pane] = { x: t.x, y: t.y + h, w: t.w, h: t.h - h };
+        t.h = h;
+      }
+    }
+    return r;
+  };
+  const layouts = [
+    [P('c', 0, 0, 320, 41), P('a', 0, 41, 320, 40)],
+    [P('1', 0, 0, 80, 41), P('4', 80, 0, 80, 41), P('3', 0, 41, 160, 40), P('2', 160, 0, 160, 81)],
+    [P('1', 0, 0, 65, 19), P('2', 0, 19, 65, 19), P('3', 65, 0, 65, 19), P('4', 65, 19, 65, 19), P('5', 130, 0, 50, 38)],
+  ];
+  for (const panes of layouts) {
+    const W = Math.max(...panes.map((p) => p.rect.x + p.rect.width));
+    const H = Math.max(...panes.map((p) => p.rect.y + p.rect.height));
+    const got = replay(planRebuild(panes), { x: 0, y: 0, w: W, h: H });
+    for (const p of panes) assert.deepEqual(got[p.pane_id], { x: p.rect.x, y: p.rect.y, w: p.rect.width, h: p.rect.height }, `pane ${p.pane_id}`);
+  }
+  assert.throws(() => planRebuild([P('a', 0, 0, 10, 10), P('b', 5, 5, 10, 10)]), /clean split tree/);
 });

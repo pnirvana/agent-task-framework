@@ -3,6 +3,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { findRoot, registerRoot } from '../../../src/store.mjs';
 
 export function herdrBin() {
   if (process.env.HERDR_BIN_PATH) return process.env.HERDR_BIN_PATH;
@@ -75,4 +76,42 @@ export function pluginConfig() {
   } catch {
     return {};
   }
+}
+
+/**
+ * herdr ids (panes, agent names) are only unique within one herdr server/session.
+ * Events record the writer's socket as ctx.herdr_socket; only actors from *this*
+ * server may be controlled. Actors without the field (older events) count as local.
+ */
+export const currentSocket = () => process.env.HERDR_SOCKET_PATH || null;
+export function sameServer(actor) {
+  const s = actor?.ctx?.herdr_socket;
+  return !s || !currentSocket() || s === currentSocket();
+}
+
+/** Live agents of this server, by name. */
+export function liveAgents() {
+  const m = new Map();
+  for (const a of herdr(['agent', 'list'])?.agents || []) if (a.name) m.set(a.name, a);
+  return m;
+}
+
+/** Register every ATF project found in the working directory of any pane of this server. */
+export function discoverRoots() {
+  const found = new Set();
+  for (const p of herdr(['pane', 'list'])?.panes || []) {
+    for (const dir of new Set([p.foreground_cwd, p.cwd].filter(Boolean))) {
+      const r = findRoot(dir);
+      if (r) found.add(r);
+    }
+  }
+  for (const r of found) registerRoot(r);
+  return [...found];
+}
+
+/** Board panes are plugin panes titled "ATF board" (see herdr-plugin.toml). */
+export const BOARD_LABEL = 'ATF board';
+export const isBoardPane = (p) => p?.label === BOARD_LABEL;
+export function boardPaneIds() {
+  return (herdr(['pane', 'list'])?.panes || []).filter(isBoardPane).map((p) => p.pane_id);
 }

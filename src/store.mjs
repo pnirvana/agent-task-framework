@@ -40,6 +40,7 @@ export function findRoot(cwd = process.cwd()) {
 export function initRoot(dir = process.cwd()) {
   const root = path.join(path.resolve(dir), ROOT_NAME);
   fs.mkdirSync(path.join(root, 'plans'), { recursive: true });
+  registerRoot(root);
   const cfg = path.join(root, 'config.json');
   if (!fs.existsSync(cfg)) fs.writeFileSync(cfg, JSON.stringify({ protocol: PROTOCOL_VERSION }, null, 2) + '\n');
   return root;
@@ -155,7 +156,10 @@ export function transact(root, planId, actor, fn) {
     }
     return { events: [], state };
   });
-  if (res.events.length) runHooks(root, planId, res.events);
+  if (res.events.length) {
+    if (res.events.some((e) => e.type === 'plan.created')) registerRoot(root);
+    runHooks(root, planId, res.events);
+  }
   return res;
 }
 
@@ -216,6 +220,7 @@ export function resolveActor(overrides = {}) {
   }
   if (env.HERDR_PANE_ID) ctx.herdr_pane ??= env.HERDR_PANE_ID;
   if (env.HERDR_WORKSPACE_ID) ctx.herdr_workspace ??= env.HERDR_WORKSPACE_ID;
+  if (env.HERDR_SOCKET_PATH) ctx.herdr_socket ??= env.HERDR_SOCKET_PATH; // identifies the herdr server/session
   if (env.TMUX_PANE) ctx.tmux_pane ??= env.TMUX_PANE;
   const harness =
     overrides.harness || env.ATF_HARNESS || (env.HERDR_ENV === '1' ? 'herdr' : env.TMUX ? 'tmux' : 'shell');
@@ -236,3 +241,57 @@ export function newPlanId(title) {
     .replace(/^-+|-+$/g, '');
   return `${slug || 'plan'}-${crypto.randomBytes(2).toString('hex')}`;
 }
+
+// ---------- project registry ----------
+// A user-level list of known .atf roots, so frontends can show plans across projects.
+// Maintained automatically (atf init, plan creation); harnesses may add roots they
+// discover. Missing roots are pruned on read.
+export function registryPath() {
+  if (process.env.ATF_REGISTRY) return process.env.ATF_REGISTRY;
+  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  return path.join(base, 'atf', 'roots.json');
+}
+
+function readRegistryFile() {
+  try {
+    const j = JSON.parse(fs.readFileSync(registryPath(), 'utf8'));
+    return Array.isArray(j.roots) ? j : { roots: [] };
+  } catch {
+    return { roots: [] };
+  }
+}
+
+export function registerRoot(root) {
+  if (process.env.ATF_NO_REGISTRY === '1') return;
+  try {
+    root = path.resolve(root);
+    const reg = readRegistryFile();
+    const now = new Date().toISOString();
+    const hit = reg.roots.find((r) => r.path === root);
+    if (hit) {
+      if (Date.now() - Date.parse(hit.seen || 0) < 60_000) return; // avoid rewriting on every call
+      hit.seen = now;
+    } else reg.roots.push({ path: root, added: now, seen: now });
+    fs.mkdirSync(path.dirname(registryPath()), { recursive: true });
+    const tmp = registryPath() + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(reg, null, 2));
+    fs.renameSync(tmp, registryPath());
+  } catch {
+    // the registry is a convenience; never fail a write because of it
+  }
+}
+
+/** Known roots that still exist (pruned in place when `prune` is set). */
+export function knownRoots({ prune = true } = {}) {
+  const reg = readRegistryFile();
+  const alive = reg.roots.filter((r) => fs.existsSync(path.join(r.path, 'plans')));
+  if (prune && alive.length !== reg.roots.length) {
+    try {
+      fs.writeFileSync(registryPath(), JSON.stringify({ ...reg, roots: alive }, null, 2));
+    } catch {}
+  }
+  return alive.map((r) => r.path);
+}
+
+/** Project display name for a root: the directory containing .atf. */
+export const projectName = (root) => path.basename(path.dirname(root));

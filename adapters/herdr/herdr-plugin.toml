@@ -9,13 +9,13 @@ description = "Agent Task Framework for herdr: live task board, task-labelled ag
 
 [[actions]]
 id = "board"
-title = "atf: toggle task board"
+title = "atf: toggle task board (this project)"
 contexts = ["pane", "workspace"]
 command = ["sh", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/run.sh\" action-board"]
 
 [[actions]]
 id = "board-popup"
-title = "atf: quick task board (popup)"
+title = "atf: overview of all plans (popup)"
 contexts = ["pane", "workspace"]
 command = ["sh", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/run.sh\" action-board-popup"]
 

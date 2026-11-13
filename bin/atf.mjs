@@ -13,6 +13,8 @@ import {
   attentionFor,
   launchPlan,
   RESUME_POLICIES,
+  driverInbox,
+  planSummary,
 } from '../src/core.mjs';
 import {
   findRoot,
@@ -26,6 +28,9 @@ import {
   resolveActor,
   newPlanId,
   eventsPath,
+  knownRoots,
+  registerRoot,
+  projectName,
 } from '../src/store.mjs';
 
 const HELP = `atf — Agent Task Framework
@@ -70,6 +75,9 @@ Viewing
   atf list [--status S] [--ready] [--mine] [--assignee WHO]   (--mine includes your packages)
   atf show <task>
   atf log [-n N] [--follow]
+  atf plans [--all] [--closed]          active plans in this project / all known projects
+  atf inbox [--all]                     what needs you: reviews, questions, failures, finished plans
+  atf projects [add [dir]]              known projects (registered on init / plan creation)
   atf wait [--timeout MS]               block until something needs YOU: ready/unblocked work in
                                         your packages, or (coordinator) reviews/blockers/finished tasks.
                                         Returns at once if something already does.
@@ -166,6 +174,19 @@ const ago = (ts) => {
 };
 
 // ---------- context ----------
+/** Roots in scope: all known projects with --all, else the current one. */
+function scopeRoots() {
+  if (FLAGS.all) {
+    const cur = findRoot();
+    const roots = knownRoots();
+    if (cur && !roots.includes(cur)) roots.unshift(cur);
+    return roots;
+  }
+  const r = findRoot();
+  if (!r) die('no .atf directory found (use --all for all known projects)');
+  return [r];
+}
+
 let FLAGS;
 function ctx({ needPlan = true } = {}) {
   const root = findRoot();
@@ -591,6 +612,50 @@ const commands = {
     const t = requireTask(state, pos[0]);
     const lp = launchPlan(state, t.id, FLAGS.for || t.owner);
     out(lp, `${t.id}: ${bold(lp.mode)} (${lp.reason})${lp.session ? `\nsession: ${lp.session.kind ?? ''} ${lp.session.ref}` : ''}${lp.checkpoint ? `\ncheckpoint: ${lp.checkpoint.message}` : ''}`);
+  },
+
+  plans() {
+    // Active plans in this project, or across all known projects (--all).
+    const roots = scopeRoots();
+    const rows = [];
+    for (const root of roots)
+      for (const id of listPlanIds(root)) {
+        const st = loadPlan(root, id);
+        if (!FLAGS.closed && !['active', 'paused'].includes(st.status)) continue;
+        rows.push({ project: projectName(root), root, ...planSummary(st) });
+      }
+    rows.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+    const human = rows.map((r) => {
+      const pct = Math.round(r.progress * 100);
+      const bits = [`${r.counts.done}/${r.total} done`, r.agents.length ? `agents ${r.agents.join(',')}` : null, r.ready_unowned ? green(`${r.ready_unowned} ready unassigned`) : null, r.inbox ? red(`${r.inbox} need you`) : null].filter(Boolean);
+      return `${dim(r.project.padEnd(18))} ${bold(r.title)} ${dim(`[${r.id}]`)} ${pct}%  ${bits.join(' · ')} ${dim(ago(r.updated_at))}`;
+    });
+    out(rows, human.join('\n') || 'no active plans');
+  },
+
+  inbox() {
+    // Everything across plans that needs the human driving the agents, oldest first.
+    const items = [];
+    for (const root of scopeRoots())
+      for (const id of listPlanIds(root)) {
+        const st = loadPlan(root, id);
+        if (st.status !== 'active') continue;
+        for (const it of driverInbox(st)) items.push({ project: projectName(root), root, plan: id, plan_title: st.title, title: it.task ? st.tasks[it.task].title : null, ...it });
+      }
+    items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+    const color = { review: magenta, question: red, failed: red, finished: green };
+    out(items, items.map((i) => `${(color[i.kind] || String)(i.kind.padEnd(9))} ${dim(i.project + ' / ' + i.plan_title)}  ${i.task ? bold(i.task) + ' ' + i.title : ''}${i.message ? dim(' — ' + i.message) : ''} ${dim(ago(i.ts))}`).join('\n') || 'inbox empty');
+  },
+
+  projects(pos) {
+    if (pos[0] === 'add') {
+      const r = findRoot(pos[1] || process.cwd());
+      if (!r) die('no .atf found there');
+      registerRoot(r);
+      return out({ ok: true, root: r }, `registered ${r}`);
+    }
+    const roots = knownRoots();
+    out(roots, roots.map((r) => `${projectName(r).padEnd(20)} ${dim(r)}`).join('\n') || 'no known projects');
   },
 
   status() {

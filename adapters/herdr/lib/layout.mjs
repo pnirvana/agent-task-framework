@@ -35,17 +35,18 @@ export function chooseSplit(paneId, { exclude = [] } = {}) {
 }
 
 /**
- * Where the board fits: a right-hand column at least ~45 cols wide and most of the tab's
- * height. Returns {pane, direction:'right'} or null (caller then opens it as its own tab).
+ * Where the board goes: a column to the right of the tallest pane that has room for it
+ * (>= 110 cols so both sides stay usable, >= 15 rows), preferring the rightmost one.
+ * herdr can only split panes, not the whole tab, so with stacked panes the board sits
+ * beside one of them. Returns {pane, direction:'right', width} or null (-> own tab).
  */
 export function chooseBoardSplit(paneId) {
   const layout = tabLayout(paneId);
   if (!layout) return null;
-  const H = layout.area.height;
   const best = layout.panes
-    .filter((p) => p.rect.height >= H * 0.75 && p.rect.width >= 110)
-    .sort((a, b) => b.rect.x + b.rect.width - (a.rect.x + a.rect.width) || b.rect.width - a.rect.width)[0];
-  return best ? { pane: best.pane_id, direction: 'right' } : null;
+    .filter((p) => p.rect.width >= 110 && p.rect.height >= 15)
+    .sort((a, b) => b.rect.height - a.rect.height || b.rect.x + b.rect.width - (a.rect.x + a.rect.width))[0];
+  return best ? { pane: best.pane_id, direction: 'right', width: best.rect.width } : null;
 }
 
 /** Serialize pane placement across processes (parallel spawns must see each other's panes). */
@@ -72,4 +73,38 @@ export function withPlacementLock(fn, timeoutMs = 20_000) {
   } finally {
     fs.rmSync(lock, { recursive: true, force: true });
   }
+}
+
+/**
+ * Recover how a tab's layout was built, from pane rectangles alone. herdr layouts are
+ * binary split trees, so the rectangles can always be cut cleanly in two (vertically
+ * or horizontally) and each half again. Returns {anchor, steps}: starting from
+ * `anchor` alone, replaying `steps` in order (each "move `pane` next to `target`,
+ * split `dir`, target keeps `ratio`") recreates the layout. Pure; throws if the
+ * rectangles are not a clean split tree.
+ */
+export function planRebuild(panes) {
+  const R = panes.map((p) => ({ id: p.pane_id, x: p.rect.x, y: p.rect.y, w: p.rect.width, h: p.rect.height }));
+  const build = (rs) => {
+    if (rs.length === 1) return { anchor: rs[0].id, steps: [] };
+    for (const [dir, s, e] of [
+      ['right', (r) => r.x, (r) => r.x + r.w],
+      ['down', (r) => r.y, (r) => r.y + r.h],
+    ]) {
+      const lo = Math.min(...rs.map(s));
+      const hi = Math.max(...rs.map(e));
+      const cuts = [...new Set(rs.map(e))].filter((c) => c > lo && c < hi).sort((a, b) => a - b);
+      for (const cut of cuts) {
+        const before = rs.filter((r) => e(r) <= cut);
+        const after = rs.filter((r) => s(r) >= cut);
+        if (!before.length || before.length + after.length !== rs.length) continue;
+        const A = build(before);
+        const B = build(after);
+        const ratio = Math.round(((cut - lo) / (hi - lo)) * 1000) / 1000;
+        return { anchor: A.anchor, steps: [{ pane: B.anchor, dir, target: A.anchor, ratio }, ...A.steps, ...B.steps] };
+      }
+    }
+    throw new Error('layout is not a clean split tree');
+  };
+  return build(R);
 }

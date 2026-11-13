@@ -7,10 +7,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchPlan } from '../../src/core.mjs';
 import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig } from '../../src/store.mjs';
-import { herdr, inHerdr, notify, pluginContext, pluginConfig } from './lib/herdr.mjs';
+import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isBoardPane } from './lib/herdr.mjs';
 import { sync, notifyForEvents } from './lib/sync.mjs';
-import { chooseBoardSplit, tabLayout } from './lib/layout.mjs';
-import { agentKinds, launchAgent, lifecycle, lifecycleSweep, readBoards, writeBoards, stateDir } from './lib/launch.mjs';
+import { chooseBoardSplit, tabLayout, planRebuild, withPlacementLock } from './lib/layout.mjs';
+import { agentKinds, launchAgent, lifecycle, lifecycleSweep, stateDir } from './lib/launch.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SELF = path.join(HERE, 'atf-herdr.mjs');
@@ -19,7 +19,7 @@ const PLUGIN_ID = 'atf.herdr';
 const HELP = `atf-herdr — run and watch ATF agents inside herdr
 
   atf-herdr spawn <task> [--name NAME] [--kind pi] [--direction right|down]
-                  [--target-pane ID] [--fresh|--resume] [--dry-run] [-- <agent args>]
+                  [--target-pane ID | --workspace WS] [--fresh|--resume] [--dry-run] [-- <agent args>]
       start an agent for a task or work package: place a pane (largest pane of the
       tab, split along its long side; an "agents" tab when full), resume the task's
       earlier session or start fresh (ATF decides; --fresh/--resume force), assign
@@ -28,6 +28,9 @@ const HELP = `atf-herdr — run and watch ATF agents inside herdr
                                close idle ATF agents with nothing to do (ephemeral),
                                relaunch/resume agents when work appears for them
   atf-herdr board              open the task board (toggle) for this project
+  atf-herdr overview           open the overview of all known projects (popup)
+  atf-herdr discover           register ATF projects found in any herdr pane
+  atf-herdr recover            repair an interrupted board rearrangement (parked panes)
   atf-herdr tui                run the board in the current terminal
   atf-herdr sync               push labels/progress to herdr and run a sweep now
   atf-herdr enable-sync        install the ATF post-write hook for this project
@@ -37,7 +40,8 @@ Plugin config ($(herdr plugin config-dir atf.herdr)/config.json):
   lifecycle: "ephemeral" (default) | "persistent"   agent_kind: "pi"
   agents: { "<kind>": { "start": [...], "resume": [..."{session}"...], "nativeSkill": bool } }
 
-Plugin actions (atf.herdr.*): board, board-popup, sync, enable-sync.`;
+Plugin actions (atf.herdr.*): board (this project; overview if none here),
+board-popup (overview of all projects), sync, enable-sync.`;
 
 // ---------- args ----------
 const argv = process.argv.slice(2);
@@ -123,7 +127,7 @@ function spawnAgent() {
       taskId: t.id,
       name,
       kind: flags.kind,
-      refPane: flags['target-pane'] || process.env.HERDR_PANE_ID,
+      refPane: flags['target-pane'] || workspacePane(flags.workspace) || process.env.HERDR_PANE_ID,
       direction: flags.direction,
       force,
       extraArgs: agentArgs,
@@ -136,54 +140,191 @@ function spawnAgent() {
   }
 }
 
+/** A pane to place new agents next to in workspace `ws` (its focused pane, else any). */
+function workspacePane(ws) {
+  if (!ws) return null;
+  const panes = herdr(['pane', 'list', '--workspace', ws])?.panes || [];
+  if (!panes.length) fail(`no panes in workspace ${ws}`);
+  return (panes.find((p) => p.focused) || panes[0]).pane_id;
+}
+
 // ---------- board ----------
-function openBoard(placement) {
+function openBoard(placement, { start } = {}) {
   if (!inHerdr()) fail('not running inside herdr');
+  // presses are handled one at a time, so a fast double press can't open two boards
+  const err = withBoardLock(() => toggleBoard(placement, start));
+  if (err) fail(err);
+}
+
+/**
+ * The board panes that exist right now come from herdr itself (plugin panes titled
+ * "ATF board"), not from a state file, so the toggle can't lose track of a board.
+ * Rules (one board per workspace):
+ *  - board(s) in the tab you are looking at       -> close them
+ *  - a board that is its own tab                  -> switch to that tab
+ *  - a board as side panel in another tab         -> close it, open one here
+ */
+function toggleBoard(placement, start) {
   const root = resolveRoot({ optional: true }); // board offers `atf init` when missing
   const dir = root ? path.dirname(root) : userDir();
   const ctx = pluginContext();
   const target = ctx.focused_pane_id || process.env.HERDR_PANE_ID;
-  const ws = ctx.workspace_id || process.env.HERDR_WORKSPACE_ID || 'default';
-  const boards = readBoards();
-
-  // One board per workspace. Toggle: close it if it is in the tab you are looking at;
-  // if it lives in another tab, bring it into view instead.
-  const existing = placement !== 'popup' && boards[ws] && herdr(['pane', 'get', boards[ws]])?.pane;
-  if (existing) {
-    const here = ctx.tab_id || process.env.HERDR_TAB_ID;
-    if (!here || existing.tab_id === here) {
-      herdr(['plugin', 'pane', 'close', boards[ws]]) || herdr(['pane', 'close', boards[ws]]);
-      delete boards[ws];
-      writeBoards(boards);
-    } else herdr(['plugin', 'pane', 'focus', boards[ws]]);
-    return;
+  const ws = ctx.workspace_id || process.env.HERDR_WORKSPACE_ID || null;
+  const here = ctx.tab_id || process.env.HERDR_TAB_ID || null;
+  if (placement !== 'popup') {
+    const panes = herdr(['pane', 'list', ...(ws ? ['--workspace', ws] : [])])?.panes || [];
+    const boards = panes.filter(isBoardPane);
+    const close = (p) => herdr(['plugin', 'pane', 'close', p.pane_id]) || herdr(['pane', 'close', p.pane_id]);
+    const inTab = boards.filter((p) => p.tab_id === here);
+    if (inTab.length) {
+      inTab.forEach(close);
+      return null;
+    }
+    for (const b of boards) {
+      const ownTab = panes.filter((p) => p.tab_id === b.tab_id).length === 1;
+      if (ownTab && herdr(['tab', 'focus', b.tab_id])) {
+        herdr(['plugin', 'pane', 'focus', b.pane_id]);
+        boards.filter((o) => o !== b).forEach(close); // never more than one per workspace
+        return null;
+      }
+    }
+    boards.forEach(close); // side panels elsewhere: replaced by a board here
   }
+  let boardSplit = null;
   const entry = placement === 'popup' ? 'board-popup' : 'board';
   const args = ['plugin', 'pane', 'open', '--plugin', PLUGIN_ID, '--entrypoint', entry, '--cwd', dir, '--env', root ? `ATF_DIR=${root}` : `ATF_INIT_DIR=${dir}`];
   if (target) args.push('--env', `ATF_HERDR_TARGET_PANE=${target}`);
+  if (start) args.push('--env', `ATF_BOARD_START=${start}`);
   if (placement === 'popup') args.push('--placement', 'popup', '--width', '90%', '--height', '85%');
   else {
-    // auto: a tall right-hand column if the tab has one, otherwise a dedicated tab
+    // auto: a full-height right-hand column (the tab is rearranged around it, see
+    // openFullHeight); "beside": next to the tallest pane only; "tab": its own tab
     const pref = flags.placement || pluginConfig().board_placement || 'auto';
+    const layout = target && tabLayout(target);
+    if (pref === 'auto' && layout && layout.area.width >= 110) {
+      const err = withPlacementLock(() => openFullHeight(args, layout));
+      if (!err) return null;
+      process.stderr.write(`atf-herdr: full-height board failed (${err}); placing it beside a pane\n`);
+    }
     const split = pref === 'tab' ? null : target && chooseBoardSplit(target);
+    boardSplit = split;
     if (split) args.push('--placement', 'split', '--target-pane', split.pane, '--direction', 'right', '--focus');
-    else args.push('--placement', 'tab', ...(ws !== 'default' ? ['--workspace', ws] : []), '--focus');
+    else args.push('--placement', 'tab', ...(ws ? ['--workspace', ws] : []), '--focus');
   }
   const res = herdr(args);
-  if (!res) fail(`could not open board (is the ${PLUGIN_ID} plugin linked? \`herdr plugin link ${HERE}\`)`);
+  if (!res) return `could not open board (is the ${PLUGIN_ID} plugin linked? \`herdr plugin link ${HERE}\`)`;
   const paneId = res.plugin_pane?.pane?.pane_id ?? res.pane?.pane_id ?? res.pane_id;
-  // a split board is a side column: ~38% of the tab width, at least 50 columns
-  if (paneId && args.includes('split')) {
-    const area = tabLayout(paneId)?.area;
-    if (area) {
-      const boardW = Math.max(50, Math.round(area.width * 0.38));
-      const amount = Math.min(0.25, Math.max(0, (area.width - boardW) / area.width - 0.5));
-      if (amount > 0.01) herdr(['pane', 'resize', '--pane', paneId, '--direction', 'right', '--amount', amount.toFixed(3)]);
+  // a split board is a side column: ~38% of the pane it was split from, at least 50 columns
+  if (paneId && boardSplit) {
+    const W = boardSplit.width;
+    const boardW = Math.max(50, Math.round(W * 0.38));
+    const amount = Math.min(0.25, Math.max(0, (W - boardW) / W - 0.5));
+    if (amount > 0.01) herdr(['pane', 'resize', '--pane', paneId, '--direction', 'right', '--amount', amount.toFixed(3)]);
+  }
+  return null;
+}
+
+// ---------- full-height board: rearrange the tab around it ----------
+// herdr can only split panes, not the tab. To get a column spanning the whole tab:
+// park every pane but one (the anchor) in a temporary tab, split the lone anchor
+// (now a full-height split), then move the parked panes back, replaying the original
+// split tree next to the anchor. Agents keep running; pane ids stay the same within a
+// workspace. A checkpoint lets `atf-herdr recover` repair an interrupted rearrangement.
+const checkpointFile = () => path.join(stateDir(), 'rebuild.json');
+
+function hx(args) {
+  const r = herdr(args, { timeout: 15_000 });
+  if (!r) throw new Error(`herdr ${args.slice(0, 2).join(' ')} failed`);
+  return r;
+}
+
+function openFullHeight(openArgs, layout) {
+  try {
+    recoverRebuild(); // finish any interrupted earlier rearrangement first
+    const panes = layout.panes;
+    const plan = panes.length > 1 ? planRebuild(panes) : { anchor: panes[0].pane_id, steps: [] };
+    const cp = { tab: layout.tab_id, workspace: layout.workspace_id, anchor: plan.anchor, steps: plan.steps, parked: [], parkTab: null, placeholder: null };
+    if (plan.steps.length) {
+      const park = hx(['tab', 'create', '--workspace', layout.workspace_id, '--label', 'atf-parking', '--no-focus']);
+      cp.parkTab = park.tab.tab_id;
+      cp.placeholder = park.root_pane.pane_id;
+      fs.writeFileSync(checkpointFile(), JSON.stringify(cp));
+      for (const p of panes) {
+        if (p.pane_id === plan.anchor) continue;
+        hx(['pane', 'move', p.pane_id, '--tab', cp.parkTab, '--split', 'right', '--no-focus']);
+        cp.parked.push(p.pane_id);
+        fs.writeFileSync(checkpointFile(), JSON.stringify(cp));
+      }
+    }
+    // the anchor is alone now: splitting it gives a full-height column
+    const res = hx([...openArgs, '--placement', 'split', '--target-pane', plan.anchor, '--direction', 'right', '--focus']);
+    const board = res.plugin_pane?.pane?.pane_id ?? res.pane?.pane_id;
+    const W = layout.area.width;
+    const boardW = Math.max(50, Math.round(W * 0.38));
+    const amount = Math.min(0.25, Math.max(0, (W - boardW) / W - 0.5));
+    if (board && amount > 0.01) herdr(['pane', 'resize', '--pane', board, '--direction', 'right', '--amount', amount.toFixed(3)]);
+    replay(cp);
+    return null;
+  } catch (e) {
+    try {
+      recoverRebuild();
+    } catch {}
+    return e.message;
+  }
+}
+
+/** Move parked panes back in plan order; drop the parking tab; clear the checkpoint. */
+function replay(cp) {
+  for (const st of cp.steps) {
+    hx(['pane', 'move', st.pane, '--tab', cp.tab, '--split', st.dir, '--target-pane', st.target, '--ratio', String(st.ratio), '--no-focus']);
+    cp.parked = cp.parked.filter((id) => id !== st.pane);
+    fs.writeFileSync(checkpointFile(), JSON.stringify(cp));
+  }
+  if (cp.placeholder) herdr(['pane', 'close', cp.placeholder]);
+  fs.rmSync(checkpointFile(), { force: true });
+}
+
+/** Repair an interrupted rearrangement: bring every parked pane home. */
+function recoverRebuild() {
+  let cp;
+  try {
+    cp = JSON.parse(fs.readFileSync(checkpointFile(), 'utf8'));
+  } catch {
+    return false;
+  }
+  const exists = (id) => !!herdr(['pane', 'get', id])?.pane;
+  const stillParked = (id) => herdr(['pane', 'get', id])?.pane?.tab_id === cp.parkTab;
+  // replay what we can in order; anything else is put back next to the anchor
+  for (const st of cp.steps) {
+    if (!stillParked(st.pane)) continue;
+    const target = exists(st.target) && herdr(['pane', 'get', st.target]).pane.tab_id === cp.tab ? st.target : cp.anchor;
+    herdr(['pane', 'move', st.pane, '--tab', cp.tab, '--split', st.dir, '--target-pane', target, '--ratio', String(st.ratio), '--no-focus']) ||
+      herdr(['pane', 'move', st.pane, '--tab', cp.tab, '--split', 'right', '--no-focus']);
+  }
+  if (cp.placeholder && exists(cp.placeholder)) herdr(['pane', 'close', cp.placeholder]);
+  fs.rmSync(checkpointFile(), { force: true });
+  return true;
+}
+
+function withBoardLock(fn) {
+  const lock = path.join(stateDir(), 'board.lock');
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      fs.mkdirSync(lock);
+      break;
+    } catch {
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > 15_000) fs.rmSync(lock, { recursive: true, force: true });
+      } catch {}
+      if (Date.now() - t0 > 10_000) return 'another board toggle is still running';
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
     }
   }
-  if (placement !== 'popup' && paneId) {
-    boards[ws] = paneId;
-    writeBoards(boards);
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
   }
 }
 
@@ -280,7 +421,15 @@ switch (pos[0]) {
     openBoard('split');
     break;
   case 'action-board-popup':
-    openBoard('popup');
+  case 'overview':
+    discoverRoots();
+    openBoard('popup', { start: 'overview-all' }); // quick look: everything that needs you
+    break;
+  case 'recover':
+    process.stdout.write(recoverRebuild() ? 'recovered an interrupted board rearrangement\n' : 'nothing to recover\n');
+    break;
+  case 'discover':
+    process.stdout.write(discoverRoots().join('\n') + '\n');
     break;
   case 'tui':
     await tui();

@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TERMINAL, attentionFor, launchPlan } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, transact } from '../../../src/store.mjs';
-import { herdr, pluginConfig } from './herdr.mjs';
+import { herdr, pluginConfig, sameServer, currentSocket, liveAgents, boardPaneIds } from './herdr.mjs';
 import { chooseSplit, tabLayout, withPlacementLock } from './layout.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -51,8 +51,6 @@ const readJson = (f, d = {}) => {
   }
 };
 const writeJson = (f, v) => fs.writeFileSync(path.join(stateDir(), f), JSON.stringify(v, null, 2));
-export const readBoards = () => readJson('boards.json');
-export const writeBoards = (b) => writeJson('boards.json', b);
 /** Agents launched by ATF (only these are ever closed or relaunched automatically). */
 const regKey = (root, name) => `${root}#${name}`;
 export const readRegistry = () => readJson('agents.json');
@@ -68,7 +66,7 @@ export function placeAgentPane({ cwd, env, refPane, direction }) {
   const envArgs = Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
   const splitOf = (pane, dir) => herdr(['pane', 'split', '--pane', pane, '--direction', dir, '--cwd', cwd, '--no-focus', ...envArgs])?.pane?.pane_id;
   if (refPane && direction) return splitOf(refPane, direction);
-  const exclude = Object.values(readBoards());
+  const exclude = boardPaneIds();
   if (refPane) {
     const c = chooseSplit(refPane, { exclude });
     if (c) return splitOf(c.pane, c.direction);
@@ -195,7 +193,7 @@ export function launchAgent({ root, planId, taskId, name, kind, refPane, directi
   recordSession(root, planId, [leaf.id], name, kind);
 
   const reg = readRegistry();
-  reg[regKey(root, name)] = { name, kind, root, plan: planId, task: target.id, pane, launchedAt: Date.now(), idleSince: null };
+  reg[regKey(root, name)] = { name, kind, root, plan: planId, task: target.id, pane, socket: currentSocket(), launchedAt: Date.now(), idleSince: null };
   writeRegistry(reg);
   return { name, pane, mode, kind, leaf: leaf.id, reason: lp.reason };
 }
@@ -244,15 +242,16 @@ function sweepLocked(root) {
   let pending = false;
   const reg = readRegistry();
   const nudges = readJson('nudges.json');
-  const live = new Map();
-  for (const a of herdr(['agent', 'list'])?.agents || []) if (a.name) live.set(a.name, a);
+  const live = liveAgents();
   const now = Date.now();
 
   for (const id of listPlanIds(root)) {
     const s = loadPlan(root, id);
     if (s.status !== 'active') continue;
     for (const actor of Object.values(s.actors)) {
-      const rec = reg[regKey(root, actor.id)];
+      if (!sameServer(actor)) continue; // agents of another herdr session are not ours to manage
+      let rec = reg[regKey(root, actor.id)];
+      if (rec?.socket && currentSocket() && rec.socket !== currentSocket()) rec = undefined;
       const agent = live.get(actor.id);
       const role = actor.role === 'coordinator' ? 'coordinator' : 'subagent';
       const att = attentionFor(s, actor.id, role);

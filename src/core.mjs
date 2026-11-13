@@ -293,6 +293,46 @@ export function attentionFor(plan, actorId, role) {
 }
 
 /**
+ * What in this plan needs the human driving the agents (as opposed to an agent):
+ * tasks in review, question-blocks (blocked without `on`), failed tasks, and a plan
+ * whose work is all finished but which is still open. Oldest first.
+ * Harness-specific signals (e.g. stalled agents) are added by frontends.
+ */
+export function driverInbox(plan) {
+  const items = [];
+  const since = (t, status) => [...t.history].reverse().find((h) => h.type === 'status' && h.to === status)?.ts ?? t.updated_at;
+  for (const id of plan.order) {
+    const t = plan.tasks[id];
+    if (t.children.length) continue;
+    if (t.status === 'review') items.push({ kind: 'review', task: id, ts: since(t, 'review'), actor: t.owner, message: t.last_message });
+    else if (t.status === 'blocked' && !t.blocked_on.length && !t.answered) items.push({ kind: 'question', task: id, ts: since(t, 'blocked'), actor: t.owner, message: t.last_message });
+    else if (t.status === 'failed') items.push({ kind: 'failed', task: id, ts: since(t, 'failed'), actor: t.owner, message: t.last_message });
+  }
+  const leaves = plan.order.filter((id) => !plan.tasks[id].children.length);
+  if (plan.status === 'active' && leaves.length && leaves.every((id) => TERMINAL.has(plan.tasks[id].status)))
+    items.push({ kind: 'finished', task: null, ts: plan.updated_at, actor: null, message: 'all tasks finished; close the plan' });
+  return items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+}
+
+/** Compact per-plan summary for overviews. */
+export function planSummary(plan) {
+  const leaves = plan.order.map((id) => plan.tasks[id]).filter((t) => !t.children.length);
+  const owners = new Set(leaves.filter((t) => !TERMINAL.has(t.status) && t.owner).map((t) => t.owner));
+  return {
+    id: plan.id,
+    title: plan.title,
+    status: plan.status,
+    progress: plan.progress,
+    counts: plan.counts,
+    total: leaves.length,
+    agents: [...owners],
+    ready_unowned: leaves.filter((t) => t.ready && !t.owner).length,
+    inbox: driverInbox(plan).length,
+    updated_at: plan.updated_at,
+  };
+}
+
+/**
  * Should the next agent for this task resume an earlier session or start fresh?
  * Rule: context belongs to the task. A task that was already worked on (blocked,
  * answered, reopened after review) resumes the session that worked on it; a task

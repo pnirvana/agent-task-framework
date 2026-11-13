@@ -2,9 +2,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { TERMINAL } from '../../../src/core.mjs';
-import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot } from '../../../src/store.mjs';
-import { herdr, herdrAsync, agentIndex, notify, inHerdr } from './herdr.mjs';
+import { TERMINAL, driverInbox, planSummary } from '../../../src/core.mjs';
+import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName } from '../../../src/store.mjs';
+import { herdr, herdrAsync, agentIndex, notify, inHerdr, sameServer, discoverRoots } from './herdr.mjs';
 import { sync, progressText } from './sync.mjs';
 import { lifecycleSweep } from './launch.mjs';
 
@@ -58,70 +58,25 @@ const ago = (ts) => {
 };
 
 /**
- * Entry point. Without an .atf root, show an empty state that can create one
- * (or picks it up as soon as someone runs `atf init` in that directory).
+ * Entry point. With an .atf root: that project's board. Without one (or when asked to
+ * start there): the overview of all known projects, offering `i` to create a project
+ * in `initDir`.
  */
 export function runBoard(opts) {
-  if (opts.root) return runMain(opts);
-  const dir = opts.initDir || process.cwd();
-  const out = process.stdout;
-  const draw = () => {
-    const W = out.columns || 80;
-    const H = out.rows || 24;
-    const lines = [
-      [[' ATF ', 'inverse bold'], [' no ATF project here', 'bold']],
-      [['─'.repeat(W), 'gray']],
-      [],
-      [['  No .atf/ directory in', '']],
-      [['  ' + dir, 'cyan']],
-      [['  (or any parent directory / main git worktree)', 'dim']],
-      [],
-      [['  i', 'bold green'], ['  create one here (atf init)', '']],
-      [['  q', 'bold'], ['  close', '']],
-      [],
-      [['  Then let your coordinator agent create a plan (atf plan new …),', 'dim']],
-      [['  or run it yourself. This board updates live.', 'dim']],
-    ];
-    while (lines.length < H) lines.push([]);
-    lines.length = H;
-    out.write(`${ESC}H` + lines.map((l) => fit(l, W) + `${ESC}K`).join('\r\n'));
-  };
-  let done = false;
-  const proceed = (root) => {
-    if (done) return;
-    done = true;
-    clearInterval(poll);
-    process.stdin.removeListener('data', onData);
-    out.removeListener('resize', draw);
-    runMain({ ...opts, root });
-  };
-  const onData = (d) => {
-    if (d === 'i' || d === 'I') proceed(initRoot(dir));
-    else if (d === 'q' || d === '\x1b' || d === '\x03') {
-      out.write(`${ESC}?25h${ESC}?1049l`);
-      process.exit(0);
-    }
-  };
-  out.write(`${ESC}?1049h${ESC}?25l${ESC}2J`);
-  out.on('resize', draw);
-  if (process.stdin.isTTY) process.stdin.setRawMode(true);
-  process.stdin.setEncoding('utf8');
-  process.stdin.on('data', onData);
-  const poll = setInterval(() => {
-    const r = findRoot(dir);
-    if (r) proceed(r);
-  }, 1500);
-  draw();
+  const start = opts.start ?? process.env.ATF_BOARD_START ?? (opts.root ? null : 'overview-all');
+  return runMain({ ...opts, start, initDir: opts.initDir || process.cwd() });
 }
 
 const TABS = [
+  ['overview', 'Overview'],
   ['tasks', 'Tasks'],
   ['agents', 'Agents'],
   ['plan', 'Plan'],
   ['log', 'Log'],
 ];
 
-function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
+function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd, start, initDir }) {
+  let root = initialRoot; // the project whose plan is open; may change from the overview
   const out = process.stdout;
   const ui = {
     plans: [],
@@ -132,7 +87,10 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
     collapsed: new Set(),
     sel: 0,
     scroll: 0,
-    tab: 'tasks', // tasks | agents | plan | log
+    tab: start === 'overview-all' || !initialRoot ? 'overview' : 'tasks', // overview | tasks | agents | plan | log
+    scope: start === 'overview-all' ? 'all' : 'project', // overview: this project or all known projects
+    ov: { entries: [], sel: 0, scroll: 0 },
+    cache: new Map(), // root#plan -> {mtime, state}
     overlay: null, // detail | help | null
     scrolls: {}, // per-view scroll offsets
     agents: new Map(),
@@ -140,7 +98,8 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
     flash: null,
     lastSeqSeen: new Map(), // plan -> seq (for notifications)
   };
-  const hookNotifies = (readConfig(root).hooks?.post_write || []).some((h) => h.join(' ').includes('atf-herdr'));
+  const hasHook = (r) => !!r && (readConfig(r).hooks?.post_write || []).some((h) => h.join(' ').includes('atf-herdr'));
+  let hookNotifies = hasHook(root);
   const view = () => ui.overlay || ui.tab;
 
   function flash(msg, style = 'yellow') {
@@ -150,6 +109,10 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
 
   // ---------- data ----------
   function loadPlans() {
+    if (!root) {
+      ui.plans = [];
+      return setPlan();
+    }
     const states = listPlanIds(root).map((id) => loadPlan(root, id));
     const rank = (s) => (s.status === 'active' ? 0 : s.status === 'paused' ? 1 : 2);
     states.sort((a, b) => rank(a) - rank(b) || (b.updated_at || '').localeCompare(a.updated_at || ''));
@@ -233,6 +196,194 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
   const effStatus = (t) => t.rollup_status ?? t.status;
   const packageOf = (t) => (t.assignee ? null : [...t.path].reverse().find((id) => ui.state.tasks[id].assignee) ?? null);
 
+  // ---------- projects / overview ----------
+  /** Open plan `planId` of project `r` (optionally selecting a task). */
+  function switchRoot(r, planId, taskId) {
+    if (r !== root) {
+      for (const p of watched) fs.unwatchFile(p);
+      watched.clear();
+      root = r;
+      hookNotifies = hasHook(root);
+      ui.collapsed.clear();
+      ui.state = null;
+      ui.plans = [];
+    }
+    loadPlans();
+    const idx = ui.plans.findIndex((p) => p.id === planId);
+    if (idx >= 0) ui.planIdx = idx;
+    setPlan();
+    if (taskId) {
+      for (const pid of ui.state?.tasks[taskId]?.path || []) ui.collapsed.delete(pid);
+      setPlan();
+      ui.sel = Math.max(0, ui.rows.indexOf(taskId));
+    }
+    ui.scrolls = {};
+    watchAll();
+  }
+
+  function cachedPlan(r, id) {
+    const key = `${r}#${id}`;
+    let mtime = 0;
+    try {
+      mtime = fs.statSync(eventsPath(r, id)).mtimeMs;
+    } catch {}
+    const hit = ui.cache.get(key);
+    if (hit && hit.mtime === mtime) return hit.state;
+    const state = loadPlan(r, id);
+    ui.cache.set(key, { mtime, state });
+    return state;
+  }
+
+  function scopeRoots() {
+    if (ui.scope === 'all') {
+      const roots = knownRoots();
+      if (root && !roots.includes(root)) roots.unshift(root);
+      return roots;
+    }
+    return root ? [root] : [];
+  }
+
+  /** Plans in scope plus the inbox (what needs the human), as one selectable list. */
+  function buildOverview() {
+    const plans = [];
+    const items = [];
+    for (const r of scopeRoots()) {
+      for (const id of listPlanIds(r)) {
+        const st = cachedPlan(r, id);
+        if (!['active', 'paused'].includes(st.status)) continue;
+        const sum = planSummary(st);
+        let working = 0;
+        let idle = 0;
+        let elsewhere = 0;
+        for (const who of sum.agents) {
+          const actor = st.actors[who];
+          if (actor && !sameServer(actor)) elsewhere++;
+          else {
+            const a = ui.agents.get(`name:${who}`);
+            if (a?.agent_status === 'working') working++;
+            else if (a) idle++;
+          }
+        }
+        plans.push({ type: 'plan', root: r, plan: id, st, sum, working, idle, elsewhere });
+        for (const it of driverInbox(st)) items.push({ type: 'item', root: r, plan: id, st, ...it });
+        // stalled agents: task in progress, its (local) agent idle for a while
+        for (const tid of st.order) {
+          const t = st.tasks[tid];
+          if (t.status !== 'in_progress' || t.children.length || !t.owner) continue;
+          const actor = st.actors[t.owner];
+          if (actor && !sameServer(actor)) continue;
+          const a = ui.agents.get(`name:${t.owner}`);
+          const since = a && ui.agentsSince.get(`pane:${a.pane_id}`)?.since;
+          if (a && ['idle', 'done'].includes(a.agent_status) && since && Date.now() - since > STALE_MS)
+            items.push({ type: 'item', root: r, plan: id, st, kind: 'stale', task: tid, ts: new Date(since).toISOString(), actor: t.owner, message: `${t.owner} idle, task still in progress` });
+        }
+      }
+    }
+    plans.sort((a, b) => b.sum.inbox - a.sum.inbox || (b.st.updated_at || '').localeCompare(a.st.updated_at || ''));
+    items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+    ui.ov.entries = [...plans, ...items];
+    ui.ov.sel = Math.min(ui.ov.sel, Math.max(0, ui.ov.entries.length - 1));
+    return { plans, items };
+  }
+
+  const KIND_STYLE = { review: ['◎ review', 'magenta'], question: ['⊘ question', 'red'], failed: ['✗ failed', 'red'], stale: ['stale?', 'red bold'], finished: ['● finished', 'green'] };
+
+  function overviewLines(W) {
+    const { plans, items } = buildOverview();
+    const L = [];
+    const sel = ui.ov.entries[ui.ov.sel];
+    let selLine = 0;
+    const many = new Set(plans.map((p) => p.root)).size > 1 || ui.scope === 'all';
+    if (!root && initDir)
+      L.push([[' No ATF project in ', 'yellow'], [initDir, 'cyan'], ['  — press ', 'yellow'], ['i', 'bold green'], [' to create one there', 'yellow']], []);
+    L.push([[` ${plans.length} active plan${plans.length === 1 ? '' : 's'}`, 'bold'], [ui.scope === 'all' ? `  across ${scopeRoots().length} project${scopeRoots().length === 1 ? '' : 's'}` : `  in ${root ? projectName(root) : '-'}`, 'dim']]);
+    if (!plans.length) L.push([['   none. Start one with `atf plan new <title>` (or press a for all projects).', 'dim']]);
+    const projW = many ? Math.min(18, Math.max(...plans.map((p) => projectName(p.root).length), 7)) + 2 : 0;
+    const titleW = Math.max(12, Math.min(40, W - projW - 58));
+    for (const p of plans) {
+      const isSel = p === sel;
+      if (isSel) selLine = L.length;
+      const pct = Math.round(p.sum.progress * 100);
+      const title = [...p.sum.title].length > titleW ? [...p.sum.title].slice(0, titleW - 1).join('') + '…' : p.sum.title.padEnd(titleW);
+      const base = isSel ? 'inverse ' : '';
+      L.push([
+        [isSel ? ' › ' : '   ', isSel ? 'cyan bold' : ''],
+        [many ? projectName(p.root).slice(0, projW - 2).padEnd(projW) : '', (base + 'dim').trim()],
+        [title + ' ', (base + 'bold').trim()],
+        ...bar(p.sum.progress, 10),
+        [` ${String(pct).padStart(3)}% `, 'dim'],
+        [`${p.sum.counts.done}/${p.sum.total} `, 'dim'],
+        [p.working ? `⚙${p.working} ` : '', 'blue'],
+        [p.idle ? `◌${p.idle} ` : '', 'yellow'],
+        [p.elsewhere ? `↗${p.elsewhere} ` : '', 'gray'],
+        [p.sum.ready_unowned ? `${p.sum.ready_unowned} ready ` : '', 'green'],
+        [p.sum.inbox ? `⚑${p.sum.inbox} ` : '', 'red bold'],
+        [p.st.status === 'paused' ? 'paused ' : '', 'yellow'],
+        [ago(p.st.updated_at), 'dim'],
+      ]);
+    }
+    L.push([], [[' inbox', 'bold'], [items.length ? `  ${items.length} item${items.length === 1 ? ' needs' : 's need'} you, oldest first` : '  nothing needs you', 'dim']]);
+    for (const it of items) {
+      const isSel = it === sel;
+      if (isSel) selLine = L.length;
+      const [label, color] = KIND_STYLE[it.kind] || [it.kind, ''];
+      const t = it.task ? it.st.tasks[it.task] : null;
+      const where = `${many ? projectName(it.root) + ' / ' : ''}${it.st.title}`;
+      L.push([
+        [isSel ? ' › ' : '   ', isSel ? 'cyan bold' : ''],
+        [label.padEnd(11), isSel ? `inverse ${color}`.trim() : color],
+        [` ${where}  `, 'dim'],
+        [t ? `${t.id} ${t.title} ` : '', 'bold'],
+        [it.actor ? `@${it.actor} ` : '', 'cyan'],
+        [it.message ? `— ${it.message} ` : '', 'dim'],
+        [ago(it.ts), 'dim'],
+      ]);
+    }
+    return { lines: L, selLine };
+  }
+
+  /**
+   * `g` in the overview: jump to where the selected entry is being worked on.
+   *  inbox item -> its agent's pane
+   *  plan row   -> the plan's coordinator, else one of its live agents (working first),
+   *                else any pane whose directory is inside the project (its workspace/tab)
+   */
+  async function goToEntry() {
+    const e = ui.ov.entries[ui.ov.sel];
+    if (!e) return;
+    const done = () => (popup ? quit() : draw());
+    const local = (who) => who && sameServer(e.st.actors[who] || {});
+    if (e.type === 'item' && e.actor) {
+      if (!local(e.actor)) return flash(`${e.actor} runs in another herdr session`, 'red');
+      if (await herdrAsync(['agent', 'focus', e.actor])) return done();
+      return flash(`no live herdr agent for ${e.actor}; press ⏎ to open the task instead`, 'red');
+    }
+    const actors = Object.values(e.st.actors).filter((a) => local(a.id));
+    const live = (a) => ui.agents.get(`name:${a.id}`);
+    const candidates = [
+      ...actors.filter((a) => a.role === 'coordinator' && live(a)),
+      ...actors.filter((a) => a.role !== 'coordinator' && live(a)?.agent_status === 'working'),
+      ...actors.filter((a) => a.role !== 'coordinator' && live(a)),
+    ];
+    for (const a of candidates) if (await herdrAsync(['agent', 'focus', a.id])) return done();
+    // nobody running: any pane in the project's directory
+    const projDir = path.dirname(e.root);
+    const panes = (await herdrAsync(['pane', 'list']))?.panes || [];
+    const inside = (d) => d && (d === projDir || d.startsWith(projDir + path.sep));
+    const pane = panes.find((p) => !p.label && (inside(p.foreground_cwd) || inside(p.cwd)));
+    if (pane && (await herdrAsync(['workspace', 'focus', pane.workspace_id])) && (await herdrAsync(['tab', 'focus', pane.tab_id]))) return done();
+    flash(`no herdr pane is open in ${projectName(e.root)}`, 'yellow');
+  }
+
+  function openEntry() {
+    const e = ui.ov.entries[ui.ov.sel];
+    if (!e) return;
+    switchRoot(e.root, e.plan, e.type === 'item' ? e.task : null);
+    ui.tab = 'tasks';
+    ui.overlay = e.type === 'item' && e.task ? 'detail' : null;
+    ui.scrolls.detail = 0;
+  }
+
   // ---------- rendering helpers ----------
   function bar(frac, w) {
     const fill = Math.round(frac * w);
@@ -242,15 +393,24 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
     ];
   }
 
+  function tabBar() {
+    const tabs = [[' ', '']];
+    TABS.forEach(([id, label], i) => tabs.push([` ${i} ${label} `, ui.tab === id ? 'inverse bold' : 'dim'], [' ', '']));
+    return tabs;
+  }
+
   function header(W) {
     const s = ui.state;
-    if (!s) return [[[' ATF ', 'inverse bold'], [' no plans in ' + root, 'dim']]];
+    if (ui.tab === 'overview' && !ui.overlay)
+      return [
+        [[' ATF ', 'inverse bold'], [' overview', 'bold'], [ui.scope === 'all' ? '  · all projects' : `  · ${root ? projectName(root) : 'no project'}`, 'dim'], ['   a: ' + (ui.scope === 'all' ? 'this project' : 'all projects'), 'dim']],
+        [[' ', '']],
+        tabBar(),
+      ];
+    if (!s) return [[[' ATF ', 'inverse bold'], [root ? ' no plans in ' + root : ' no project selected: press 0 for the overview', 'dim']], [], tabBar()];
     const pct = Math.round(s.progress * 100);
     const planNav = ui.plans.length > 1 ? `  plan ${ui.planIdx + 1}/${ui.plans.length} [p]` : '';
-    const tabs = [[' ', '']];
-    TABS.forEach(([id, label], i) => {
-      tabs.push([` ${i + 1} ${label} `, ui.tab === id ? 'inverse bold' : 'dim'], [' ', '']);
-    });
+    const tabs = tabBar();
     return [
       [[' ATF ', 'inverse bold'], [' ' + s.title, 'bold'], [s.status !== 'active' ? `  (${s.status})` : '', 'yellow'], [planNav, 'dim']],
       [[' ', ''], ...bar(s.progress, Math.max(8, Math.min(30, W - 40))), [` ${pct}%  `, 'bold'], [progressText(s), 'dim']],
@@ -483,7 +643,20 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
     const sym = (g, color, name, desc) => [['   ' + g + ' ', color], [name.padEnd(13), color], [desc, '']];
     return [
       H('Views'),
-      T('Tab / 1-4    Tasks · Agents · Plan · Log          p / P   next / previous plan'),
+      T('Tab / 0-4    Overview · Tasks · Agents · Plan · Log    p / P  next / previous plan'),
+      T('esc          walks up: details -> Tasks -> Overview -> quit'),
+      [],
+      H('Overview (0)'),
+      T('active plans of this project (a: all known projects), then the inbox: everything'),
+      T('that needs you, oldest first. ↑↓ select   ⏎ open plan / task inside the board'),
+      T('g  jump in herdr: item -> its agent; plan -> its coordinator, else an agent of the'),
+      T('   plan, else a pane in the project directory (its workspace and tab)'),
+      [['   ◎ review  ', 'magenta'], ['agent finished, approve or reopen', '']],
+      [['   ⊘ question', 'red'], [' agent blocked on a question (not on another task)', '']],
+      [['   ✗ failed  ', 'red'], ['agent gave up', '']],
+      [['   stale?    ', 'red bold'], ['task in progress, its agent idle > 90s', '']],
+      [['   ● finished', 'green'], [' all tasks done, plan still open', '']],
+      [['   ⚙2 ◌1 ↗1  ', ''], ['agents working / idle / in another herdr session; ⚑ inbox items', '']],
       [],
       H('Keys (Tasks view)'),
       T('↑↓ j/k  move        ←→ h/l  collapse / expand        space  toggle subtree'),
@@ -524,6 +697,7 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
   function footer() {
     if (ui.flash && ui.flash.until > Date.now()) return [[' ' + ui.flash.msg, ui.flash.style]];
     const keys = {
+      overview: `↑↓ select  ⏎ open in board  g jump to pane  a ${ui.scope === 'all' ? 'this project' : 'all projects'}  ? help  q quit`,
       tasks: '↑↓ move  ←→ fold  ⏎ details  g agent  s spawn  a approve  tab views  ? help  q quit',
       agents: '↑↓ scroll  tab views  ? help  q quit',
       plan: '↑↓ scroll  tab views  ? help  q quit',
@@ -547,7 +721,13 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
     const bodyH = H - lines.length - 1;
     const v = view();
 
-    if (!ui.state) lines.push([[' No plans yet. Create one with `atf plan new <title>`.', 'dim']]);
+    if (v === 'overview') {
+      const { lines: all, selLine } = overviewLines(W);
+      if (selLine < ui.ov.scroll + 1) ui.ov.scroll = Math.max(0, selLine - 1);
+      if (selLine >= ui.ov.scroll + bodyH - 1) ui.ov.scroll = selLine - bodyH + 2;
+      lines.push(...all.slice(ui.ov.scroll, ui.ov.scroll + bodyH));
+    } else if (v === 'help') scrolled(lines, helpLines(), 'help', bodyH);
+    else if (!ui.state) lines.push([[' No plans yet. Create one with `atf plan new <title>`.', 'dim']]);
     else if (v === 'help') scrolled(lines, helpLines(), 'help', bodyH); else if (v === 'detail') scrolled(lines, detailLines(ui.rows[ui.sel], W), 'detail', bodyH);
     else if (v === 'agents') scrolled(lines, agentLines(W), 'agents', bodyH);
     else if (v === 'plan') scrolled(lines, planLines(W), 'plan', bodyH);
@@ -641,6 +821,7 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
   // ---------- lifecycle ----------
   const watched = new Set();
   function watchAll() {
+    if (!root) return;
     for (const id of listPlanIds(root)) {
       const p = eventsPath(root, id);
       if (watched.has(p)) continue;
@@ -675,16 +856,36 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
       else ui.overlay = null;
     }
     else if (k === '\x1b') {
+      // Esc walks up: overlay -> plan tab -> Tasks -> Overview -> quit
       if (ui.overlay) ui.overlay = null;
+      else if (ui.tab === 'overview') return quit();
       else if (ui.tab !== 'tasks') ui.tab = 'tasks';
-      else return quit();
+      else ui.tab = 'overview';
     } else if (k === '\t' || k === '\x1b[Z') {
       const i = TABS.findIndex(([id]) => id === ui.tab);
       ui.tab = TABS[(i + (k === '\t' ? 1 : TABS.length - 1)) % TABS.length][0];
       ui.overlay = null;
-    } else if (/^[1-4]$/.test(k)) {
-      ui.tab = TABS[Number(k) - 1][0];
+    } else if (/^[0-4]$/.test(k)) {
+      ui.tab = TABS[Number(k)][0];
       ui.overlay = null;
+    } else if (v === 'overview') {
+      const n2 = ui.ov.entries.length;
+      if (UP.includes(k)) ui.ov.sel = Math.max(0, ui.ov.sel - 1);
+      else if (DOWN.includes(k)) ui.ov.sel = Math.min(n2 - 1, ui.ov.sel + 1);
+      else if (k === '\x1b[5~') ui.ov.sel = Math.max(0, ui.ov.sel - page);
+      else if (k === '\x1b[6~') ui.ov.sel = Math.min(n2 - 1, ui.ov.sel + page);
+      else if (k === '\r') openEntry();
+      else if (k === 'g') return goToEntry();
+      else if (k === 'i' && !root && initDir) {
+        switchRoot(initRoot(initDir), null);
+        ui.tab = 'tasks';
+        flash(`created ${initDir}/.atf — your coordinator can now start a plan (atf plan new …)`, 'green');
+      } else if (k === 'a') {
+        ui.scope = ui.scope === 'all' ? 'project' : 'all';
+        if (ui.scope === 'all' && inHerdr()) discoverRoots();
+        ui.ov.sel = 0;
+        ui.ov.scroll = 0;
+      } else if (k === '?') ui.overlay = 'help';
     } else if (k === '?') ui.overlay = 'help';
     else if (k === 'p' || k === 'P') {
       if (ui.plans.length > 1) {
@@ -742,15 +943,16 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
 
   loadPlans();
   watchAll();
-  if (inHerdr() && !hookNotifies) sync(root);
+  if (root && inHerdr() && !hookNotifies) sync(root);
+  if (ui.scope === 'all' && inHerdr()) discoverRoots();
   for (const s of ui.plans) ui.lastSeqSeen.set(s.id, s.last_seq);
   draw();
   refreshAgents();
   setInterval(refreshAgents, 3000);
   // agents go idle after their last write (no hook fires then): sweep periodically too
-  if (inHerdr()) setInterval(() => lifecycleSweep(root), 20_000);
+  if (inHerdr()) setInterval(() => root && lifecycleSweep(root), 20_000);
   setInterval(() => {
-    if (listPlanIds(root).length !== ui.plans.length) loadPlans(); // plan created/removed
+    if (root && listPlanIds(root).length !== ui.plans.length) loadPlans(); // plan created/removed
     watchAll();
     draw(); // refresh relative times / flash expiry
   }, 2000);

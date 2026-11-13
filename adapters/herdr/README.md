@@ -10,6 +10,7 @@ actionable inside herdr. Optional: ATF itself does not depend on any of this.
 | **Sidebar progress** | workspace tokens `$atf_plan`, `$atf_progress` (`3/5 ✓ 1 ◐ 1 ⊘`) for the Spaces sidebar |
 | **Notifications** | herdr notification when a task becomes blocked, needs review, or fails, and when a plan finishes |
 | **Stall detection** | board flags `stale?` when a task is in progress but its herdr agent has been idle > 90s (an agent that stopped without reporting) |
+| **Overview** | tab `0` of the board: active plans of this project or all known projects (`a`), and an inbox of everything that needs you (reviews, questions, failures, stalled agents, finished plans), oldest first; ⏎ jumps into the plan/task, `g` to the agent |
 | **Spawn** | `s` on a ready task (or `atf-herdr spawn T3`) opens a pane, starts pi with the atf skill, assigns the task, and sends the kickoff prompt |
 
 ## Install
@@ -31,10 +32,11 @@ command = "atf.herdr.board"
 description = "ATF task board"
 
 [[keys.command]]
-key = "prefix+T"
+key = "prefix+alt+t"
 type = "plugin_action"
 command = "atf.herdr.board-popup"
-description = "ATF quick board"
+description = "ATF overview (all plans)"
+
 ```
 
 ### Sidebar rows (optional, same file)
@@ -55,9 +57,12 @@ Then `herdr server reload-config`.
    for this project** once (or `atf-herdr enable-sync`). This adds a post-write hook to
    `.atf/config.json`, so every `atf` write from any pane updates labels, sidebar, and
    notifications even while the board is closed.
-2. Open the board with `prefix+t`. The project is found from the focused pane's cwd
-   (walking up to parents and the main git worktree). If there is no `.atf/` yet, the
-   board offers to create one (`i`) and picks it up live if `atf init` runs elsewhere.
+2. `prefix+t` toggles the board for the focused pane's project (found from its cwd,
+   walking up to parents and the main git worktree). In a pane without a project it
+   opens the overview of all projects and offers `i` to create one there.
+   `prefix+alt+t` is the quick look: a popup with the overview of all projects and the
+   inbox; ⏎ drills into any plan or task. Inside either, `0`/Esc reach the overview and
+   `a` switches between this project and all projects.
 3. Spawn workers from the board (`s`) or the CLI:
    ```sh
    atf-herdr spawn T3 --name worker-1            # pi + atf skill, split right
@@ -65,10 +70,26 @@ Then `herdr server reload-config`.
    atf-herdr spawn T5 --dry-run                  # print the herdr commands only
    ```
 
+### Several workspaces, sessions and projects
+
+- Agents can run in any herdr workspace: live state, labels, nudges and the lifecycle
+  sweep work across all workspaces of the herdr server. Agents are found by name, so a
+  pane moved to another workspace keeps working.
+- Events record the herdr server (`herdr_socket`). Agents of *another* herdr session
+  (or machine) are shown read-only (`↗` in the overview) and never prompted, closed or
+  relaunched, because their pane ids and names may collide with local ones.
+- `atf-herdr spawn T3 --workspace w4` places the agent in another workspace; relaunched
+  agents go next to the plan's other agents (or its coordinator).
+- Projects are discovered from the working directories of all herdr panes (when the
+  overview opens with all projects, or `atf-herdr discover`) and from `atf init` /
+  plan creation. Plans on another machine are only visible if the project directory is
+  shared.
+
 ### Board views
 
-`Tab` / `1`–`4` switch between:
+`Tab` / `0`–`4` switch between (Esc walks back up: details → Tasks → Overview → quit):
 
+- **Overview**: see above.
 - **Tasks**: the plan's task tree with connectors. `▣ name` marks a work package (a parent
   task owned by one agent); `↳name` is ownership inherited from the package. Below the tree:
   needs-attention list and a preview of the selected task (with its breadcrumb).
@@ -82,7 +103,8 @@ Then `herdr server reload-config`.
 
 | key | action |
 |-----|--------|
-| `Tab` / `1`–`4` | switch view |
+| `Tab` / `0`–`4` | switch view (`0` Overview) |
+| `a` (Overview) | this project ↔ all known projects |
 | `↑↓` / `jk`, PgUp/PgDn | select / scroll |
 | `←→` / `hl`, `space` | collapse / expand subtrees (`←` on a leaf jumps to its parent) |
 | `⏎` | full task details (scrollable) |
@@ -101,10 +123,18 @@ Then `herdr server reload-config`.
 { "agent_kind": "pi", "board_placement": "auto" }
 ```
 
-`board_placement`: `auto` (default) opens the board as a full-height right column when
-the tab has a pane at least 110 columns wide and three-quarters of the tab's height,
-otherwise as its own tab. `tab` always opens it as a tab. `prefix+t` toggles it per
-workspace either way; `prefix+alt+t` is the popup.
+`board_placement`:
+- `auto` (default): a **full-height right-hand column** (about 38% of the tab, at least 50
+  columns). herdr can only split panes, not a whole tab, so the adapter rearranges the
+  tab around the board: it parks the other panes in a temporary tab, splits the remaining
+  one, and moves the parked panes back in their original arrangement (the same technique
+  as herdr-nvim's sidebar). Agents keep running; it takes a fraction of a second. If a
+  rearrangement is interrupted, `atf-herdr recover` (or the next toggle) brings the
+  parked panes back. Tabs narrower than 110 columns get the board as its own tab.
+- `beside`: no rearranging; the board splits the tallest pane that has room.
+- `tab`: always its own tab.
+
+`prefix+t` toggles it per workspace either way; `prefix+alt+t` is the overview popup.
 
 ### Agent lifecycle and resuming
 

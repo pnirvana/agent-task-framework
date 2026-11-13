@@ -3,7 +3,7 @@
 // Stateless: every run recomputes the full desired state from the event logs.
 import { TERMINAL } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, readEvents, getCurrentPlan } from '../../../src/store.mjs';
-import { herdr, notify } from './herdr.mjs';
+import { herdr, notify, sameServer, liveAgents } from './herdr.mjs';
 
 const SOURCE = 'atf';
 const GLYPH = { todo: '○', in_progress: '◐', blocked: '⊘', review: '◎', done: '●', failed: '✗', cancelled: '–' };
@@ -31,7 +31,7 @@ function activePlans(root) {
  *  panes:      paneId -> { title, tokens } | null (clear)
  *  workspaces: wsId   -> tokens
  */
-export function desiredState(root, extraWorkspace) {
+export function desiredState(root, extraWorkspace, live = liveAgents()) {
   const plans = activePlans(root);
   const current = getCurrentPlan(root);
   const panes = new Map();
@@ -39,7 +39,10 @@ export function desiredState(root, extraWorkspace) {
 
   for (const s of plans) {
     for (const actor of Object.values(s.actors)) {
-      const pane = actor.ctx?.herdr_pane;
+      if (!sameServer(actor)) continue; // another herdr session: its pane ids mean nothing here
+      // prefer the agent's live pane (panes moved between workspaces get new ids)
+      const agent = live.get(actor.id);
+      const pane = agent?.pane_id ?? actor.ctx?.herdr_pane;
       if (!pane) continue;
       const tasks = actor.tasks.map((id) => s.tasks[id]).sort((a, b) => (RANK[a.status] ?? 9) - (RANK[b.status] ?? 9));
       const t = tasks[0];
@@ -67,7 +70,7 @@ export function desiredState(root, extraWorkspace) {
           });
         else if (!prev) panes.set(pane, null);
       }
-      const ws = actor.ctx?.herdr_workspace;
+      const ws = agent?.workspace_id ?? actor.ctx?.herdr_workspace;
       if (ws) consider(wsPlan, ws, s, current);
     }
   }
