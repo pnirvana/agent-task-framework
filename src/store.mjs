@@ -232,7 +232,7 @@ export function newPlanId(title) {
   const slug = String(title)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 32);
+    .slice(0, 32)
+    .replace(/^-+|-+$/g, '');
   return `${slug || 'plan'}-${crypto.randomBytes(2).toString('hex')}`;
 }
