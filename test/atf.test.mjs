@@ -494,3 +494,28 @@ test('start --early: before dependencies, then block --on and resume', () => {
   run(['edit', 'T2', '--dep', '']);
   assert.deepEqual(run(['show', 'T2']).deps, [], "--dep '' removes all dependencies");
 });
+
+test('wait: no old events for a new agent; events already acted on are not repeated', () => {
+  const { run } = sandbox();
+  run(['add', 'a']); // T1
+  run(['add', 'b']); // T2
+  run(['note', 'T1', 'context for whoever does T1']);
+  run(['assign', 'T1', 'fresh']);
+  const fresh = { ATF_ACTOR: 'fresh', ATF_ROLE: 'subagent' };
+  // a brand-new agent's first wait: ready work (level), but no history from before it existed
+  let r = run(['wait', '--timeout', '1500'], fresh);
+  assert.deepEqual(r.attention, [{ task: 'T1', reason: 'ready' }]);
+  assert.deepEqual(r.events, []);
+  // coordinator: T1 goes to review, coordinator acts on it without waiting (woken by a message)
+  run(['wait', '--timeout', '1500']); // coordinator is up to date here
+  run(['start', 'T1'], fresh);
+  run(['review', 'T1', '-m', 'check'], fresh); // coordinator is NOT waiting now ...
+  run(['assign', 'T2', 'other']);
+  const other = { ATF_ACTOR: 'other', ATF_ROLE: 'subagent' };
+  run(['start', 'T2'], other);
+  run(['done', 'T2', '-m', 'finished while the coordinator was busy'], other);
+  run(['note', 'T1', 'looked at it']); // ... it is woken by a message and acts on T1
+  r = run(['wait', '--timeout', '1500']);
+  assert.deepEqual(r.events.map((e) => [e.task, e.data.status]), [['T2', 'done']], 'T1 review event not repeated, T2 still reported');
+  assert.deepEqual(r.attention, [{ task: 'T1', reason: 'review' }], 'T1 is still in review: level attention remains');
+});

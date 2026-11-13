@@ -885,8 +885,11 @@ const commands = {
     // Where to report from. Explicit --since wins. Otherwise (default mode) from this
     // actor's cursor, i.e. where its previous wait left off, so nothing that happened
     // between two waits is lost; first time: from the actor's own last action.
+    // Where to report from: --since; else this actor's cursor (where its previous wait
+    // left off); else its own last action; a brand-new actor (no cursor, no own events)
+    // starts now: it has nothing to catch up on (attention is level-triggered anyway).
     const lastOwn = () => readEvents(root, planId).reduce((m, e) => (e.actor?.id === actor.id ? e.seq : m), 0);
-    const startSeq = FLAGS.since !== undefined ? Number(FLAGS.since) : explicit ? now0.last_seq : (readCursor(root, planId, actor.id) ?? lastOwn());
+    const startSeq = FLAGS.since !== undefined ? Number(FLAGS.since) : explicit ? now0.last_seq : (readCursor(root, planId, actor.id) ?? (lastOwn() || now0.last_seq));
     const leaves = (st) => st.order.map((id) => st.tasks[id]).filter((t) => !t.children.length);
 
     const finish = (st, attention, events, note) => {
@@ -914,7 +917,11 @@ const commands = {
       // Default: level-triggered on what needs *this* actor, so a wakeup can never be missed.
       const attention = attentionFor(st, actor.id, actor.role);
       const isCoord = actor.role === 'coordinator';
-      const hits = evs.filter(
+      // An event about a task counts as handled once this actor wrote anything about that
+      // task afterwards (e.g. it was woken by a message and acted): do not repeat it.
+      const ownLastOnTask = {};
+      for (const e of readEvents(root, planId)) if (e.actor?.id === actor.id && e.task) ownLastOnTask[e.task] = e.seq;
+      const hits = evs.filter((e) => !(e.task && (ownLastOnTask[e.task] ?? 0) > e.seq)).filter(
         (e) =>
           e.actor?.id !== actor.id &&
           ((isCoord && e.type === 'task.status' && ['done', 'failed', 'blocked', 'review'].includes(e.data?.status)) ||

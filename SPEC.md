@@ -268,8 +268,11 @@ coordinator's wait reports once.
 **Wait cursors.** `atf wait` keeps, per actor and plan, the seq up to which it has reported
 (`plans/<id>/cursors/<actor>.seq`). The next wait reports relevant events after it, so
 events between two waits (e.g. a task finishing before the coordinator waits again) are
-never lost. The first wait starts from the actor's own last event; `--since SEQ`
-overrides. Attention items are level-triggered and repeat until resolved.
+never lost. Without a cursor the wait starts from the actor's own last event, or, for a
+brand-new actor with no events, from now (it has no history to catch up on). An event
+about a task is not reported if the actor wrote anything about that task after it (it
+was handled, e.g. after being woken by a message). `--since SEQ` overrides the start.
+Attention items are level-triggered and repeat until resolved.
 
 **Launcher contract.** A launcher (e.g. the herdr adapter) that starts agents:
 1. sets `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR`, `ATF_ROLE`, and `ATF_LIFECYCLE`
