@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://atf.local/schema/event.v1.json",
+  "title": "ATF event v1",
+  "type": "object",
+  "required": ["v", "seq", "id", "ts", "plan", "type", "actor", "data"],
+  "properties": {
+    "v": { "const": 1 },
+    "seq": { "type": "integer", "minimum": 1 },
+    "id": { "type": "string" },
+    "ts": { "type": "string", "format": "date-time" },
+    "plan": { "type": "string" },
+    "type": { "type": "string", "pattern": "^(plan\\.(created|updated|status)|task\\.(created|updated|assigned|status|progress|note|artifact)|x\\..+)$" },
+    "task": { "type": "string" },
+    "actor": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string" },
+        "role": { "type": "string" },
+        "harness": { "type": "string" },
+        "ctx": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "data": { "type": "object" }
+  },
+  "allOf": [
+    { "if": { "properties": { "type": { "pattern": "^task\\." } } }, "then": { "required": ["task"] } },
+    {
+      "if": { "properties": { "type": { "const": "task.status" } } },
+      "then": { "properties": { "data": { "required": ["status"], "properties": { "status": { "enum": ["todo", "in_progress", "blocked", "review", "done", "failed", "cancelled"] }, "message": { "type": "string" } } } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "plan.status" } } },
+      "then": { "properties": { "data": { "required": ["status"], "properties": { "status": { "enum": ["active", "paused", "completed", "failed", "cancelled"] } } } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "task.created" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "required": ["title"],
+            "properties": {
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "acceptance": { "type": "array", "items": { "type": "string" } },
+              "deps": { "type": "array", "items": { "type": "string" } },
+              "parent": { "type": ["string", "null"] },
+              "labels": { "type": "array", "items": { "type": "string" } },
+              "priority": { "type": "number" },
+              "assignee": { "type": ["string", "null"] },
+              "meta": { "type": "object" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "task.progress" } } },
+      "then": { "properties": { "data": { "properties": { "percent": { "type": "number", "minimum": 0, "maximum": 100 }, "message": { "type": "string" } } } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "task.artifact" } } },
+      "then": { "properties": { "data": { "required": ["ref"], "properties": { "kind": { "enum": ["file", "commit", "branch", "pr", "url", "other"] }, "ref": { "type": "string" } } } } }
+    }
+  ]
+}

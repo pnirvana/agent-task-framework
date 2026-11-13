@@ -1,0 +1,48 @@
+id = "atf.herdr"
+name = "ATF board"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+platforms = ["macos", "linux"]
+description = "Agent Task Framework for herdr: live task board, task-labelled agent panes, plan progress in the sidebar."
+
+# ---- actions (bind to keys via [[keys.command]] type = "plugin_action") ----
+
+[[actions]]
+id = "board"
+title = "atf: toggle task board"
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/run.sh\" action-board"]
+
+[[actions]]
+id = "board-popup"
+title = "atf: quick task board (popup)"
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/run.sh\" action-board-popup"]
+
+[[actions]]
+id = "sync"
+title = "atf: sync agent pane labels + sidebar progress"
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/run.sh\" action-sync"]
+
+[[actions]]
+id = "enable-sync"
+title = "atf: enable live sync for this project"
+contexts = ["pane", "workspace"]
+command = ["sh", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/run.sh\" action-enable-sync"]
+
+# ---- panes (opened by the actions above via `herdr plugin pane open`) ----
+
+[[panes]]
+id = "board"
+title = "ATF board"
+placement = "split"
+command = ["sh", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/run.sh\" tui"]
+
+[[panes]]
+id = "board-popup"
+title = "ATF board"
+placement = "popup"
+width = "90%"
+height = "85%"
+command = ["sh", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/run.sh\" tui"]

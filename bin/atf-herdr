@@ -1,0 +1,3 @@
+#!/bin/sh
+# PATH shim for the herdr adapter.
+exec node "$(dirname "$0")/../adapters/herdr/atf-herdr.mjs" "$@"

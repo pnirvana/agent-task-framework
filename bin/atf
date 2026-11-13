@@ -1,0 +1,3 @@
+#!/bin/sh
+# PATH shim so agents can call `atf` without a global install.
+exec node "$(dirname "$0")/atf.mjs" "$@"

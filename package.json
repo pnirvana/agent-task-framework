@@ -1,0 +1,20 @@
+{
+  "name": "agent-task-framework",
+  "version": "0.1.0",
+  "description": "Harness-independent protocol + CLI for coordinator/subagent plans, tasks and progress tracking",
+  "type": "module",
+  "bin": {
+    "atf": "bin/atf.mjs",
+    "atf-herdr": "adapters/herdr/atf-herdr.mjs"
+  },
+  "exports": {
+    ".": "./src/core.mjs",
+    "./store": "./src/store.mjs",
+    "./schema": "./schema/event.schema.json"
+  },
+  "scripts": {
+    "test": "node --test test/atf.test.mjs"
+  },
+  "engines": { "node": ">=18" },
+  "license": "MIT"
+}

@@ -1,0 +1,5 @@
+node_modules/
+# local ATF state when dogfooding the framework on itself
+.atf/
+.DS_Store
+*.log
