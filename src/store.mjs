@@ -325,3 +325,25 @@ export function skillStatus() {
 
 /** Is the skill discoverable without passing its path (any target installed)? */
 export const skillInstalled = () => skillStatus().some((t) => t.state === 'installed');
+
+// ---------- wait cursors ----------
+// Per actor and plan: the last event seq that actor's `atf wait` has reported up to.
+// The next wait reports everything relevant after it, so events that happen between two
+// waits (e.g. a task finishing before the coordinator calls wait again) are not lost.
+const cursorFile = (root, planId, actorId) => path.join(planDir(root, planId), 'cursors', `${String(actorId).replace(/[^A-Za-z0-9_.-]/g, '_')}.seq`);
+
+export function readCursor(root, planId, actorId) {
+  try {
+    const n = Number(fs.readFileSync(cursorFile(root, planId, actorId), 'utf8'));
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeCursor(root, planId, actorId, seq) {
+  const f = cursorFile(root, planId, actorId);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f + '.' + process.pid, String(seq));
+  fs.renameSync(f + '.' + process.pid, f);
+}

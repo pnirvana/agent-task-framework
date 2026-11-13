@@ -79,6 +79,13 @@ instead of your transcript, so make it self-contained.
 
 ## If you are the COORDINATOR
 
+0. Set up the project, once. Run `atf whoami`: if it fails with "no .atf directory found",
+   this project has never used ATF. Run `atf init` in the directory you coordinate the
+   work from; that directory is the project (it may contain several repositories, or
+   none), and every agent working below it shares its plans. If you run inside herdr
+   (`$HERDR_ENV` is `1`), also run `atf-herdr enable-sync` once: it hooks the project up
+   to herdr's pane labels, notifications and the agent lifecycle (closing idle agents,
+   resuming them when work appears). Both are safe to run again.
 1. Create the plan: `atf plan new "Add OAuth login" --goal "Users can sign in with GitHub"`.
    It prints the plan id, and **you become its coordinator** (recorded on the plan, so it
    holds without any environment variables). Use `--plan <id>` on your following commands
@@ -119,9 +126,11 @@ instead of your transcript, so make it self-contained.
    ATF work package T2. Follow the atf skill."* (in herdr, `atf-herdr spawn T2 --name
    backend` does all of it, for a package or a single task).
 4. Monitor without polling agents directly:
-   - `atf wait --timeout 600000` returns as soon as something needs you: a task in review,
-     a blocker without `--on`, a finished task, or your own ready work. It returns
-     immediately if that is already the case, so nothing is missed between waits.
+   - `atf wait --timeout 600000` returns as soon as something needs you: a task to
+     **dispatch** (ready, nobody owns it, e.g. its dependency just finished), a task in
+     review, a blocker without `--on`, or your own ready work; plus every task that
+     finished or failed **since your previous wait** (ATF keeps a per-agent cursor). So
+     nothing is lost if a task finishes before you call wait again.
      Keep looping on it until the plan is done; don't end your turn while agents work.
    - `atf status` shows the tree with owners; `atf plan show` gives the plan overview
      (structure, ownership, decisions, open questions, artifacts)

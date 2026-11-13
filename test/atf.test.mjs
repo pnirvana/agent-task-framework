@@ -390,3 +390,25 @@ test('roles: plan creator is coordinator without ATF_ROLE; wait sees reviews', (
   run(['plan', 'update', '--coordinator', 'lead']);
   assert.equal(run(['whoami'], { ATF_ACTOR: 'lead' }).role, 'coordinator');
 });
+
+test('wait: per-actor cursor; tasks finished before the wait are reported once; dispatch', () => {
+  const { run } = sandbox();
+  run(['add', 'a']); // T1
+  run(['add', 'b']); // T2
+  run(['add', 'c', '--dep', 'T1']); // T3
+  run(['assign', 'T1', 'w1']);
+  run(['assign', 'T2', 'w2']);
+  const w1 = { ATF_ACTOR: 'w1', ATF_ROLE: 'subagent' };
+  const w2 = { ATF_ACTOR: 'w2', ATF_ROLE: 'subagent' };
+  run(['start', 'T1'], w1);
+  run(['done', 'T1', '-m', 'finished early'], w1); // before the coordinator waits
+  let r = run(['wait', '--timeout', '2000']);
+  assert.deepEqual(r.events.map((e) => [e.task, e.data.status]), [['T1', 'done']]);
+  assert.deepEqual(r.attention, [{ task: 'T3', reason: 'dispatch' }], 'newly ready and unowned');
+  run(['assign', 'T3', 'w1']);
+  run(['start', 'T2'], w2);
+  run(['done', 'T2', '-m', 'between waits'], w2);
+  r = run(['wait', '--timeout', '2000']);
+  assert.deepEqual(r.events.map((e) => [e.task, e.data.status]), [['T2', 'done']], 'only what is new since the last wait');
+  assert.deepEqual(r.attention, []);
+});

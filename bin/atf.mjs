@@ -29,6 +29,8 @@ import {
   resolveActor,
   newPlanId,
   eventsPath,
+  readCursor,
+  writeCursor,
   knownRoots,
   registerRoot,
   projectName,
@@ -39,7 +41,7 @@ import {
 const HELP = `atf — Agent Task Framework
 
 Setup / plans
-  atf init                              create .atf/ in the current directory
+  atf init                              create .atf/ in the current directory (the project root)
   atf plan new <title> [--goal G] [--desc D]   create plan, make it current
   atf plan list | use <id>
   atf plan show [id]                    plan overview: structure, ownership, decisions, artifacts
@@ -86,9 +88,10 @@ Viewing
   atf projects [add [dir]]              known projects (registered on init / plan creation)
   atf skill [status|install|uninstall]  link the agent skill into ~/.agents/skills (and
                                         ~/.claude/skills) so agents discover it automatically
-  atf wait [--timeout MS]               block until something needs YOU: ready/unblocked work in
-                                        your packages, or (coordinator) reviews/blockers/finished tasks.
-                                        Returns at once if something already does.
+  atf wait [--timeout MS] [--since SEQ] block until something needs YOU: ready/unblocked work in
+                                        your packages, or (coordinator) tasks to dispatch, reviews,
+                                        blockers, finished tasks. Reports everything since your last
+                                        wait (per-actor cursor), so nothing between waits is missed.
   atf wait --task T1,T2 [--status S,..] wait for specific tasks to reach a status
   atf validate
 
@@ -433,8 +436,13 @@ function statusCmd(target, msgRequired) {
 // ---------- commands ----------
 const commands = {
   init() {
-    const root = initRoot();
-    out({ ok: true, root }, `initialized ${root}`);
+    // The project is the directory you coordinate from (it may hold several repos, or none).
+    const here = path.join(process.cwd(), '.atf');
+    if (fs.existsSync(path.join(here, 'plans'))) return out({ ok: true, root: here, existed: true }, `already initialized: ${here}`);
+    const parent = findRoot(path.dirname(process.cwd()));
+    const root = initRoot(process.cwd());
+    const note = parent ? `\nnote: ${parent} is also an ATF project; this directory and everything below it now uses its own` : '';
+    out({ ok: true, root, ...(parent ? { parent } : {}) }, `initialized ${root}${note}`);
   },
 
   plan(pos) {
@@ -781,17 +789,23 @@ const commands = {
     const tasks = FLAGS.task ? FLAGS.task.split(',') : null;
     const statuses = (FLAGS.status || 'done,failed,blocked,review').split(',');
     const timeout = FLAGS.timeout ? Number(FLAGS.timeout) : 0;
-    const startSeq = loadPlan(root, planId).last_seq;
+    const now0 = loadPlan(root, planId);
+    // Where to report from. Explicit --since wins. Otherwise (default mode) from this
+    // actor's cursor, i.e. where its previous wait left off, so nothing that happened
+    // between two waits is lost; first time: from the actor's own last action.
+    const lastOwn = () => readEvents(root, planId).reduce((m, e) => (e.actor?.id === actor.id ? e.seq : m), 0);
+    const startSeq = FLAGS.since !== undefined ? Number(FLAGS.since) : explicit ? now0.last_seq : (readCursor(root, planId, actor.id) ?? lastOwn());
     const leaves = (st) => st.order.map((id) => st.tasks[id]).filter((t) => !t.children.length);
 
     const finish = (st, attention, events, note) => {
       fs.unwatchFile(p);
+      if (!explicit) writeCursor(root, planId, actor.id, st.last_seq); // seen up to here
       const human = [
         note,
-        ...attention.map((a) => `${bold(a.task)} ${a.reason === 'ready' || a.reason === 'unblocked' ? green(a.reason) : magenta(a.reason)}  ${st.tasks[a.task]?.title ?? ''}${a.reason === 'unblocked' ? dim(` (was blocked on ${st.tasks[a.task].blocked_on.join(',')})`) : ''}`),
+        ...attention.map((a) => `${bold(a.task)} ${['ready', 'unblocked', 'dispatch'].includes(a.reason) ? green(a.reason) : magenta(a.reason)}  ${st.tasks[a.task]?.title ?? ''}${a.reason === 'unblocked' ? dim(` (was blocked on ${st.tasks[a.task].blocked_on.join(',')})`) : ''}`),
         ...events.map(renderEvent),
       ].filter(Boolean);
-      out({ ok: true, attention, events, ...(note ? { note } : {}) }, human.join('\n'));
+      out({ ok: true, attention, events, cursor: st.last_seq, ...(note ? { note } : {}) }, human.join('\n'));
       process.exit(0);
     };
 
@@ -828,6 +842,7 @@ const commands = {
       setTimeout(() => {
         fs.unwatchFile(p);
         const st = loadPlan(root, planId);
+        if (!explicit) writeCursor(root, planId, actor.id, st.last_seq); // nothing relevant up to here
         const mine = leaves(st).filter((t) => t.owner === actor.id && !TERMINAL.has(t.status));
         const why = mine.map((t) => `${t.id} ${t.status}${t.waiting_on.length ? ` (waits on ${t.waiting_on.join(',')})` : t.blocked_on.length ? ` (blocked on ${t.blocked_on.join(',')})` : ''}`);
         out({ ok: false, timeout: true, open: why }, `timeout: nothing needs you yet${why.length ? '. Your open tasks: ' + why.join('; ') : ''}. Run atf wait again.`);

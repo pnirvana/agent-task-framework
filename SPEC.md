@@ -242,7 +242,15 @@ reopened after review) resumes its session; a task never started gets a fresh ag
 Without a session reference the answer is `fresh`, and the checkpoint carries the state.
 
 Attention reasons (§`attentionFor`) for an owner: `ready`, `unblocked` (all `blocked on`
-tasks done), `answered` (someone else added a note after a question-block).
+tasks done), `answered` (someone else added a note after a question-block). For a
+coordinator additionally: `dispatch` (a ready task nobody owns), `review`, `blocked`
+(question-blocks).
+
+**Wait cursors.** `atf wait` keeps, per actor and plan, the seq up to which it has reported
+(`plans/<id>/cursors/<actor>.seq`). The next wait reports relevant events after it, so
+events between two waits (e.g. a task finishing before the coordinator waits again) are
+never lost. The first wait starts from the actor's own last event; `--since SEQ`
+overrides. Attention items are level-triggered and repeat until resolved.
 
 **Launcher contract.** A launcher (e.g. the herdr adapter) that starts agents:
 1. sets `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR`, `ATF_ROLE`, and `ATF_LIFECYCLE`

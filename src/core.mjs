@@ -272,7 +272,7 @@ export function derive(plan) {
 /**
  * What needs this actor right now (level-triggered, so it can't be missed):
  *  - for the owner: ready leaves, and blocked tasks whose `blocked_on` tasks are now done
- *  - for coordinators: tasks in review, and blocked tasks that need a decision
+ *  - for coordinators: ready tasks nobody owns (to dispatch), tasks in review, and blocked tasks that need a decision
  *    (blocked without `on`, i.e. a question/problem rather than a dependency)
  * Returns [{task, reason}] in plan order.
  */
@@ -287,6 +287,7 @@ export function attentionFor(plan, actorId, role) {
       else if (t.answered) out.push({ task: id, reason: 'answered' });
     }
     if (role === 'coordinator') {
+      if (t.ready && !t.owner) out.push({ task: id, reason: 'dispatch' }); // ready, nobody to do it
       if (t.status === 'review') out.push({ task: id, reason: 'review' });
       else if (t.status === 'blocked' && !t.blocked_on.length) out.push({ task: id, reason: 'blocked' });
     }
