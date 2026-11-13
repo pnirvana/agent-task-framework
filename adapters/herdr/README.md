@@ -164,7 +164,10 @@ reopened), the adapter relaunches it:
   supports resuming (ATF's `launchPlan`, see `atf resume-info <task>`);
 - otherwise **fresh**, with a prompt pointing at the task's checkpoint and history.
 
-Agents you start yourself are never closed or relaunched. `"lifecycle": "persistent"`
+Agents you start yourself are never closed or relaunched. Sweeps run from the ATF hook
+after writes, from a self-rescheduling delayed sweep, and every 20 s from an open board,
+always in a separate `atf-herdr` process, so the board never blocks on herdr. Set
+`ATF_HERDR_TRACE=<file>` to log which background runs a board triggers. `"lifecycle": "persistent"`
 keeps launched agents alive (they are prompted instead). Every action is logged to
 `~/.local/state/herdr/plugins/atf.herdr/lifecycle.log`.
 

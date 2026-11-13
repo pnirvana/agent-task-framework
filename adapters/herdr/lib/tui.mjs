@@ -4,9 +4,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { TERMINAL, driverInbox, planSummary } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName } from '../../../src/store.mjs';
-import { herdr, herdrAsync, agentIndex, notify, inHerdr, sameServer, discoverRoots } from './herdr.mjs';
-import { sync, progressText } from './sync.mjs';
-import { lifecycleSweep } from './launch.mjs';
+import { herdrAsync, agentIndex, inHerdr, sameServer, discoverRoots } from './herdr.mjs';
+import { progressText } from './sync.mjs';
 
 const ESC = '\x1b[';
 const STYLE = { reset: 0, bold: 1, dim: 2, inverse: 7, red: 31, green: 32, yellow: 33, blue: 34, magenta: 35, cyan: 36, gray: 90 };
@@ -1043,8 +1042,36 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   // ---------- lifecycle ----------
+  /**
+   * Run herdr-side work (label sync, lifecycle sweep) in a detached `atf-herdr`
+   * process. The board never calls herdr synchronously for it, so it can't freeze while
+   * a sweep closes or relaunches agents. Overlapping runs are prevented by the sweep
+   * lock and the delayed-sweep marker in atf-herdr.
+   */
+  const lastBg = new Map();
+  function background(cmd, root, minGapMs = 0) {
+    if (!inHerdr() || !spawnCmd) return;
+    const key = `${cmd}#${root}`;
+    if (minGapMs && Date.now() - (lastBg.get(key) || 0) < minGapMs) return;
+    lastBg.set(key, Date.now());
+    if (process.env.ATF_HERDR_TRACE) fs.appendFileSync(process.env.ATF_HERDR_TRACE, `${new Date().toISOString()} board -> atf-herdr ${cmd} --root ${root}\n`);
+    try {
+      const child = spawn(spawnCmd[0], [...spawnCmd.slice(1), cmd, '--root', root], { env: { ...process.env, ATF_DIR: root }, detached: true, stdio: 'ignore' });
+      child.on('error', () => {});
+      child.unref();
+    } catch {}
+  }
+
   /** Poll: plans in scope changed on disk? -> notify (if no hook), sync, redraw. */
   function poll() {
+    try {
+      pollOnce();
+    } catch (e) {
+      flash(`refresh error: ${e.message}`, 'red'); // never let one bad read stop the refresh loop
+    }
+  }
+
+  function pollOnce() {
     const plans = scopePlans();
     let changed = false;
     for (const p of plans) {
@@ -1055,10 +1082,10 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (inHerdr() && !hasHook(p.root)) {
         for (const e of readEvents(p.root, p.id).filter((e) => e.seq > seen))
           if (e.type === 'task.status' && ['blocked', 'review', 'failed'].includes(e.data?.status))
-            notify(`ATF ${e.task} ${e.data.status}: ${p.st.tasks[e.task]?.title ?? ''}`, `${e.actor?.id ?? '?'}: ${e.data.message ?? ''}`);
+            herdrAsync(['notification', 'show', `ATF ${e.task} ${e.data.status}: ${p.st.tasks[e.task]?.title ?? ''}`.slice(0, 80), '--body', `${e.actor?.id ?? '?'}: ${e.data.message ?? ''}`.slice(0, 200), '--sound', 'request']);
       }
     }
-    if (changed && inHerdr()) for (const r of new Set(plans.map((p) => p.root))) if (!hasHook(r)) sync(r);
+    if (changed) for (const r of new Set(plans.map((p) => p.root))) if (!hasHook(r)) background('sync', r, 2000);
     draw();
   }
 
@@ -1185,11 +1212,12 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
 
   if (ui.scope.level === 'all' && inHerdr()) discoverRoots();
   for (const p of scopePlans()) ui.lastSeq.set(p.key, p.st.last_seq);
-  if (inHerdr()) for (const r of new Set(scopePlans().map((p) => p.root))) if (!hasHook(r)) sync(r);
+  for (const r of new Set(scopePlans().map((p) => p.root))) if (!hasHook(r)) background('sync', r);
   draw();
   refreshAgents();
   setInterval(refreshAgents, 3000);
   setInterval(poll, 1000);
   // agents go idle after their last write (no hook fires then): sweep projects in scope
-  if (inHerdr()) setInterval(() => new Set(scopePlans().map((p) => p.root)).forEach((r) => lifecycleSweep(r)), 20_000);
+  // (in the background, see background()); hooks cover writes, this covers idle agents
+  setInterval(() => new Set(scopePlans().map((p) => p.root)).forEach((r) => background('sweep', r)), 20_000);
 }

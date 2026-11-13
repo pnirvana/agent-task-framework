@@ -436,7 +436,7 @@ switch (pos[0]) {
     break;
   case 'sync':
   case 'action-sync': {
-    const r = resolveRoot();
+    const r = flags.root || resolveRoot();
     const d = sync(r);
     const { actions } = lifecycleSweep(r);
     process.stdout.write(`synced ${d.panes.size} pane(s), ${d.workspaces.size} workspace(s)${actions.length ? '\n' + actions.join('\n') : ''}\n`);
