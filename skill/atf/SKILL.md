@@ -71,6 +71,18 @@ For each task:
 7. If blocked on a question (no `--on`): write a checkpoint first, then block, and stop
    working on that task. When the coordinator answers with a note, `atf wait` reports
    the task as `answered`. Meanwhile continue with other ready tasks.
+8. **Needs the human?** If finishing your task requires the human to test or check
+   something (try the UI, run it on their machine, judge a result), send it to review
+   for them, with exact steps: `atf review T3 -m "please test: 1. … 2. … expected: …" --by human`.
+   The coordinator will not approve it; the human's verdict comes back as approval or
+   change requests.
+9. **Changes requested**: when `atf wait` reports a task as `changes` (or your prompt says
+   changes were requested), the coordinator sent it back from review. Run `atf show <id>`:
+   the feedback is listed under "changes requested". `atf start <id>`, address **every**
+   point, record how in a note (`atf note <id> "1. … 2. …"`), and send it to review again
+   with a summary of what changed. If you disagree with a point, do not silently skip it:
+   ask with `atf note <id> "…" --kind question` (or block on the question). Keep the change
+   to what was asked; extra scope belongs in a follow-up task, not in this one.
 
 Rules: stay within your task's scope; if you discover extra work, add a note with
 `--kind warning` rather than silently expanding scope. Never mark `done` with failing
@@ -136,9 +148,44 @@ instead of your transcript, so make it self-contained.
      (structure, ownership, decisions, open questions, artifacts)
    - `atf log -n 20` shows recent events
 5. React: answer blockers with a note on the task (`atf note T4 "use cookies" --kind decision`);
-   the owner sees it as `answered` (and in herdr is resumed automatically),
-   approve reviews (`atf done T4 -m "approved"`), retry failures (`atf reopen T4`), add
-   follow-up tasks as discovered.
+   the owner sees it as `answered` (and in herdr is resumed automatically); dispatch
+   newly ready tasks; retry failures (`atf reopen T4`).
+   **Review** every task in `review` against its acceptance criteria (read the change, run
+   its checks), then decide exactly one of:
+   - **Meets the criteria** → approve: `atf done T4 -m "approved: <what you checked>"`.
+   - **Does not meet them** (bug, missing case, criteria not satisfied) → request changes:
+     `atf changes T4 -m "1. <concrete change> 2. <…>"`. Be specific and number the points;
+     the owner gets it back with your feedback and continues with its own context. If
+     the *approach* is wrong rather than the details, add `--fresh` so the next attempt
+     starts from a clean agent (it still sees the feedback and history).
+   - **Meets them, but the review found more work** (extra edge cases, a refactor, a
+     related feature) → approve it, then add the extra work as follow-up tasks:
+     `atf add "<follow-up>" --from T4 --accept "…"`. A follow-up joins T4's work package
+     (same owner) unless you pass `--parent`/`--assign`. Do not reopen or stretch a task
+     beyond its acceptance criteria.
+   - **The criteria themselves were wrong** → fix them first
+     (`atf edit T4 --accept "…"`, which replaces the list), then request changes.
+   - **Cannot be done as specified** → `atf cancel T4 -m why` and re-plan.
+
+   **Reviews by the human.** Tasks with a reviewer other than you (`--reviewer human` at
+   creation, or a subagent's `atf review … --by human`) are not yours to approve: they
+   show up in the human's inbox, and you wait for their verdict. Mark tasks that need
+   manual testing up front: `atf add "…" --reviewer human`. When the human submits a
+   review (on the board or with `atf feedback submit`), your `atf wait` reports
+   `review submitted by …`: approved tasks are done, tasks with change requests went
+   back to their owners with all points. Treat the human's points as binding: when such
+   a task is resubmitted, check every point before you approve it.
+
+   **Review comments sent to you directly** (e.g. from the human's editor): map each
+   comment to the task whose change it concerns, using the file, line and context of the
+   comment and the tasks' descriptions, results and artifacts (`atf show`). Several tasks
+   may have changed the same file, so judge by what the comment is about. If you cannot
+   tell which task a comment belongs to, ask the human instead of guessing. Comments
+   that fit no task become follow-ups. Then apply them in **one batch**, not one by one:
+   draft them with `atf feedback change <task> "<point>" [--file F --line N]` /
+   `atf feedback note <task> "…"` and send everything with `atf feedback submit`; each
+   owner gets one message with all of its points. Do not fix things yourself, and tell
+   the human which comment went to which task.
 6. Close: `atf plan status completed -m "<summary>"`.
 
 **Agent context.** Context belongs to the task: an agent that comes back to a task it

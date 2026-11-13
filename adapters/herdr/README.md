@@ -12,6 +12,7 @@ actionable inside herdr. Optional: ATF itself does not depend on any of this.
 | **Stall detection** | board flags `stale?` when a task is in progress but its herdr agent has been idle > 90s (an agent that stopped without reporting) |
 | **Overview** | tab `0`: every plan in scope unfolded to its live slice (in progress, review, blocked, failed), plus an inbox of everything that needs you, oldest first; ⏎ opens the plan/task, `g` jumps to the agent or plan, `c` closes a plan |
 | **Spawn** | `s` on a ready task or package (or `atf-herdr spawn T3`) places a pane in a balanced grid, starts the agent (pi by default; the atf skill is discovered once installed with `atf skill install`), assigns the task and sends the kickoff prompt |
+| **Reviews** | `a` / `x` / `n` on any task draft an approval, change request or note (`d` drops, `S` submits all at once: one write per plan, so the coordinator wakes once and each owner gets all its points). Tasks that ask you to test something show as `◎ for you` |
 | **Agent lifecycle** | ATF-launched agents are closed when idle with nothing to do and relaunched when work appears for them, resuming their earlier session when they return to a task they worked on |
 
 ## Install
@@ -130,7 +131,8 @@ Rows always know their project and plan, so `g`, `s`, `a` and ⏎ work at any sc
 | `⏎` | full task details (scrollable) |
 | `g` | focus the owning agent's pane (closes the popup) |
 | `s` | spawn a subagent for the selected ready task **or work package** |
-| `a` | approve a task in `review` (→ `done`) |
+| `a` / `x` / `n` | review drafts: approve / request changes / note (text input) |
+| `d` / `S` | drop the task's drafts / submit all drafts (press twice) |
 | `p` / `P` | next / previous plan |
 | `?` | help |
 | `q` | close view / quit |

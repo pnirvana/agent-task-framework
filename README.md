@@ -119,9 +119,30 @@ atf done T1 -m "Flow documented in docs/auth.md; reviewed against RFC 6749"
 The coordinator waits for anything that needs attention:
 
 ```sh
-atf wait --timeout 600000     # returns on done/failed/blocked/review
+atf wait --timeout 600000     # returns when something needs you (review, blocker, task to dispatch, ...)
 atf status                    # board + "needs attention" + active agents
 ```
+
+Reviewing a task in `review`:
+
+```sh
+atf done T2 -m "approved: tests pass, edge cases covered"       # meets its criteria
+atf changes T2 -m "1. return 401 on bad password 2. add a test"  # send back with feedback
+atf changes T2 -m "use the existing auth service" --fresh        # wrong approach: clean restart
+atf add "Rate-limit /login" --from T2 --accept "5/min per IP"    # extra scope found in review
+```
+
+Reviewing several tasks at once (e.g. as the human, or comments forwarded from an editor):
+
+```sh
+atf feedback approve T2 "works on mobile"
+atf feedback change T1 "error says 'undefined'" --file src/login.tsx --line 42
+atf feedback note T3 "nice docs"
+atf feedback submit      # one write: T2 done, T1 back with all points, note on T3
+```
+
+Tasks that need the human to test something: `atf add … --reviewer human`, or a subagent's
+`atf review T3 -m "please test …" --by human`. The coordinator leaves those to you.
 
 ## Using it with pi + herdr
 

@@ -412,3 +412,67 @@ test('wait: per-actor cursor; tasks finished before the wait are reported once; 
   assert.deepEqual(r.events.map((e) => [e.task, e.data.status]), [['T2', 'done']], 'only what is new since the last wait');
   assert.deepEqual(r.attention, []);
 });
+
+test('review: request changes, resubmit, approve; follow-up joins the package', () => {
+  const { run, runFail } = sandbox();
+  run(['add', 'API']); // T1 (package)
+  run(['add', 'login', '--parent', 'T1', '--accept', 'returns token']); // T2
+  run(['assign', 'T1', 'be']);
+  const be = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
+  run(['next', '--package'], be);
+  run(['review', 'T2', '-m', 'done'], be);
+  assert.match(runFail(['changes', 'T2', '-m', 'x'], be).error, /only the coordinator/);
+  run(['changes', 'T2', '-m', '1. return 401 on bad password']);
+  let t = run(['show', 'T2']);
+  assert.equal(t.status, 'todo');
+  assert.equal(t.changes_requested, true);
+  assert.equal(t.owner, 'be', 'stays with its owner');
+  assert.deepEqual(t.feedback.map((f) => [f.round, f.message]), [[1, '1. return 401 on bad password']]);
+  assert.deepEqual(run(['wait', '--timeout', '2000'], be).attention, [{ task: 'T2', reason: 'changes' }]);
+  run(['start', 'T2'], be);
+  run(['review', 'T2', '-m', 'fixed'], be);
+  assert.equal(run(['show', 'T2']).changes_requested, false);
+  run(['done', 'T2', '-m', 'approved']);
+  run(['add', 'rate limit', '--from', 'T2']); // T3
+  t = run(['show', 'T3']);
+  assert.equal(t.origin, 'T2');
+  assert.equal(t.parent, 'T1', 'follow-up joins the origin package');
+  assert.equal(t.owner, 'be');
+  assert.deepEqual(run(['show', 'T2']).followups, ['T3']);
+  run(['changes', 'T2', '-m', 'wrong approach', '--fresh']);
+  assert.equal(run(['resume-info', 'T2']).policy, 'fresh');
+  assert.match(runFail(['changes', 'T3', '-m', 'x']).error, /in review or done/);
+});
+
+test('reviews: --by human tasks are not for the coordinator; feedback drafts submit in one write', () => {
+  const { run, dir } = sandbox();
+  run(['add', 'login']); // T1
+  run(['add', 'docs']); // T2
+  run(['assign', 'T1', 'w1']);
+  run(['assign', 'T2', 'w2']);
+  const w1 = { ATF_ACTOR: 'w1', ATF_ROLE: 'subagent' };
+  const w2 = { ATF_ACTOR: 'w2', ATF_ROLE: 'subagent' };
+  run(['start', 'T1'], w1);
+  run(['review', 'T1', '-m', 'please test login', '--by', 'human'], w1);
+  run(['start', 'T2'], w2);
+  run(['review', 'T2', '-m', 'docs done'], w2);
+  assert.deepEqual(run(['wait', '--timeout', '2000']).attention, [{ task: 'T2', reason: 'review' }], 'T1 waits for the human');
+  const me = { ATF_ACTOR: 'pascal' };
+  run(['feedback', 'change', 'T1', 'error message unclear'], me);
+  run(['feedback', 'change', 'T1', 'focus lost', '--file', 'a.tsx', '--line', '4'], me);
+  run(['feedback', 'approve', 'T2'], me);
+  assert.equal(run(['feedback'], me).length, 3);
+  const before = fs.readFileSync(path.join(dir, '.atf', 'plans', run(['status']).id, 'events.jsonl'), 'utf8').trim().split('\n').length;
+  run(['feedback', 'submit'], me);
+  const lines = fs.readFileSync(path.join(dir, '.atf', 'plans', run(['status']).id, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const batch = lines.slice(before);
+  assert.deepEqual(batch.map((e) => e.type), ['task.status', 'task.status', 'plan.review']);
+  assert.equal(new Set(batch.map((e) => e.seq)).size, 3);
+  const t1 = run(['show', 'T1']);
+  assert.equal(t1.changes_requested, true);
+  assert.equal(t1.feedback[0].message, '1. error message unclear\n2. focus lost (a.tsx:4)');
+  assert.equal(run(['show', 'T2']).status, 'done');
+  assert.equal(run(['feedback'], me).length, 0, 'drafts cleared');
+  const r = run(['wait', '--timeout', '2000']);
+  assert.ok(r.events.some((e) => e.type === 'plan.review'), 'coordinator hears about the review once');
+});

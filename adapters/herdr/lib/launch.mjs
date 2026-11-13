@@ -126,6 +126,10 @@ function wasReopened(t) {
 
 /** Why the agent is (re)started, in words, for the prompt. */
 function situation(s, t) {
+  if (t.changes_requested) {
+    const fb = t.feedback[t.feedback.length - 1];
+    return `changes were requested (review round ${fb.round}) by ${fb.actor ?? 'the coordinator'}: "${fb.message}". Address every point, say in an atf note how, then send it to review again.`;
+  }
   if (t.can_resume) return `${t.blocked_on.join(', ')} ${t.blocked_on.length > 1 ? 'are' : 'is'} done now (you were blocked on ${t.blocked_on.length > 1 ? 'them' : 'it'}).`;
   if (t.answered) {
     const n = lastNoteFromOthers(t);

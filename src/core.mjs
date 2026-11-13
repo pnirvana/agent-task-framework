@@ -6,7 +6,7 @@ export const PROTOCOL_VERSION = 1;
 export const PLAN_STATUSES = ['active', 'paused', 'completed', 'failed', 'cancelled'];
 export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'review', 'done', 'failed', 'cancelled'];
 export const TERMINAL = new Set(['done', 'failed', 'cancelled']);
-export const NOTE_KINDS = ['info', 'question', 'decision', 'warning', 'checkpoint'];
+export const NOTE_KINDS = ['info', 'question', 'decision', 'warning', 'checkpoint', 'feedback'];
 export const RESUME_POLICIES = ['auto', 'resume', 'fresh'];
 export const ARTIFACT_KINDS = ['file', 'commit', 'branch', 'pr', 'url', 'other'];
 
@@ -15,7 +15,7 @@ export const TRANSITIONS = {
   todo: ['in_progress', 'blocked', 'cancelled'],
   in_progress: ['todo', 'blocked', 'review', 'done', 'failed', 'cancelled'],
   blocked: ['todo', 'in_progress', 'failed', 'cancelled'],
-  review: ['in_progress', 'done', 'failed', 'cancelled'],
+  review: ['todo', 'in_progress', 'done', 'failed', 'cancelled'], // todo: changes requested
   done: ['todo'], // reopen
   failed: ['todo', 'cancelled'], // retry
   cancelled: ['todo'],
@@ -25,7 +25,7 @@ export function canTransition(from, to) {
   return from === to ? false : (TRANSITIONS[from] || []).includes(to);
 }
 
-const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume', 'agent'];
+const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume', 'agent', 'origin', 'reviewer'];
 const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume', 'coordinator'];
 
 function pick(obj, keys) {
@@ -50,6 +50,10 @@ function newTask(id, ev) {
     blocked_seq: null,
     resume: null, // per-task resume policy (overrides the plan's)
     agent: null, // name of the agent definition to run this task with (opaque; launchers resolve it)
+    origin: null, // task this one is a follow-up of (scope found while reviewing it)
+    reviewer: null, // who must review it: null/'coordinator' (default) or e.g. 'human'
+    feedback: [], // change requests: [{round, seq, ts, actor, message}]
+    changes_requested: false, // sent back with requested changes, not yet resubmitted
     checkpoint: null, // latest checkpoint note: where the work stands
     sessions: {}, // actor -> {kind, ref, ts}: opaque harness session references
     session: null, // latest session reference
@@ -86,6 +90,7 @@ export function fold(events) {
     tasks: {},
     order: [],
     actors: {},
+    reviews: [], // submitted batch reviews: [{seq, ts, actor, summary, items}]
     last_seq: 0,
     warnings: [],
   };
@@ -111,6 +116,10 @@ export function fold(events) {
           break;
         case 'plan.updated':
           Object.assign(plan, pick(d, PLAN_FIELDS));
+          break;
+        case 'plan.review':
+          // one submitted review (a batch of approvals / change requests / notes)
+          plan.reviews.push({ seq: ev.seq, ts: ev.ts, actor: ev.actor?.id ?? null, summary: d.summary ?? '', items: d.items ?? [] });
           break;
         case 'plan.status':
           if (PLAN_STATUSES.includes(d.status)) {
@@ -164,7 +173,12 @@ export function fold(events) {
         // `on`: tasks this one is blocked on (a dependency discovered mid-task)
         t.blocked_on = d.status === 'blocked' && Array.isArray(d.on) ? d.on : [];
         t.blocked_seq = d.status === 'blocked' ? ev.seq : null;
-        t.history.push({ ...entry, type: 'status', from, to: d.status, message: d.message ?? null });
+        t.history.push({ ...entry, type: 'status', from, to: d.status, message: d.message ?? null, ...(d.changes ? { changes: true } : {}) });
+        // "request changes": back to the owner with feedback (status todo, data.changes)
+        if (d.changes) {
+          t.feedback.push({ round: t.feedback.length + 1, ...entry, message: d.message ?? '' });
+          t.changes_requested = true;
+        } else if (['review', 'done', 'cancelled', 'failed'].includes(d.status)) t.changes_requested = false;
         break;
       }
       case 'task.progress':
@@ -199,7 +213,8 @@ export function fold(events) {
 /** Compute derived fields: readiness, children, counts, overall progress. */
 export function derive(plan) {
   const tasks = plan.tasks;
-  for (const t of Object.values(tasks)) t.children = [];
+  for (const t of Object.values(tasks)) (t.children = []), (t.followups = []);
+  for (const id of plan.order) if (tasks[id].origin && tasks[tasks[id].origin]) tasks[tasks[id].origin].followups.push(id);
   for (const id of plan.order) {
     const t = tasks[id];
     if (t.parent && tasks[t.parent]) tasks[t.parent].children.push(id);
@@ -282,13 +297,14 @@ export function attentionFor(plan, actorId, role) {
     const t = plan.tasks[id];
     if (t.children.length) continue;
     if (t.owner === actorId) {
-      if (t.ready) out.push({ task: id, reason: 'ready' });
+      if (t.ready) out.push({ task: id, reason: t.changes_requested ? 'changes' : 'ready' });
       else if (t.can_resume) out.push({ task: id, reason: 'unblocked' });
       else if (t.answered) out.push({ task: id, reason: 'answered' });
     }
     if (role === 'coordinator') {
       if (t.ready && !t.owner) out.push({ task: id, reason: 'dispatch' }); // ready, nobody to do it
-      if (t.status === 'review') out.push({ task: id, reason: 'review' });
+      // tasks that ask a specific reviewer (e.g. the human) are not the coordinator's to approve
+      if (t.status === 'review' && (!t.reviewer || t.reviewer === 'coordinator' || t.reviewer === actorId)) out.push({ task: id, reason: 'review' });
       else if (t.status === 'blocked' && !t.blocked_on.length) out.push({ task: id, reason: 'blocked' });
     }
   }
@@ -307,7 +323,7 @@ export function driverInbox(plan) {
   for (const id of plan.order) {
     const t = plan.tasks[id];
     if (t.children.length) continue;
-    if (t.status === 'review') items.push({ kind: 'review', task: id, ts: since(t, 'review'), actor: t.owner, message: t.last_message });
+    if (t.status === 'review') items.push({ kind: t.reviewer && t.reviewer !== 'coordinator' ? 'your-review' : 'review', task: id, ts: since(t, 'review'), actor: t.owner, message: t.last_message, reviewer: t.reviewer });
     else if (t.status === 'blocked' && !t.blocked_on.length && !t.answered) items.push({ kind: 'question', task: id, ts: since(t, 'blocked'), actor: t.owner, message: t.last_message });
     else if (t.status === 'failed') items.push({ kind: 'failed', task: id, ts: since(t, 'failed'), actor: t.owner, message: t.last_message });
   }

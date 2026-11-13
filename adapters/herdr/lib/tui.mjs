@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { TERMINAL, driverInbox, planSummary } from '../../../src/core.mjs';
-import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName } from '../../../src/store.mjs';
+import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, readDrafts, writeDrafts, reviewEvents } from '../../../src/store.mjs';
 import { herdrAsync, agentIndex, inHerdr, sameServer, discoverRoots } from './herdr.mjs';
 import { progressText } from './sync.mjs';
 
@@ -103,6 +103,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     cardFolded: new Set(), // plan tab: plan keys whose card is folded to its title line
     showClosed: false, // wider scopes: also list completed / cancelled plans
     confirm: null, // {action, key, until}: second press confirms
+    input: null, // one-line text input: {label, value, onSubmit}
   };
   const keyOf = (root, plan) => `${root}#${plan}`;
   const hookCache = new Map();
@@ -281,7 +282,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
           })();
     const nav = s.level === 'plan' ? '   esc: project' : s.level === 'project' ? '   esc: all projects' : '';
     // no "ATF" badge: herdr already titles both the pane and the popup "ATF board"
-    return [[[' ', ''], ...crumbs, [nav, 'dim']], line2, tabBar()];
+    const nd = draftCount(plans);
+    return [[[' ', ''], ...crumbs, [nav, 'dim'], [nd ? `   ✎ ${nd} draft${nd === 1 ? '' : 's'} · S submit` : '', 'yellow bold']], line2, tabBar()];
   }
 
   /** A selected-row aware line: highlight marker + base style. */
@@ -318,7 +320,9 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     } else {
       if (t.status === 'todo' && t.waiting_on.length) right.push([`⧗ ${t.waiting_on.join(',')}`, 'dim']);
       if (t.status === 'blocked' && t.blocked_on.length) right.push([t.can_resume ? 'can resume' : `⧗ on ${t.blocked_on.join(',')}`, t.can_resume ? 'green' : 'dim']);
-      if (t.ready && !t.owner) right.push(['ready', 'green']);
+      if (taskDrafts(row).length) right.push([`✎${taskDrafts(row).length}`, 'yellow bold']);
+      if (t.changes_requested) right.push([`↺ changes`, 'magenta']);
+      else if (t.ready && !t.owner) right.push(['ready', 'green']);
       if (t.status === 'in_progress' && t.percent != null) right.push([`${t.percent}%`, 'yellow']);
       if (t.assignee) right.push([t.assignee, 'cyan']);
       else if (t.owner) right.push([`↳${t.owner}`, 'cyan dim']);
@@ -374,6 +378,13 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const t = st.tasks[id];
     if (!t) return [];
     const L = [];
+    const sel = ui.rows.tasks[ui.sel.tasks];
+    const mine = sel?.task === id ? taskDrafts(sel) : [];
+    if (mine.length) {
+      L.push([[`✎ your drafts (${mine.length}, not sent yet: S submits)`, 'yellow bold']]);
+      for (const d of mine) L.push([[`  ${d.action.padEnd(8)}`, d.action === 'change' ? 'magenta' : d.action === 'approve' ? 'green' : ''], [d.message || '', '']]);
+      L.push([]);
+    }
     if (multi()) L.push([[`${projectName(ui.rows.tasks[ui.sel.tasks]?.root ?? '')} / ${st.title}`, 'dim']]);
     if (t.path.length) L.push([[t.path.map((p) => `${p} ${st.tasks[p].title}`).join(' › ') + ' ›', 'dim']]);
     const s = effStatus(t);
@@ -388,6 +399,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (t.blocked_on.length) meta.push([`blocked on ${t.blocked_on.join(',')}${t.can_resume ? ' (done: can resume)' : ''}  `, t.can_resume ? 'green' : 'dim']);
     if (t.labels.length) meta.push([`#${t.labels.join(' #')}  `, 'magenta']);
     if (t.agent) meta.push([`agent ${t.agent}  `, 'magenta']);
+    if (t.reviewer) meta.push([`reviewer ${t.reviewer}  `, 'magenta']);
     meta.push([`updated ${ago(t.updated_at)} ago`, 'dim']);
     L.push(meta);
     if (a?.stale) L.push([['⚠ agent is idle but the task is still in progress: it may have stopped without reporting', 'red']]);
@@ -408,6 +420,13 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       L.push([], [['acceptance', 'bold']]);
       for (const ac of t.acceptance) for (const [i, l] of wrap(ac, W - 6).entries()) L.push([[i ? '      ' : `  [${t.status === 'done' ? 'x' : ' '}] `, 'dim'], [l, '']]);
     }
+    if (t.feedback?.length) {
+      const fb = t.feedback[t.feedback.length - 1];
+      L.push([], [[t.changes_requested ? '↺ changes requested' : 'last review feedback', t.changes_requested ? 'bold magenta' : 'bold'], [`  round ${fb.round} · ${fb.actor ?? ''} ${ago(fb.ts)} ago`, 'dim']]);
+      for (const l of wrap(fb.message, W - 2)) L.push([[l, t.changes_requested ? 'magenta' : '']]);
+    }
+    if (t.origin) L.push([], [['follow-up of ', 'dim'], [`${t.origin} ${st.tasks[t.origin]?.title ?? ''}`, '']]);
+    if (t.followups?.length) L.push([[`follow-ups: ${t.followups.join(', ')}`, 'dim']]);
     if (t.checkpoint && !TERMINAL.has(t.status)) {
       L.push([], [['checkpoint', 'bold'], [`  ${t.checkpoint.actor ?? ''} ${ago(t.checkpoint.ts)} ago`, 'dim']]);
       for (const l of wrap(t.checkpoint.message, W - 2)) L.push([[l, '']]);
@@ -622,7 +641,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     });
   }
 
-  const KIND_STYLE = { review: ['◎ review', 'magenta'], question: ['⊘ question', 'red'], failed: ['✗ failed', 'red'], stale: ['stale?', 'red bold'], finished: ['● finished', 'green'] };
+  const KIND_STYLE = { 'your-review': ['◎ for you', 'magenta bold'], review: ['◎ review', 'magenta'], question: ['⊘ question', 'red'], failed: ['✗ failed', 'red'], stale: ['stale?', 'red bold'], finished: ['● finished', 'green'] };
 
   const foldOf = (p) => ui.fold.get(p.key) ?? (isOpenStatus(p.st) ? 'live' : 'folded');
 
@@ -634,7 +653,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (t.children.length) continue;
       const a = agentFor(p.st, t);
       const rank =
-        t.status === 'review' ? 0 : t.status === 'blocked' && !t.blocked_on.length ? 1 : t.status === 'failed' ? 2 : a?.stale ? 3 : t.status === 'in_progress' ? 4 : t.status === 'blocked' ? 5 : null;
+        t.status === 'review' ? 0 : t.status === 'blocked' && !t.blocked_on.length ? 1 : t.status === 'failed' ? 2 : a?.stale ? 3 : t.changes_requested ? 4 : t.status === 'in_progress' ? 5 : t.status === 'blocked' ? 6 : null;
       if (rank !== null) res.push({ t, a, rank });
     }
     return res.sort((x, y) => x.rank - y.rank);
@@ -654,6 +673,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (t.status === 'in_progress' && t.percent != null) right.push([` ${t.percent}%`, 'yellow']);
     if (t.status === 'blocked' && t.blocked_on.length) right.push([t.can_resume ? '  can resume' : `  ⧗ on ${t.blocked_on.join(',')}`, t.can_resume ? 'green' : 'dim']);
     if (t.answered) right.push(['  answered', 'green']);
+    if (t.changes_requested) right.push([`  ↺ changes (round ${t.feedback.length})`, 'magenta']);
     const msg = ['review', 'blocked', 'failed'].includes(t.status) && !t.blocked_on.length && t.last_message ? `  — ${t.last_message}` : '';
     const fixed = 7 + [...crumb].length + t.id.length + 1 + right.reduce((n, [x]) => n + [...x].length, 0) + 2;
     const titleW = Math.max(8, Math.min([...t.title].length, W - fixed - 10));
@@ -832,10 +852,17 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       [['   ● finished', 'green'], [' all tasks done, plan still open', '']],
       [['   ⚙2 ◌1 ↗1  ', ''], ['agents working / idle / in another herdr session; ⚑ inbox items', '']],
       [],
+      H('Review (Overview, Tasks, details): collect drafts, then send them together'),
+      T('a  draft an approval (task in review)    x  draft a change request    n  draft a note'),
+      T('d  drop the selected task\'s drafts       S  submit all drafts (press twice): one write per'),
+      T('   plan; tasks with change requests go back to their owner with all points numbered'),
+      [['   ◎ for you      ', 'magenta bold'], ['a task asks you (not the coordinator) to review/test it', '']],
+      [['   ✎2             ', 'yellow bold'], ['your unsent drafts on a task', '']],
+      [],
       H('Tasks (1)'),
       T('↑↓ j/k  move        ←→ h/l  collapse / expand (tasks and plans)   space  toggle'),
       T('⏎  task details / open plan      g  go to the owning agent’s pane'),
-      T('s  spawn a subagent for the selected task or work package     a  approve a review'),
+      T('s  spawn a subagent for the selected task or work package'),
       [],
       H('Task status: the symbol before a task'),
       sym(STATUS.todo[0], STATUS.todo[1], 'todo', 'not started (⧗ T3 = waits on dependencies)'),
@@ -860,21 +887,23 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       [['   ↳backend       ', 'cyan dim'], ['owner inherited from the package', '']],
       [['   backend        ', 'cyan'], ['assigned directly', '']],
       [['   ready          ', 'green'], ['can start now and nobody owns it yet', '']],
+      [['   ↺ changes      ', 'magenta'], ['sent back from review with requested changes (feedback in details)', '']],
       [['   40%            ', 'yellow'], ['progress last reported by the agent', '']],
       [['   2/3            ', 'dim'], ['finished / total subtasks of a parent', '']],
     ];
   }
 
   function footer() {
+    if (ui.input) return [[' ' + ui.input.label, 'bold yellow'], [ui.input.value + '█', ''], ['   ⏎ add draft · esc cancel', 'dim']];
     if (ui.flash && ui.flash.until > Date.now()) return [[' ' + ui.flash.msg, ui.flash.style]];
     const esc = ui.scope.level === 'all' ? 'esc quit' : 'esc widen';
     const keys = {
-      overview: `↑↓ select  ←→ fold  z all  ⏎ open  g jump  a approve  c close plan  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}  ? help`,
-      tasks: `↑↓ move  ←→ fold  ⏎ details/open  g agent  s spawn  a approve  ${esc}  ? help`,
+      overview: `↑↓ select  ←→ fold  ⏎ open  g jump  review: a/x/n d S  c close plan  f closed  ${esc}  ? help`,
+      tasks: `↑↓ move  ←→ fold  ⏎ details  g agent  s spawn  review: a approve x change n note d drop S submit  ${esc}`,
       agents: `↑↓ scroll  ${esc}  A all projects  tab views  ? help  q quit`,
       plan: multi() ? `↑↓ select  ←→ fold  z all  ⏎ open plan  g jump  c close plan  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}  ? help` : `↑↓ scroll  ${esc}  tab views  ? help  q quit`,
       log: `↑↓ scroll  ${esc}  tab views  ? help  q quit`,
-      detail: '↑↓ scroll  ⏎/esc back  g agent  s spawn  a approve',
+      detail: '↑↓ scroll  ⏎/esc back  g agent  s spawn  review: a approve  x change  n note  d drop  S submit',
       help: '↑↓ scroll  any other key: back',
     }[view()];
     return [[' ' + keys, 'dim']];
@@ -1001,18 +1030,90 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     p.on('close', (code) => flash(code === 0 ? buf.trim().split('\n').pop() : `spawn failed: ${buf.trim().split('\n').pop()}`, code === 0 ? 'green' : 'red'));
   }
 
-  function approve() {
-    const r = selectedRow();
-    const t = r?.type === 'task' || r?.type === 'item' ? r.st.tasks[r.task] : null;
-    if (!t || t.status !== 'review') return flash('only tasks in review can be approved');
+  // ---------- review drafts (sent together with S) ----------
+  const me = resolveActor();
+  const draftsOf = (root, plan) => {
     try {
-      transact(r.root, r.plan, resolveActor({ role: 'coordinator' }), (st) =>
-        st.tasks[t.id].status === 'review' ? [{ type: 'task.status', task: t.id, data: { status: 'done', message: `approved via board: ${t.last_message ?? ''}`.trim() } }] : [],
-      );
-      flash(`${t.id} approved`, 'green');
-    } catch (e) {
-      flash(e.message, 'red');
+      return readDrafts(root, plan, me.id);
+    } catch {
+      return [];
     }
+  };
+  const taskDrafts = (r) => (r?.root && r?.plan && r?.task ? draftsOf(r.root, r.plan).filter((d) => d.task === r.task) : []);
+  function draftCount(plans) {
+    return plans.reduce((n, p) => n + draftsOf(p.root, p.id).length, 0);
+  }
+
+  function selectedTask() {
+    const r = selectedRow();
+    return r && (r.type === 'task' || (r.type === 'item' && r.task)) ? r : null;
+  }
+
+  function addDraft(action, message = '') {
+    const r = selectedTask();
+    if (!r) return flash('select a task');
+    const items = draftsOf(r.root, r.plan);
+    items.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), task: r.task, action, message, ts: new Date().toISOString() });
+    writeDrafts(r.root, r.plan, me.id, items);
+    flash(`draft ${action} on ${r.task} (${items.length} in this plan) · S sends all`, 'blue');
+  }
+
+  /** a: draft an approval */
+  function approve() {
+    const r = selectedTask();
+    if (!r) return flash('select a task');
+    if (r.st.tasks[r.task].status !== 'review') return flash(`${r.task} is not in review; use n for a note or x to request changes`);
+    addDraft('approve');
+  }
+
+  /** x / n: draft a change request or a note, via the input line */
+  function promptDraft(action) {
+    const r = selectedTask();
+    if (!r) return flash('select a task');
+    ui.input = {
+      label: action === 'change' ? `change request for ${r.task}: ` : `note on ${r.task}: `,
+      value: '',
+      onSubmit: (text) => text.trim() && addDraft(action, text.trim()),
+    };
+  }
+
+  /** d: drop the selected task's drafts */
+  function dropDrafts() {
+    const r = selectedTask();
+    if (!r) return flash('select a task');
+    const items = draftsOf(r.root, r.plan);
+    const keep = items.filter((d) => d.task !== r.task);
+    writeDrafts(r.root, r.plan, me.id, keep);
+    flash(`dropped ${items.length - keep.length} draft(s) on ${r.task}`);
+  }
+
+  /** S: submit all drafts in scope, one write per plan (press twice) */
+  function submitDrafts() {
+    const plans = scopePlans().filter((p) => draftsOf(p.root, p.id).length);
+    const n = plans.reduce((a, p) => a + draftsOf(p.root, p.id).length, 0);
+    if (!n) return flash('no drafts to submit');
+    if (!(ui.confirm?.action === 'submit' && ui.confirm.until > Date.now())) {
+      ui.confirm = { action: 'submit', until: Date.now() + 3000 };
+      return flash(`submit ${n} draft(s) in ${plans.length} plan(s)? press S again`);
+    }
+    ui.confirm = null;
+    const done = [];
+    for (const p of plans) {
+      const items = draftsOf(p.root, p.id);
+      try {
+        let summary = '';
+        transact(p.root, p.id, me, (st) => {
+          const r = reviewEvents(st, items, me.id);
+          summary = r.summary;
+          return r.events;
+        });
+        writeDrafts(p.root, p.id, me.id, []);
+        done.push(summary.replace(/^review by \S+: /, ''));
+      } catch (e) {
+        return flash(`submit failed: ${e.message}`, 'red');
+      }
+    }
+    flash(`review submitted: ${done.join(' | ')}`, 'green');
   }
 
   /** ⏎ */
@@ -1114,6 +1215,23 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const page = Math.max(1, (out.rows || 24) - 8);
     const v = view();
     if (k === '\x03') return quit();
+    if (ui.input) {
+      // one-line text input
+      if (k === '\r') {
+        const inp = ui.input;
+        ui.input = null;
+        inp.onSubmit(inp.value);
+      } else if (k === '\x1b') ui.input = null;
+      else if (k === '\x7f' || k === '\b') ui.input.value = [...ui.input.value].slice(0, -1).join('');
+      else if (k.length >= 1 && !k.startsWith('\x1b') && k >= ' ') ui.input.value += k;
+      return draw();
+    }
+    if (['overview', 'tasks', 'detail'].includes(v)) {
+      if (k === 'x') return promptDraft('change'), draw();
+      if (k === 'n') return promptDraft('note'), draw();
+      if (k === 'd') return dropDrafts();
+      if (k === 'S') return submitDrafts();
+    }
     if (k === 'q') {
       if (ui.overlay) ui.overlay = null;
       else return quit();

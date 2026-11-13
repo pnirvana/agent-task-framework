@@ -31,6 +31,9 @@ import {
   eventsPath,
   readCursor,
   writeCursor,
+  readDrafts,
+  writeDrafts,
+  reviewEvents,
   knownRoots,
   registerRoot,
   projectName,
@@ -54,6 +57,8 @@ Tasks (coordinator)
   atf add <title> [--desc D] [--accept A]... [--dep T1]... [--parent T1]
                   [--label L]... [--priority N] [--assign WHO] [--resume auto|resume|fresh]
                   [--agent NAME]   agent definition to run the task with (e.g. reviewer)
+                  [--from T3]      follow-up of T3 (scope found in review; joins T3's package)
+                  [--reviewer human]  who must review it (default: the coordinator)
   atf edit <task> [same flags as add; --dep/--accept/--label replace lists]
   atf assign <task> <who|->            assign / unassign. Assigning a parent task hands the
                                         whole subtree (work package) to that agent
@@ -76,6 +81,18 @@ Tasks (worker)
   atf review <task> -m <summary>        ready for coordinator review
   atf done <task> -m <summary>
   atf fail <task> -m <reason>
+  atf feedback approve|change|note <task> ["text"] [--file F --line N]
+                                        draft review feedback (nothing is sent yet)
+  atf feedback [list] | drop [task] | submit
+                                        submit applies all drafts in one write: approvals,
+                                        tasks sent back with all their points, notes
+  atf review <task> -m "what to check" --by human
+                                        ask a specific reviewer (e.g. the human) instead
+                                        of the coordinator
+  atf changes <task> -m "1. … 2. …" [--fresh]
+                                        (coordinator) send a task in review/done back to its
+                                        owner with requested changes; --fresh: next attempt
+                                        starts with a clean agent (wrong approach)
   atf cancel | reopen | release <task> [-m msg]
 
 Viewing
@@ -104,7 +121,7 @@ Global flags
 `;
 
 // ---------- args ----------
-const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed']);
+const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh']);
 const MULTI = new Set(['accept', 'dep', 'label']);
 const SHORT = { m: 'message', n: 'limit', h: 'help', j: 'json' };
 
@@ -245,6 +262,13 @@ function taskFieldsFromFlags(f, state, selfId) {
   if (f.accept) d.acceptance = f.accept;
   if (f.label) d.labels = f.label.flatMap((l) => l.split(',')).map((s) => s.trim()).filter(Boolean);
   if (f.agent !== undefined) d.agent = f.agent === '-' || f.agent === '' ? null : f.agent;
+  if (f.reviewer !== undefined) d.reviewer = f.reviewer === '-' || f.reviewer === '' ? null : f.reviewer;
+  if (f.from !== undefined) {
+    if (!state.tasks[f.from]) die(`unknown task in --from: ${f.from}`);
+    d.origin = f.from;
+    // a follow-up lands where its origin lives (same work package) unless placed explicitly
+    if (f.parent === undefined && state.tasks[f.from].parent) d.parent = state.tasks[f.from].parent;
+  }
   if (f.resume !== undefined) {
     if (!RESUME_POLICIES.includes(f.resume)) die(`--resume must be one of ${RESUME_POLICIES.join(', ')}`);
     d.resume = f.resume;
@@ -301,7 +325,8 @@ function renderTaskLine(t, state, prefix = '') {
   const who = ownerLabel(t);
   if (who) bits.push(t.children.length && t.assignee ? `${who}${dim(' (package)')}` : who);
   if (t.status === 'in_progress' && t.percent != null) bits.push(yellow(`${t.percent}%`));
-  if (t.ready) bits.push(green('ready'));
+  if (t.changes_requested) bits.push(magenta(`↺ changes (round ${t.feedback.length})`));
+  else if (t.ready) bits.push(green('ready'));
   if (t.status === 'todo' && t.waiting_on.length) bits.push(dim(`waits on ${t.waiting_on.join(',')}`));
   if (t.status === 'blocked' && t.blocked_on.length) bits.push(t.can_resume ? green(`can resume (${t.blocked_on.join(',')} done)`) : dim(`blocked on ${t.blocked_on.join(',')}`));
   return `${dim(prefix)}${bold(t.id)} ${badge(st)}  ${t.children.length ? bold(t.title) : t.title}  ${bits.join(' ')}`;
@@ -366,6 +391,9 @@ function renderTask(t, state) {
   L.push(`${bold(t.id)} ${badge(t.rollup_status ?? t.status)}  ${bold(t.title)}`);
   if (t.assignee) L.push(`assignee: ${cyan(t.assignee)}${t.children.length ? dim(' (owns this work package)') : ''}`);
   if (t.agent) L.push(`agent:    ${magenta(t.agent)} ${dim('(agent definition to run it with)')}`);
+  if (t.reviewer) L.push(`reviewer: ${magenta(t.reviewer)} ${dim('(must approve it, not the coordinator)')}`);
+  if (t.origin) L.push(`follow-up of: ${t.origin} ${dim(state.tasks[t.origin]?.title ?? '')}`);
+  if (t.followups?.length) L.push(`follow-ups:   ${t.followups.map((id) => `${id}(${state.tasks[id].status})`).join(', ')}`);
   else if (t.owner) L.push(`owner:    ${cyan(t.owner)} ${dim(`(via package ${[...t.path].reverse().find((id) => state.tasks[id].assignee)})`)}`);
   if (t.children.length)
     L.push(`subtasks: ${t.children.map((id) => `${id}(${state.tasks[id].rollup_status ?? state.tasks[id].status}${state.tasks[id].owner && state.tasks[id].owner !== t.owner ? ' @' + state.tasks[id].owner : ''})`).join(', ')}`);
@@ -374,6 +402,10 @@ function renderTask(t, state) {
   if (t.labels.length) L.push(`labels:   ${t.labels.join(', ')}`);
   if (t.percent != null && !t.children.length) L.push(`progress: ${t.percent}%`);
   if (t.rollup_percent != null) L.push(`progress: ${t.rollup_percent}% (rolled up)`);
+  if (t.feedback?.length) {
+    const fb = t.feedback[t.feedback.length - 1];
+    L.push('', (t.changes_requested ? magenta(bold('changes requested')) : bold('last review feedback')) + dim(` (round ${fb.round} of ${t.feedback.length}, ${fb.actor ?? '?'}):`), fb.message);
+  }
   if (t.description) L.push('', t.description);
   if (t.acceptance.length) L.push('', bold('acceptance criteria:'), ...t.acceptance.map((a) => `  - [${t.status === 'done' ? 'x' : ' '}] ${a}`));
   if (t.checkpoint && !TERMINAL.has(t.status))
@@ -396,6 +428,7 @@ function renderTask(t, state) {
 }
 function renderEvent(e) {
   const d = e.data || {};
+  if (e.type === 'plan.review') return `${dim(`#${e.seq} ${e.ts.slice(11, 19)}`)} ${cyan(e.actor?.id ?? '?')} ${bold('review submitted')} ${d.summary ?? ''}`;
   const bits = [d.status, d.percent != null ? `${d.percent}%` : null, d.assignee !== undefined ? `→ ${d.assignee ?? '(none)'}` : null, d.title, d.kind, d.ref, d.message]
     .filter((x) => x !== undefined && x !== null && x !== '');
   return `${dim(`#${e.seq} ${e.ts.slice(11, 19)}`)} ${cyan(e.actor?.id ?? '?')} ${bold(e.type)}${e.task ? ' ' + e.task : ''} ${bits.join(' · ')}`;
@@ -419,6 +452,10 @@ function statusCmd(target, msgRequired) {
       const evs = [];
       if (target === 'in_progress' && t.assignee !== actor.id && (!t.assignee || FLAGS.force || t.owner === actor.id))
         evs.push({ type: 'task.assigned', task: t.id, data: { assignee: actor.id } });
+      if (FLAGS.by !== undefined) {
+        if (target !== 'review') die('--by only applies to review');
+        evs.push({ type: 'task.updated', task: t.id, data: { reviewer: FLAGS.by === '-' ? null : FLAGS.by } });
+      }
       const data = { status: target, ...(msg ? { message: msg } : {}) };
       if (FLAGS.on) {
         if (target !== 'blocked') die('--on only applies to block');
@@ -581,6 +618,57 @@ const commands = {
   fail: statusCmd('failed', true),
   cancel: statusCmd('cancelled', false),
   reopen: statusCmd('todo', false),
+
+  feedback(pos) {
+    // Review drafts: collect approvals / change requests / notes, then submit them in one go.
+    const { root, planId, actor } = ctx();
+    const sub = pos[0] || 'list';
+    let items = readDrafts(root, planId, actor.id);
+    const state = loadPlan(root, planId);
+    if (['approve', 'change', 'note'].includes(sub)) {
+      const t = requireTask(state, pos[1]);
+      const message = pos.slice(2).join(' ') || FLAGS.message || '';
+      if (sub !== 'approve' && !message) die(`usage: atf feedback ${sub} <task> "<text>" [--file F --line N]`);
+      items.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), task: t.id, action: sub, message, ...(FLAGS.file ? { file: FLAGS.file } : {}), ...(FLAGS.line ? { line: Number(FLAGS.line) } : {}), ts: new Date().toISOString() });
+      writeDrafts(root, planId, actor.id, items);
+      return out({ ok: true, drafts: items }, `${dim('draft')} ${sub} ${t.id}${message ? ': ' + message : ''}  ${dim(`(${items.length} draft${items.length === 1 ? '' : 's'}; atf feedback submit sends them)`)}`);
+    }
+    if (sub === 'drop') {
+      const keep = pos[1] ? items.filter((i) => i.task !== requireTask(state, pos[1]).id) : [];
+      writeDrafts(root, planId, actor.id, keep);
+      return out({ ok: true, dropped: items.length - keep.length }, `dropped ${items.length - keep.length} draft(s)`);
+    }
+    if (sub === 'submit') {
+      if (!items.length) return out({ ok: true, submitted: 0 }, 'no drafts to submit');
+      let summary = '';
+      transact(root, planId, actor, (st) => {
+        const r = reviewEvents(st, items, actor.id);
+        summary = r.summary;
+        return r.events;
+      });
+      writeDrafts(root, planId, actor.id, []);
+      return out({ ok: true, submitted: items.length, summary }, summary);
+    }
+    if (sub !== 'list') die('usage: atf feedback [list|approve|change|note|drop|submit]');
+    out(items, items.map((i) => `${dim(i.ts.slice(11, 16))} ${i.task.padEnd(4)} ${i.action === 'change' ? magenta('change ') : i.action === 'approve' ? green('approve') : 'note   '} ${i.message}${i.file ? dim(` ${i.file}${i.line ? ':' + i.line : ''}`) : ''}`).join('\n') || 'no drafts');
+  },
+
+  changes(pos) {
+    // Request changes: send a task in review (or done) back to its owner with feedback.
+    const { root, planId, actor } = ctx();
+    const msg = FLAGS.message;
+    if (!msg) die('-m "<what to change>" is required (be concrete; number the points)');
+    const { state } = transact(root, planId, actor, (st) => {
+      const t = requireTask(st, pos[0]);
+      if (!['review', 'done'].includes(t.status) && !FLAGS.force) die(`${t.id} is ${t.status}; request changes on a task in review or done (use --force)`);
+      if (actor.role !== 'coordinator' && !FLAGS.force) die('only the coordinator requests changes (use --force)');
+      const evs = [{ type: 'task.status', task: t.id, data: { status: 'todo', message: msg, changes: true } }];
+      if (FLAGS.fresh) evs.push({ type: 'task.updated', task: t.id, data: { resume: 'fresh' } }); // wrong approach: clean start
+      return evs;
+    });
+    const t = requireTask(state, pos[0]);
+    out({ ok: true, task: t }, `${t.id} ${magenta('↺ changes requested')} (round ${t.feedback.length})${t.owner ? ` → back to ${cyan(t.owner)}` : ''}${FLAGS.fresh ? dim(' · next attempt starts fresh') : ''}`);
+  },
 
   release(pos) {
     const { root, planId, actor } = ctx();
@@ -802,7 +890,7 @@ const commands = {
       if (!explicit) writeCursor(root, planId, actor.id, st.last_seq); // seen up to here
       const human = [
         note,
-        ...attention.map((a) => `${bold(a.task)} ${['ready', 'unblocked', 'dispatch'].includes(a.reason) ? green(a.reason) : magenta(a.reason)}  ${st.tasks[a.task]?.title ?? ''}${a.reason === 'unblocked' ? dim(` (was blocked on ${st.tasks[a.task].blocked_on.join(',')})`) : ''}`),
+        ...attention.map((a) => `${bold(a.task)} ${['ready', 'unblocked', 'dispatch'].includes(a.reason) ? green(a.reason) : magenta(a.reason)}${a.reason === 'changes' ? dim(' (see atf show: feedback)') : ''}${''}  ${st.tasks[a.task]?.title ?? ''}${a.reason === 'unblocked' ? dim(` (was blocked on ${st.tasks[a.task].blocked_on.join(',')})`) : ''}`),
         ...events.map(renderEvent),
       ].filter(Boolean);
       out({ ok: true, attention, events, cursor: st.last_seq, ...(note ? { note } : {}) }, human.join('\n'));
@@ -826,6 +914,7 @@ const commands = {
         (e) =>
           e.actor?.id !== actor.id &&
           ((isCoord && e.type === 'task.status' && ['done', 'failed', 'blocked', 'review'].includes(e.data?.status)) ||
+            (isCoord && e.type === 'plan.review') ||
             (e.task && st.tasks[e.task]?.owner === actor.id && ['task.status', 'task.note', 'task.assigned', 'task.updated'].includes(e.type))),
       );
       if (attention.length || hits.length) return finish(st, attention, hits);

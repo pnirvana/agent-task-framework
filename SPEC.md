@@ -83,14 +83,15 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 | `plan.created` | `{title, goal?, description?, labels?, coordinator?, meta?}` (`coordinator` defaults to the creating actor) |
 | `plan.updated` | any subset of the above (shallow replace) |
 | `plan.status`  | `{status: active\|paused\|completed\|failed\|cancelled, message?}` |
+| `plan.review`  | `{summary, items: [{task, action: approve\|change\|note, message, file?, line?}]}`: one submitted review batch |
 
 ### Task events
 | type | data | notes |
 |------|------|-------|
-| `task.created`  | `{title, description?, acceptance?: string[], deps?: id[], parent?: id, labels?: string[], priority?: number, assignee?: string, agent?: string, meta?: object}` | `agent`: name of the agent definition to run the task with (opaque; resolved by the launcher, e.g. a pi agent named `reviewer`) |
+| `task.created`  | `{title, description?, acceptance?: string[], deps?: id[], parent?: id, labels?: string[], priority?: number, assignee?: string, agent?: string, origin?: id, meta?: object}` | `agent`: name of the agent definition to run the task with (opaque; resolved by the launcher, e.g. a pi agent named `reviewer`) |
 | `task.updated`  | any subset of the definition fields | lists are replaced, not merged |
 | `task.assigned` | `{assignee: string\|null}` | `null` = unassign |
-| `task.status`   | `{status, message?, on?: id[]}` | `message` on `done` is the task's **result summary**; `on` with `blocked`: tasks it is blocked on |
+| `task.status`   | `{status, message?, on?: id[], changes?: true}` | `message` on `done` is the task's **result summary**; `on` with `blocked`: tasks it is blocked on; `changes` with `todo`: **changes requested** from review (`message` is the feedback) |
 | `task.progress` | `{message?, percent?: 0..100}` | heartbeat / milestone |
 | `task.note`     | `{message, kind?: info\|question\|decision\|warning\|checkpoint}` | `checkpoint`: where the work stands (done / left / how to verify) |
 | `task.artifact` | `{kind: file\|commit\|branch\|pr\|url\|other, ref, description?}` | pointer to an output |
@@ -245,6 +246,24 @@ Attention reasons (§`attentionFor`) for an owner: `ready`, `unblocked` (all `bl
 tasks done), `answered` (someone else added a note after a question-block). For a
 coordinator additionally: `dispatch` (a ready task nobody owns), `review`, `blocked`
 (question-blocks).
+
+**Review outcomes.** A task in `review` (or `done`) can be sent back with requested
+changes: `task.status {status: todo, changes: true, message}`. Derived: `feedback` (all
+change requests, numbered `round`s) and `changes_requested` (until the task is next
+submitted, approved, failed or cancelled). The owner's attention reason is then
+`changes` instead of `ready`. Work found in review beyond a task's acceptance criteria is
+a new task with `origin` pointing at the reviewed one (derived reverse link: `followups`);
+it defaults to the origin's parent (work package).
+
+**Reviewers and batch reviews.** A task's `reviewer` (null = the coordinator) says who
+must approve it; a subagent can set it when submitting (`atf review … --by human`).
+Coordinators get attention reason `review` only for tasks they review; tasks for other
+reviewers appear in the driver inbox as `your-review`. Review feedback is collected as
+drafts (`plans/<id>/drafts/<actor>.json`, not events) and submitted in one transaction
+(`reviewEvents`): per task, change requests (plus notes) on a task in review/done send
+it back with all points numbered; elsewhere they become `feedback` notes; approvals mark
+a task in review done; one `plan.review` event summarizes the batch, which a
+coordinator's wait reports once.
 
 **Wait cursors.** `atf wait` keeps, per actor and plan, the seq up to which it has reported
 (`plans/<id>/cursors/<actor>.seq`). The next wait reports relevant events after it, so

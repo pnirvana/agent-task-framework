@@ -347,3 +347,66 @@ export function writeCursor(root, planId, actorId, seq) {
   fs.writeFileSync(f + '.' + process.pid, String(seq));
   fs.renameSync(f + '.' + process.pid, f);
 }
+
+// ---------- review drafts ----------
+// Feedback items collected before they are sent (per plan and actor): any tool (CLI,
+// board, an editor plugin) adds drafts; `atf feedback submit` applies them in one write.
+const draftsFile = (root, planId, actorId) => path.join(planDir(root, planId), 'drafts', `${String(actorId).replace(/[^A-Za-z0-9_.-]/g, '_')}.json`);
+
+export function readDrafts(root, planId, actorId) {
+  try {
+    return JSON.parse(fs.readFileSync(draftsFile(root, planId, actorId), 'utf8')).items || [];
+  } catch {
+    return [];
+  }
+}
+
+export function writeDrafts(root, planId, actorId, items) {
+  const f = draftsFile(root, planId, actorId);
+  if (!items.length) return fs.rmSync(f, { force: true });
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f + '.' + process.pid, JSON.stringify({ items }, null, 2));
+  fs.renameSync(f + '.' + process.pid, f);
+}
+
+/**
+ * Turn drafts into one transaction's events. Per task: change requests (and notes)
+ * on a task in review/done send it back with all points numbered; on other tasks they
+ * become feedback notes. Approvals mark a task in review done. One plan.review event
+ * summarizes the batch, so a coordinator waiting on the plan wakes once.
+ */
+export function reviewEvents(state, items, actorId) {
+  const byTask = new Map();
+  for (const it of items) {
+    if (!state.tasks[it.task]) continue;
+    if (!byTask.has(it.task)) byTask.set(it.task, []);
+    byTask.get(it.task).push(it);
+  }
+  const loc = (it) => (it.file ? ` (${it.file}${it.line ? ':' + it.line : ''})` : '');
+  const evs = [];
+  const summary = { approved: [], changes: [], notes: [] };
+  for (const [id, its] of byTask) {
+    const t = state.tasks[id];
+    const changes = its.filter((i) => i.action === 'change');
+    const notes = its.filter((i) => i.action === 'note');
+    const approve = its.find((i) => i.action === 'approve');
+    if (changes.length && ['review', 'done'].includes(t.status)) {
+      const points = [...changes, ...notes].map((i, n) => `${n + 1}. ${i.message}${loc(i)}`).join('\n');
+      evs.push({ type: 'task.status', task: id, data: { status: 'todo', changes: true, message: points } });
+      summary.changes.push(id);
+    } else {
+      for (const i of [...changes, ...notes]) evs.push({ type: 'task.note', task: id, data: { kind: 'feedback', message: `${i.action === 'change' ? 'change: ' : ''}${i.message}${loc(i)}` } });
+      if (changes.length || notes.length) summary.notes.push(id);
+      if (approve && !changes.length) {
+        if (t.status === 'review') {
+          evs.push({ type: 'task.status', task: id, data: { status: 'done', message: `approved by ${actorId}${approve.message ? ': ' + approve.message : ''}` } });
+          summary.approved.push(id);
+        } else evs.push({ type: 'task.note', task: id, data: { kind: 'feedback', message: `approved by ${actorId}${approve.message ? ': ' + approve.message : ''} (task was ${t.status})` } });
+      }
+    }
+  }
+  const parts = [summary.approved.length && `${summary.approved.length} approved (${summary.approved.join(',')})`, summary.changes.length && `${summary.changes.length} sent back with changes (${summary.changes.join(',')})`, summary.notes.length && `notes on ${summary.notes.join(',')}`].filter(Boolean);
+  const text = `review by ${actorId}: ${parts.join('; ') || 'nothing applicable'}`;
+  evs.push({ type: 'plan.review', data: { summary: text, items: items.map(({ task, action, message, file, line }) => ({ task, action, message, ...(file ? { file } : {}), ...(line ? { line } : {}) })) } });
+  return { events: evs, summary: text };
+}
