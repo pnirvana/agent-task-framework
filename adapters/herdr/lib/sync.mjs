@@ -1,10 +1,7 @@
 // Project ATF state onto herdr: task labels on agent panes, plan progress as
 // workspace sidebar tokens, and notifications for statuses that need a human.
 // Stateless: every run recomputes the full desired state from the event logs.
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { TERMINAL, attentionFor } from '../../../src/core.mjs';
+import { TERMINAL } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, readEvents, getCurrentPlan } from '../../../src/store.mjs';
 import { herdr, notify } from './herdr.mjs';
 
@@ -126,56 +123,4 @@ export function notifyForEvents(root, planId, from, to) {
   const leaves = s.order.filter((id) => !s.tasks[id].children.length);
   if (leaves.length && leaves.every((id) => TERMINAL.has(s.tasks[id].status)) && evs.some((e) => e.type === 'task.status' && TERMINAL.has(e.data?.status)))
     notify(`ATF plan finished: ${s.title}`, progressText(s), 'done');
-}
-
-// ---------- waking idle agents ----------
-const nudgeFile = () => {
-  const dir = process.env.HERDR_PLUGIN_STATE_DIR || path.join(os.homedir(), '.local/state/herdr/plugins/atf.herdr');
-  fs.mkdirSync(dir, { recursive: true });
-  return path.join(dir, 'nudges.json');
-};
-
-function nudgeText(s, actor, att) {
-  const items = att.map((a) => `${a.task} ${a.reason} (${s.tasks[a.task]?.title ?? ''})`).join('; ');
-  if (actor.role === 'coordinator')
-    return `[ATF] Plan "${s.title}" needs you: ${items}. Handle these (atf show <id>; approve with atf done -m, reopen, or answer), then continue monitoring with \`atf wait\`.`;
-  return `[ATF] Work is available for you in plan "${s.title}": ${items}. Continue: \`atf next --package\` (or \`atf start <id>\` for an unblocked task), and keep looping until \`atf wait\` reports you own no open tasks.`;
-}
-
-/**
- * Prompt herdr agents that are idle while ATF has something for them (ready work,
- * a resumable block, or for coordinators a review/blocker). Agents that are busy are
- * left alone: their `atf wait` already returns on the same condition. Each distinct
- * attention set is nudged once.
- */
-export function nudgeIdle(root) {
-  let store = {};
-  try {
-    store = JSON.parse(fs.readFileSync(nudgeFile(), 'utf8'));
-  } catch {}
-  let changed = false;
-  const sent = [];
-  for (const s of activePlans(root)) {
-    if (s.status !== 'active') continue;
-    for (const actor of Object.values(s.actors)) {
-      if (!actor.ctx?.herdr_pane && actor.inferred) continue;
-      const k = `${root}#${s.id}#${actor.id}`;
-      const att = attentionFor(s, actor.id, actor.role);
-      if (!att.length) {
-        if (store[k]) delete store[k], (changed = true);
-        continue;
-      }
-      const key = att.map((a) => `${a.task}:${a.reason}`).join(',');
-      if (store[k] === key) continue;
-      const agent = herdr(['agent', 'get', actor.id])?.agent || (actor.ctx?.herdr_pane && herdr(['agent', 'get', actor.ctx.herdr_pane])?.agent);
-      if (!agent || !['idle', 'done'].includes(agent.agent_status)) continue; // busy or gone: retry on a later change
-      if (herdr(['agent', 'prompt', agent.name || agent.pane_id, nudgeText(s, actor, att)])) {
-        store[k] = key;
-        changed = true;
-        sent.push(`${actor.id}: ${key}`);
-      }
-    }
-  }
-  if (changed) fs.writeFileSync(nudgeFile(), JSON.stringify(store, null, 2));
-  return sent;
 }

@@ -90,10 +90,11 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 | `task.created`  | `{title, description?, acceptance?: string[], deps?: id[], parent?: id, labels?: string[], priority?: number, assignee?: string, meta?: object}` | |
 | `task.updated`  | any subset of the definition fields | lists are replaced, not merged |
 | `task.assigned` | `{assignee: string\|null}` | `null` = unassign |
-| `task.status`   | `{status, message?}` | `message` on `done` is the task's **result summary** |
+| `task.status`   | `{status, message?, on?: id[]}` | `message` on `done` is the task's **result summary**; `on` with `blocked`: tasks it is blocked on |
 | `task.progress` | `{message?, percent?: 0..100}` | heartbeat / milestone |
-| `task.note`     | `{message, kind?: info\|question\|decision\|warning}` | |
+| `task.note`     | `{message, kind?: info\|question\|decision\|warning\|checkpoint}` | `checkpoint`: where the work stands (done / left / how to verify) |
 | `task.artifact` | `{kind: file\|commit\|branch\|pr\|url\|other, ref, description?}` | pointer to an output |
+| `task.session`  | `{ref, kind?, actor?}` | opaque reference to an agent session that worked on the task (§9) |
 
 ### Extension events
 Types starting with `x.` (e.g. `x.herdr.focus`, `x.mycorp.cost`) are reserved for
@@ -220,7 +221,41 @@ ignored. A slow or failing hook can never block or fail a writer. Environment:
 harness pane it was written from). `ATF_NO_HOOKS=1` disables them. Hooks are how
 harness adapters project ATF state outward (the herdr adapter uses one to label panes).
 
-## 9. Versioning
+## 9. Agent context: checkpoints, sessions, resume policy
+
+ATF is not tied to any agent or harness, but agents come and go: a launcher may close an
+idle agent and start another later. Three harness-independent pieces make that safe:
+
+- **Checkpoint notes** (`task.note` with `kind: checkpoint`): plain-text state of an
+  unfinished task. Agents write one before blocking or stopping mid-task. Any agent can
+  continue from it. Derived field: `checkpoint` (the latest one).
+- **Session references** (`task.session`): an opaque `{kind, ref}` naming the agent
+  session that worked on the task (a session file, a session id). ATF stores and returns
+  it but never interprets it. Derived: `sessions` (per actor), `session` (latest).
+- **Resume policy** (`resume` on the plan or a task: `auto` | `resume` | `fresh`). Derived:
+  `resume_policy`.
+
+`launchPlan(plan, task, actor)` (CLI: `atf resume-info <task>`) answers "should the next
+agent on this task resume or start fresh?". Rule for `auto`: **context belongs to the
+task.** A task that was already worked on (blocked then unblocked, question answered,
+reopened after review) resumes its session; a task never started gets a fresh agent.
+Without a session reference the answer is `fresh`, and the checkpoint carries the state.
+
+Attention reasons (§`attentionFor`) for an owner: `ready`, `unblocked` (all `blocked on`
+tasks done), `answered` (someone else added a note after a question-block).
+
+**Launcher contract.** A launcher (e.g. the herdr adapter) that starts agents:
+1. sets `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR`, `ATF_ROLE`, and `ATF_LIFECYCLE`
+   (`ephemeral` if it closes idle agents and relaunches them, else `persistent`);
+2. records a `task.session` for each task an agent worked on, if the harness exposes one;
+3. when an agent's owner has attention but no live agent, starts one, resuming
+   `launchPlan(...).session` when the mode is `resume` and the agent kind can resume,
+   else fresh with a prompt pointing at the checkpoint and task history.
+
+With `ATF_LIFECYCLE=ephemeral`, `atf wait` returns immediately when nothing needs the
+agent, telling it to end its turn.
+
+## 10. Versioning
 
 `v` is bumped only for incompatible envelope or semantics changes. New event types,
 new optional `data` fields and new `ctx` keys are minor, non-breaking additions.

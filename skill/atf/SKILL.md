@@ -17,24 +17,33 @@ plan from `$ATF_PLAN` (or `--plan ID`). Check with: `echo $ATF_ACTOR $ATF_PLAN`.
 You are either given **one task** (e.g. T3) or a **work package**: a parent task (e.g. T2)
 whose whole subtree you own. `atf list --mine` shows everything you own.
 
-For a work package, loop until `atf wait` says **you own no open tasks**:
+For a work package, loop: `atf next --package` → do the task → finish it (step 6) → repeat.
+Sending a task to `review` does not end your work: move on to the next ready task. If a
+task is too big, split it inside your package: `atf add "<title>" --parent T4 --accept "..."`.
 
-```
-atf next --package        # start the next ready task in your package
-  … do it, finish it (step 6) …
-atf wait --timeout 600000 # when nothing is ready: returns as soon as something is
-                          # (a review approved, a dependency done, a task reopened);
-                          # on timeout just run it again
-```
+**When nothing is ready for you**, run `atf wait --timeout 600000`. It returns at once if
+something already needs you, otherwise when something does (a dependency done, a review
+answered, a task reopened). What to do next depends on `$ATF_LIFECYCLE`:
+- `ephemeral` (agents launched by a harness that resumes them, e.g. herdr): `atf wait`
+  tells you to **end your turn**. Do so. Your pane may be closed; when work appears you
+  are resumed in this same session or a fresh agent continues from your checkpoint.
+- otherwise: keep looping on `atf wait` (re-run on timeout) until it says you own no
+  open tasks. Don't end your turn while you own open tasks.
 
-Sending a task to `review` does not end your work: move on to the next ready task. Do not
-end your turn while you own open tasks; `atf wait` is how you idle. If a task is too big,
-split it inside your package: `atf add "<title>" --parent T4 --accept "..."`.
+**If you were resumed** (your prompt starts with `[ATF] You are resumed`): you have your
+earlier context. Run `atf show <id>` for what changed, `atf start <id>`, continue.
+**If you start fresh on a task that was worked on before** (its `atf show` has a
+checkpoint, notes or an earlier result): continue from that state, don't start over.
 
 **Discovered a dependency on someone else's work** (e.g. your tests need a file another
 package produces)? Don't wait silently inside an in-progress task and don't do their work.
-Run `atf block T4 --on T8 -m "needs web/index.html from T8"`, continue with other ready
-tasks, and `atf wait` will report T4 as `unblocked` when T8 is done. Then `atf start T4`.
+Write a checkpoint, then `atf block T4 --on T8 -m "needs web/index.html from T8"`, and
+continue with other ready tasks. `atf wait` reports T4 as `unblocked` when T8 is done;
+then `atf start T4`.
+
+**Checkpoint before you block or stop mid-task.** It is what a fresh agent (or you, after
+a restart) continues from, so make it concrete:
+`atf note T4 --kind checkpoint "done: 8 tests in test_server.py, API ones pass. left: 2 page tests fail until web/index.html exists. verify: python3 -m unittest -v test_server"`
 
 For each task:
 
@@ -50,8 +59,9 @@ For each task:
    - `atf review T3 -m "<summary + what to check>"`: done, but needs coordinator sign-off
    - `atf block T3 -m "<precise question or missing input>"`: cannot continue without help
    - `atf fail T3 -m "<what was tried, why it failed>"`: cannot be done as specified
-7. If blocked on a question (no `--on`), stop working on that task; the coordinator will
-   answer. Continue with other ready tasks, or `atf wait` until something needs you.
+7. If blocked on a question (no `--on`): write a checkpoint first, then block, and stop
+   working on that task. When the coordinator answers with a note, `atf wait` reports
+   the task as `answered`. Meanwhile continue with other ready tasks.
 
 Rules: stay within your task's scope; if you discover extra work, add a note with
 `--kind warning` rather than silently expanding scope. Never mark `done` with failing
@@ -92,10 +102,18 @@ instead of your transcript, so make it self-contained.
    - `atf status` shows the tree with owners; `atf plan show` gives the plan overview
      (structure, ownership, decisions, open questions, artifacts)
    - `atf log -n 20` shows recent events
-5. React: answer blockers (`atf note T4 "use cookies" --kind decision`, then tell the agent),
+5. React: answer blockers with a note on the task (`atf note T4 "use cookies" --kind decision`);
+   the owner sees it as `answered` (and in herdr is resumed automatically),
    approve reviews (`atf done T4 -m "approved"`), retry failures (`atf reopen T4`), add
    follow-up tasks as discovered.
 6. Close: `atf plan status completed -m "<summary>"`.
+
+**Agent context.** Context belongs to the task: an agent that comes back to a task it
+already worked on (unblocked, answered, reopened) resumes its earlier session if the
+harness supports it; a new task gets a fresh agent. Override per plan or task with
+`--resume fresh` (e.g. the earlier attempt went wrong and you want clean eyes) or
+`--resume resume`: `atf plan update --resume fresh`, `atf edit T4 --resume fresh`.
+`atf resume-info T4` shows what will happen.
 
 ## Status reference
 

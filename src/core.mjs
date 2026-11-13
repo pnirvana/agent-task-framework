@@ -6,7 +6,8 @@ export const PROTOCOL_VERSION = 1;
 export const PLAN_STATUSES = ['active', 'paused', 'completed', 'failed', 'cancelled'];
 export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'review', 'done', 'failed', 'cancelled'];
 export const TERMINAL = new Set(['done', 'failed', 'cancelled']);
-export const NOTE_KINDS = ['info', 'question', 'decision', 'warning'];
+export const NOTE_KINDS = ['info', 'question', 'decision', 'warning', 'checkpoint'];
+export const RESUME_POLICIES = ['auto', 'resume', 'fresh'];
 export const ARTIFACT_KINDS = ['file', 'commit', 'branch', 'pr', 'url', 'other'];
 
 // Allowed task status transitions (enforced by writers, NOT by fold).
@@ -24,8 +25,8 @@ export function canTransition(from, to) {
   return from === to ? false : (TRANSITIONS[from] || []).includes(to);
 }
 
-const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta'];
-const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta'];
+const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume'];
+const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume'];
 
 function pick(obj, keys) {
   const out = {};
@@ -46,6 +47,11 @@ function newTask(id, ev) {
     meta: {},
     status: 'todo',
     blocked_on: [],
+    blocked_seq: null,
+    resume: null, // per-task resume policy (overrides the plan's)
+    checkpoint: null, // latest checkpoint note: where the work stands
+    sessions: {}, // actor -> {kind, ref, ts}: opaque harness session references
+    session: null, // latest session reference
     assignee: null,
     percent: null,
     last_message: null,
@@ -155,6 +161,7 @@ export function fold(events) {
         if (d.status === 'done' && d.message) t.result = d.message;
         // `on`: tasks this one is blocked on (a dependency discovered mid-task)
         t.blocked_on = d.status === 'blocked' && Array.isArray(d.on) ? d.on : [];
+        t.blocked_seq = d.status === 'blocked' ? ev.seq : null;
         t.history.push({ ...entry, type: 'status', from, to: d.status, message: d.message ?? null });
         break;
       }
@@ -165,7 +172,18 @@ export function fold(events) {
         break;
       case 'task.note':
         t.notes.push({ ...entry, kind: d.kind || 'info', message: d.message });
+        if (d.kind === 'checkpoint') t.checkpoint = { ...entry, message: d.message };
         break;
+      case 'task.session': {
+        // Opaque reference to an agent session that worked on this task (e.g. a pi
+        // session file or a claude session id). ATF stores it; only launchers read it.
+        if (!d.ref) break;
+        const who = d.actor ?? ev.actor?.id ?? null;
+        const ref = { kind: d.kind ?? null, ref: d.ref, ts: ev.ts, actor: who };
+        if (who) t.sessions[who] = ref;
+        t.session = ref;
+        break;
+      }
       case 'task.artifact':
         t.artifacts.push({ ...entry, kind: d.kind || 'other', ref: d.ref, description: d.description ?? null });
         break;
@@ -226,8 +244,12 @@ export function derive(plan) {
     t.waiting_on = (t.deps || []).filter((d) => !tasks[d] || eff(tasks[d]) !== 'done');
     t.ready = t.status === 'todo' && t.waiting_on.length === 0 && t.children.length === 0;
   }
-  for (const t of Object.values(tasks))
+  for (const t of Object.values(tasks)) {
     t.can_resume = t.status === 'blocked' && t.blocked_on.length > 0 && t.blocked_on.every((d) => tasks[d] && eff(tasks[d]) === 'done');
+    // a question-block is "answered" once someone other than the owner adds a note after it
+    t.answered = t.status === 'blocked' && !t.blocked_on.length && t.notes.some((n) => n.seq > (t.blocked_seq ?? Infinity) && n.actor && n.actor !== t.owner);
+    t.resume_policy = t.resume ?? plan.resume ?? 'auto';
+  }
   plan.counts = counts;
   plan.total = plan.order.length;
   plan.progress = leaves ? doneLeaves / leaves : 0;
@@ -260,6 +282,7 @@ export function attentionFor(plan, actorId, role) {
     if (t.owner === actorId) {
       if (t.ready) out.push({ task: id, reason: 'ready' });
       else if (t.can_resume) out.push({ task: id, reason: 'unblocked' });
+      else if (t.answered) out.push({ task: id, reason: 'answered' });
     }
     if (role === 'coordinator') {
       if (t.status === 'review') out.push({ task: id, reason: 'review' });
@@ -267,6 +290,29 @@ export function attentionFor(plan, actorId, role) {
     }
   }
   return out;
+}
+
+/**
+ * Should the next agent for this task resume an earlier session or start fresh?
+ * Rule: context belongs to the task. A task that was already worked on (blocked,
+ * answered, reopened after review) resumes the session that worked on it; a task
+ * never started gets a fresh agent. Policies: 'auto' (that rule), 'resume'
+ * (always resume if a session exists), 'fresh' (never). Without a session reference
+ * the answer is always fresh; the checkpoint note then carries the state.
+ * Pure and harness-independent: launchers decide *how* to resume.
+ */
+export function launchPlan(plan, taskId, actorId = null) {
+  const t = plan.tasks[taskId];
+  if (!t) return null;
+  const policy = t.resume_policy ?? t.resume ?? plan.resume ?? 'auto';
+  const session = (actorId && t.sessions[actorId]) || t.session || null;
+  const worked = !!t.started_at;
+  let mode = 'fresh';
+  let reason = 'task not started yet';
+  if (policy === 'fresh') reason = 'policy: fresh';
+  else if (!session) reason = worked ? 'no session reference recorded; continue from checkpoint/notes' : reason;
+  else if (policy === 'resume' || worked) (mode = 'resume'), (reason = policy === 'resume' ? 'policy: resume' : 'task was already worked on');
+  return { mode, session: mode === 'resume' ? session : null, checkpoint: t.checkpoint, policy, reason, worked };
 }
 
 /** Status of a parent task derived from its children's (effective) statuses. */

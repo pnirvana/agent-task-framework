@@ -5,7 +5,8 @@ import { spawn } from 'node:child_process';
 import { TERMINAL } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot } from '../../../src/store.mjs';
 import { herdr, herdrAsync, agentIndex, notify, inHerdr } from './herdr.mjs';
-import { sync, progressText, nudgeIdle } from './sync.mjs';
+import { sync, progressText } from './sync.mjs';
+import { lifecycleSweep } from './launch.mjs';
 
 const ESC = '\x1b[';
 const STYLE = { reset: 0, bold: 1, dim: 2, inverse: 7, red: 31, green: 32, yellow: 33, blue: 34, magenta: 35, cyan: 36, gray: 90 };
@@ -746,8 +747,8 @@ function runMain({ root, popup = false, targetPane = null, spawnCmd }) {
   draw();
   refreshAgents();
   setInterval(refreshAgents, 3000);
-  // agents can go idle without writing anything (no hook fires): sweep periodically
-  if (inHerdr()) setInterval(() => nudgeIdle(root), 20_000);
+  // agents go idle after their last write (no hook fires then): sweep periodically too
+  if (inHerdr()) setInterval(() => lifecycleSweep(root), 20_000);
   setInterval(() => {
     if (listPlanIds(root).length !== ui.plans.length) loadPlans(); // plan created/removed
     watchAll();

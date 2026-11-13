@@ -11,6 +11,8 @@ import {
   canTransition,
   findCycles,
   attentionFor,
+  launchPlan,
+  RESUME_POLICIES,
 } from '../src/core.mjs';
 import {
   findRoot,
@@ -33,12 +35,12 @@ Setup / plans
   atf plan new <title> [--goal G] [--desc D]   create plan, make it current
   atf plan list | use <id>
   atf plan show [id]                    plan overview: structure, ownership, decisions, artifacts
-  atf plan update [--title T] [--goal G] [--desc D]
+  atf plan update [--title T] [--goal G] [--desc D] [--resume auto|resume|fresh]
   atf plan status <${PLAN_STATUSES.join('|')}> [-m msg]
 
 Tasks (coordinator)
   atf add <title> [--desc D] [--accept A]... [--dep T1]... [--parent T1]
-                  [--label L]... [--priority N] [--assign WHO]
+                  [--label L]... [--priority N] [--assign WHO] [--resume auto|resume|fresh]
   atf edit <task> [same flags as add; --dep/--accept/--label replace lists]
   atf assign <task> <who|->            assign / unassign. Assigning a parent task hands the
                                         whole subtree (work package) to that agent
@@ -50,6 +52,11 @@ Tasks (worker)
   atf progress <task> <msg> [--pct N]   heartbeat / milestone
   atf note <task> <msg> [--kind ${NOTE_KINDS.join('|')}]
   atf artifact <task> <ref> [--kind ${ARTIFACT_KINDS.join('|')}] [--desc D]
+  atf note <task> "<done / left / how to verify>" --kind checkpoint
+                                        where the work stands (required before block)
+  atf session <task> <ref> [--kind K] [--for WHO]
+                                        record an agent session reference (for resuming)
+  atf resume-info <task> [--for WHO]    resume or fresh? (used by launchers)
   atf block <task> -m <reason> [--on T8,T9]
                                         needs help / input. --on: blocked on other tasks;
                                         becomes resumable automatically when they are done
@@ -194,6 +201,10 @@ function taskFieldsFromFlags(f, state, selfId) {
   if (f.desc !== undefined) d.description = f.desc;
   if (f.accept) d.acceptance = f.accept;
   if (f.label) d.labels = f.label.flatMap((l) => l.split(',')).map((s) => s.trim()).filter(Boolean);
+  if (f.resume !== undefined) {
+    if (!RESUME_POLICIES.includes(f.resume)) die(`--resume must be one of ${RESUME_POLICIES.join(', ')}`);
+    d.resume = f.resume;
+  }
   if (f.priority !== undefined) {
     d.priority = Number(f.priority);
     if (!Number.isFinite(d.priority)) die('--priority must be a number');
@@ -320,7 +331,11 @@ function renderTask(t, state) {
   if (t.rollup_percent != null) L.push(`progress: ${t.rollup_percent}% (rolled up)`);
   if (t.description) L.push('', t.description);
   if (t.acceptance.length) L.push('', bold('acceptance criteria:'), ...t.acceptance.map((a) => `  - [${t.status === 'done' ? 'x' : ' '}] ${a}`));
+  if (t.checkpoint && !TERMINAL.has(t.status))
+    L.push('', bold('checkpoint') + dim(` (${t.checkpoint.actor ?? '?'}, ${ago(t.checkpoint.ts)}):`), t.checkpoint.message);
   if (t.result) L.push('', bold('result:'), t.result);
+  const sess = Object.values(t.sessions || {});
+  if (sess.length || t.resume) L.push('', bold('agent context:') + dim(` resume policy ${t.resume_policy}`), ...sess.map((x) => `  ${cyan(x.actor ?? '?')} ${x.kind ?? ''} session ${dim(x.ref)}`));
   if (t.artifacts.length) L.push('', bold('artifacts:'), ...t.artifacts.map((a) => `  ${a.kind}: ${a.ref}${a.description ? dim(' — ' + a.description) : ''}`));
   if (t.notes.length) L.push('', bold('notes:'), ...t.notes.map((n) => `  ${dim(n.ts.slice(11, 19))} ${n.kind !== 'info' ? yellow(`[${n.kind}] `) : ''}${n.actor ? cyan(n.actor) + ': ' : ''}${n.message}`));
   const hist = t.history.slice(-8);
@@ -423,6 +438,10 @@ const commands = {
       if (FLAGS.title) data.title = FLAGS.title;
       if (FLAGS.goal) data.goal = FLAGS.goal;
       if (FLAGS.desc) data.description = FLAGS.desc;
+      if (FLAGS.resume) {
+        if (!RESUME_POLICIES.includes(FLAGS.resume)) die(`--resume must be one of ${RESUME_POLICIES.join(', ')}`);
+        data.resume = FLAGS.resume;
+      }
       if (!Object.keys(data).length) die('nothing to update');
       transact(root, planId, actor, () => [{ type: 'plan.updated', data }]);
       return out({ ok: true }, 'plan updated');
@@ -555,6 +574,25 @@ const commands = {
     out({ ok: true }, dim('ok'));
   },
 
+  session(pos) {
+    // Record an opaque harness session reference for a task (launchers resume from it).
+    const { root, planId, actor } = ctx();
+    if (!pos[1]) die('usage: atf session <task> <ref> [--kind K] [--for ACTOR]');
+    transact(root, planId, actor, (st) => [
+      { type: 'task.session', task: requireTask(st, pos[0]).id, data: { ref: pos[1], ...(FLAGS.kind ? { kind: FLAGS.kind } : {}), ...(FLAGS.for ? { actor: FLAGS.for } : {}) } },
+    ]);
+    out({ ok: true }, dim('ok'));
+  },
+
+  'resume-info'(pos) {
+    // For launchers in any language: should the next agent on this task resume or start fresh?
+    const { root, planId } = ctx();
+    const state = loadPlan(root, planId);
+    const t = requireTask(state, pos[0]);
+    const lp = launchPlan(state, t.id, FLAGS.for || t.owner);
+    out(lp, `${t.id}: ${bold(lp.mode)} (${lp.reason})${lp.session ? `\nsession: ${lp.session.kind ?? ''} ${lp.session.ref}` : ''}${lp.checkpoint ? `\ncheckpoint: ${lp.checkpoint.message}` : ''}`);
+  },
+
   status() {
     const { root, planId } = ctx();
     const state = loadPlan(root, planId);
@@ -653,6 +691,9 @@ const commands = {
       if (attention.length || hits.length) return finish(st, attention, hits);
       if (isCoord && leaves(st).length && leaves(st).every((t) => TERMINAL.has(t.status))) return finish(st, [], [], 'all tasks are finished');
       if (!isCoord && !leaves(st).some((t) => t.owner === actor.id && !TERMINAL.has(t.status))) return finish(st, [], [], 'you own no open tasks');
+      // Ephemeral agents don't idle: the launcher resumes or replaces them when work is available.
+      if (!isCoord && process.env.ATF_LIFECYCLE === 'ephemeral')
+        return finish(st, [], [], 'nothing needs you right now. Lifecycle is ephemeral: make sure blocked tasks have a checkpoint note, then end your turn; you will be resumed when work is available.');
     };
 
     evaluate(); // return at once if something already needs you

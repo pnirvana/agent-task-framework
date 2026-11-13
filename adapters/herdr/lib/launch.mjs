@@ -1,0 +1,334 @@
+// Agent launching and lifecycle for the herdr adapter.
+//
+// ATF core decides *whether* the next agent on a task resumes an earlier session or
+// starts fresh (launchPlan). This module decides *how*: which pane, which agent kind,
+// which arguments. Everything agent-specific is in the AGENT_KINDS table, which users
+// can extend or override via the plugin config ("agents": {...}).
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { TERMINAL, attentionFor, launchPlan } from '../../../src/core.mjs';
+import { listPlanIds, loadPlan, transact } from '../../../src/store.mjs';
+import { herdr, pluginConfig } from './herdr.mjs';
+import { chooseSplit, tabLayout, withPlacementLock } from './layout.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+export const ATF_BIN = path.resolve(HERE, '../../../bin');
+export const SKILL_DIR = path.resolve(HERE, '../../../skill/atf');
+const SKILL_FILE = path.join(SKILL_DIR, 'SKILL.md');
+
+/**
+ * Per agent kind: extra args to start fresh, args to resume a session, and whether the
+ * agent loads the ATF skill natively. `{skill}` and `{session}` are substituted.
+ * Kinds without `resume` always start fresh (from checkpoint + task history).
+ */
+export const AGENT_KINDS = {
+  pi: { start: ['--skill', '{skill}'], resume: ['--session', '{session}', '--skill', '{skill}'], nativeSkill: true },
+  claude: { start: [], resume: ['--resume', '{session}'] },
+  codex: { start: [], resume: ['resume', '{session}'] },
+};
+
+export function agentKinds() {
+  return { ...AGENT_KINDS, ...(pluginConfig().agents || {}) };
+}
+
+export const lifecycle = () => process.env.ATF_LIFECYCLE_MODE || pluginConfig().lifecycle || 'ephemeral';
+const GRACE_MS = 15_000; // idle this long (with nothing to do) before an ephemeral agent is closed
+const RELAUNCH_COOLDOWN_MS = 60_000;
+
+// ---------- plugin state ----------
+export function stateDir() {
+  const dir = process.env.HERDR_PLUGIN_STATE_DIR || path.join(os.homedir(), '.local/state/herdr/plugins/atf.herdr');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+const readJson = (f, d = {}) => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(stateDir(), f), 'utf8'));
+  } catch {
+    return d;
+  }
+};
+const writeJson = (f, v) => fs.writeFileSync(path.join(stateDir(), f), JSON.stringify(v, null, 2));
+export const readBoards = () => readJson('boards.json');
+export const writeBoards = (b) => writeJson('boards.json', b);
+/** Agents launched by ATF (only these are ever closed or relaunched automatically). */
+const regKey = (root, name) => `${root}#${name}`;
+export const readRegistry = () => readJson('agents.json');
+export const writeRegistry = (r) => writeJson('agents.json', r);
+
+// ---------- placement ----------
+/**
+ * Create a pane for a new agent: split the largest pane of the reference tab along its
+ * longer side (never the board), else reuse/open an "agents" tab. `direction` forces a
+ * plain split of the reference pane.
+ */
+export function placeAgentPane({ cwd, env, refPane, direction }) {
+  const envArgs = Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
+  const splitOf = (pane, dir) => herdr(['pane', 'split', '--pane', pane, '--direction', dir, '--cwd', cwd, '--no-focus', ...envArgs])?.pane?.pane_id;
+  if (refPane && direction) return splitOf(refPane, direction);
+  const exclude = Object.values(readBoards());
+  if (refPane) {
+    const c = chooseSplit(refPane, { exclude });
+    if (c) return splitOf(c.pane, c.direction);
+  }
+  const ws = (refPane && tabLayout(refPane)?.workspace_id) || process.env.HERDR_WORKSPACE_ID;
+  const tabs = (herdr(['tab', 'list', ...(ws ? ['--workspace', ws] : [])])?.tabs || []).filter((t) => /^agents/.test(t.label || ''));
+  for (const t of tabs) {
+    const anyPane = (herdr(['pane', 'list', '--workspace', t.workspace_id])?.panes || []).find((p) => p.tab_id === t.tab_id);
+    const c = anyPane && chooseSplit(anyPane.pane_id, { exclude });
+    if (c) return splitOf(c.pane, c.direction);
+  }
+  const label = tabs.length ? `agents-${tabs.length + 1}` : 'agents';
+  return herdr(['tab', 'create', ...(ws ? ['--workspace', ws] : []), '--cwd', cwd, '--label', label, '--no-focus', ...envArgs])?.root_pane?.pane_id;
+}
+
+// ---------- prompts ----------
+function lastNoteFromOthers(t) {
+  return [...t.notes].reverse().find((n) => n.actor && n.actor !== t.owner && n.kind !== 'checkpoint');
+}
+
+function wasReopened(t) {
+  return t.status === 'todo' && t.history.some((h) => h.type === 'status' && h.to === 'todo' && ['review', 'done', 'failed', 'blocked'].includes(h.from));
+}
+
+/** Why the agent is (re)started, in words, for the prompt. */
+function situation(s, t) {
+  if (t.can_resume) return `${t.blocked_on.join(', ')} ${t.blocked_on.length > 1 ? 'are' : 'is'} done now (you were blocked on ${t.blocked_on.length > 1 ? 'them' : 'it'}).`;
+  if (t.answered) {
+    const n = lastNoteFromOthers(t);
+    return `your question was answered${n ? ` by ${n.actor}: "${n.message}"` : ''}.`;
+  }
+  if (wasReopened(t)) {
+    const h = [...t.history].reverse().find((x) => x.type === 'status' && x.to === 'todo');
+    return `it was reopened by ${h?.actor ?? 'the coordinator'}${h?.message ? `: "${h.message}"` : ''}.`;
+  }
+  return null;
+}
+
+export function buildPrompt({ s, t, name, mode, pkg, kindCfg }) {
+  const skill = kindCfg.nativeSkill ? 'Follow the atf skill.' : `First read ${SKILL_FILE} and follow its subagent section.`;
+  const why = situation(s, t);
+  if (mode === 'resume')
+    return (
+      `[ATF] You are resumed in your earlier session for ${t.id} (${t.title})${why ? `: ${why}` : '.'} ` +
+      `Run \`atf show ${t.id}\` to see what changed, then \`atf start ${t.id}\` and continue where you left off. ${skill}`
+    );
+  const history = t.started_at
+    ? ` This task was worked on before by another session: \`atf show ${t.id}\` has its checkpoint, notes and earlier result${why ? `, and ${why}` : '.'} Continue from there instead of starting over.`
+    : '';
+  if (pkg)
+    return (
+      `You are subagent "${name}". You own ATF work package ${pkg.id}: ${pkg.title} (the whole subtree); your next task is ${t.id}: ${t.title}.${history} ` +
+      `Run \`atf show ${pkg.id}\` and \`atf list --mine\` to see the package. Then loop: \`atf next --package\`, do the task, finish it ` +
+      `(done/review/block/fail). You may split a task with \`atf add <title> --parent <id>\`. ${skill}`
+    );
+  return (
+    `You are subagent "${name}". Your ATF task is ${t.id}: ${t.title}.${history} ` +
+    `Run \`atf show ${t.id}\` for details and acceptance criteria, then \`atf start ${t.id}\` and do the work. ${skill} ` +
+    `Report progress with atf and finish with atf done/review/block/fail.`
+  );
+}
+
+// ---------- launching ----------
+function recordSession(root, planId, taskIds, name, kind) {
+  const a = herdr(['agent', 'get', name])?.agent;
+  const ref = a?.agent_session?.value;
+  if (!ref || !taskIds.length) return null;
+  const state = loadPlan(root, planId);
+  const fresh = taskIds.filter((id) => state.tasks[id] && state.tasks[id].sessions[name]?.ref !== ref);
+  if (fresh.length)
+    transact(root, planId, { id: 'atf-herdr', role: 'launcher', harness: 'herdr' }, () =>
+      fresh.map((id) => ({ type: 'task.session', task: id, data: { ref, kind, actor: name } })),
+    );
+  return ref;
+}
+
+/**
+ * Start an agent for `taskId` (a leaf or a work package). Mode comes from ATF's
+ * launchPlan unless forced. Returns {name, pane, mode, kind}.
+ */
+export function launchAgent({ root, planId, taskId, name, kind, refPane, direction, force, extraArgs = [], assign = true }) {
+  const s = loadPlan(root, planId);
+  const target = s.tasks[taskId];
+  if (!target) throw new Error(`unknown task ${taskId}`);
+  const kinds = agentKinds();
+  kind = kind || process.env.ATF_AGENT_KIND || pluginConfig().agent_kind || 'pi';
+  const kindCfg = kinds[kind] || { start: [] };
+  const isPackage = target.children.length > 0;
+  // the leaf the agent starts on: the task itself, or the next ready leaf of the package
+  const leaf = isPackage
+    ? s.order.map((id) => s.tasks[id]).find((t) => !t.children.length && t.path.includes(target.id) && (t.ready || t.can_resume || t.answered)) || target
+    : target;
+  const lp = launchPlan(s, leaf.id, name);
+  let mode = force || lp.mode;
+  if (mode === 'resume' && (!lp.session && !force)) mode = 'fresh';
+  const session = lp.session?.ref;
+  if (mode === 'resume' && (!kindCfg.resume || !session)) mode = 'fresh'; // agent kind can't resume: fresh + checkpoint
+
+  const env = {
+    ATF_DIR: root,
+    ATF_PLAN: planId,
+    ATF_ACTOR: name,
+    ATF_ROLE: 'subagent',
+    ATF_HARNESS: 'herdr',
+    ATF_LIFECYCLE: lifecycle(),
+    PATH: `${ATF_BIN}:${process.env.PATH}`, // `atf` resolvable without a global install
+  };
+  const pane = withPlacementLock(() => placeAgentPane({ cwd: path.dirname(root), env, refPane, direction }));
+  if (!pane) throw new Error('could not create a pane');
+  const sub = (a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session ?? '');
+  const args = [...(mode === 'resume' ? kindCfg.resume : kindCfg.start || []).map(sub), ...extraArgs];
+  const started = herdr(['agent', 'start', name, '--kind', kind, '--pane', pane, ...(args.length ? ['--', ...args] : [])], { timeout: 60_000 });
+  if (!started) {
+    herdr(['pane', 'close', pane]);
+    throw new Error(`herdr could not start ${kind} agent "${name}"`);
+  }
+  if (assign && target.assignee !== name && !(target.owner === name && !isPackage)) {
+    transact(root, planId, { id: process.env.ATF_ACTOR || 'coordinator', role: 'coordinator', harness: 'herdr' }, () => [
+      { type: 'task.assigned', task: target.id, data: { assignee: name } },
+    ]);
+  }
+  const fresh = loadPlan(root, planId);
+  herdr(['agent', 'prompt', name, buildPrompt({ s: fresh, t: fresh.tasks[leaf.id], name, mode, pkg: isPackage ? fresh.tasks[target.id] : null, kindCfg })]);
+  recordSession(root, planId, [leaf.id], name, kind);
+
+  const reg = readRegistry();
+  reg[regKey(root, name)] = { name, kind, root, plan: planId, task: target.id, pane, launchedAt: Date.now(), idleSince: null };
+  writeRegistry(reg);
+  return { name, pane, mode, kind, leaf: leaf.id, reason: lp.reason };
+}
+
+// ---------- lifecycle sweep ----------
+function nudgeText(s, actor, att) {
+  const items = att.map((a) => `${a.task} ${a.reason} (${s.tasks[a.task]?.title ?? ''})`).join('; ');
+  if (actor.role === 'coordinator')
+    return `[ATF] Plan "${s.title}" needs you: ${items}. Handle these (atf show <id>; approve with atf done -m, reopen, or answer), then continue monitoring with \`atf wait\`.`;
+  return `[ATF] Work is available for you in plan "${s.title}": ${items}. Continue: \`atf next --package\` (or \`atf start <id>\` for an unblocked or answered task).`;
+}
+
+/**
+ * One pass over all active plans in `root`:
+ *  - live + idle + something needs it      -> nudge (prompt) it, once per situation
+ *  - live + idle + nothing to do (ephemeral)-> after a grace period: save session refs, close pane
+ *  - gone + something needs it (ATF-spawned)-> relaunch: resume the task's session or start fresh
+ * Returns {actions, pending} where pending=true means another sweep is useful soon.
+ */
+export function lifecycleSweep(root) {
+  // one sweep at a time per machine; a concurrent one is skipped (and rescheduled)
+  const lock = path.join(stateDir(), 'sweep.lock');
+  try {
+    fs.mkdirSync(lock);
+  } catch {
+    try {
+      if (Date.now() - fs.statSync(lock).mtimeMs < 120_000) return { actions: [], pending: true };
+      fs.rmSync(lock, { recursive: true, force: true });
+      fs.mkdirSync(lock);
+    } catch {
+      return { actions: [], pending: true };
+    }
+  }
+  try {
+    const res = sweepLocked(root);
+    if (res.actions.length)
+      fs.appendFileSync(path.join(stateDir(), 'lifecycle.log'), res.actions.map((a) => `${new Date().toISOString()} ${path.basename(path.dirname(root))} ${a}\n`).join(''));
+    return res;
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+function sweepLocked(root) {
+  const actions = [];
+  let pending = false;
+  const reg = readRegistry();
+  const nudges = readJson('nudges.json');
+  const live = new Map();
+  for (const a of herdr(['agent', 'list'])?.agents || []) if (a.name) live.set(a.name, a);
+  const now = Date.now();
+
+  for (const id of listPlanIds(root)) {
+    const s = loadPlan(root, id);
+    if (s.status !== 'active') continue;
+    for (const actor of Object.values(s.actors)) {
+      const rec = reg[regKey(root, actor.id)];
+      const agent = live.get(actor.id);
+      const role = actor.role === 'coordinator' ? 'coordinator' : 'subagent';
+      const att = attentionFor(s, actor.id, role);
+      const nkey = `${root}#${s.id}#${actor.id}`;
+      const attKey = att.map((a) => `${a.task}:${a.reason}`).join(',');
+      if (!att.length) delete nudges[nkey];
+
+      if (agent) {
+        const idle = ['idle', 'done'].includes(agent.agent_status);
+        if (!idle) {
+          if (rec) rec.idleSince = null;
+          if (rec) pending = true;
+          continue;
+        }
+        if (att.length) {
+          // a just-launched agent is idle until it reads its kickoff prompt: don't double-prompt it
+          const justLaunched = rec?.launchedAt && now - rec.launchedAt < RELAUNCH_COOLDOWN_MS;
+          if (justLaunched) {
+            pending = true;
+            continue;
+          }
+          if (nudges[nkey] !== attKey && herdr(['agent', 'prompt', actor.id, nudgeText(s, actor, att)])) {
+            nudges[nkey] = attKey;
+            actions.push(`nudged ${actor.id}: ${attKey}`);
+          }
+          if (rec) rec.idleSince = null;
+          continue;
+        }
+        // idle with nothing to do: only ATF-spawned agents in ephemeral mode are closed
+        if (!rec || lifecycle() !== 'ephemeral') continue;
+        const working = s.order.some((tid) => s.tasks[tid].owner === actor.id && s.tasks[tid].status === 'in_progress' && !s.tasks[tid].children.length);
+        if (working) continue; // stale rather than finished: leave it for a human to look at
+        if (!rec.idleSince) {
+          rec.idleSince = now;
+          pending = true;
+          continue;
+        }
+        if (now - rec.idleSince < GRACE_MS) {
+          pending = true;
+          continue;
+        }
+        const touched = s.order.filter((tid) => s.tasks[tid].owner === actor.id && !s.tasks[tid].children.length && (!TERMINAL.has(s.tasks[tid].status) || s.tasks[tid].status === 'done'));
+        recordSession(root, s.id, touched.filter((tid) => s.tasks[tid].started_at), actor.id, rec.kind);
+        herdr(['pane', 'close', agent.pane_id]);
+        rec.pane = null;
+        rec.idleSince = null;
+        rec.closedAt = now;
+        actions.push(`closed ${actor.id} (idle, nothing to do)`);
+        continue;
+      }
+
+      // not alive
+      if (!att.length || !rec || rec.plan !== s.id) continue;
+      if (rec.launchedAt && now - rec.launchedAt < RELAUNCH_COOLDOWN_MS) {
+        pending = true;
+        continue;
+      }
+      const first = s.tasks[att[0].task];
+      const pkgId = [...first.path].reverse().find((pid) => s.tasks[pid].assignee === actor.id);
+      try {
+        const refPane = Object.values(reg).find((r) => r.pane && r.root === root && live.has(r.name))?.pane || coordinatorPane(s, live);
+        const r = launchAgent({ root, planId: s.id, taskId: pkgId && first.ready && !first.assignee ? pkgId : first.id, name: actor.id, kind: rec.kind, refPane, assign: false });
+        Object.assign(reg, readRegistry()); // launchAgent updated the registry
+        actions.push(`relaunched ${actor.id} for ${r.leaf} (${r.mode}: ${r.reason})`);
+        pending = true;
+      } catch (e) {
+        actions.push(`relaunch of ${actor.id} failed: ${e.message}`);
+      }
+    }
+  }
+  writeRegistry({ ...readRegistry(), ...reg });
+  writeJson('nudges.json', nudges);
+  return { actions, pending };
+}
+
+function coordinatorPane(s, live) {
+  const c = Object.values(s.actors).find((a) => a.role === 'coordinator' && live.has(a.id));
+  return c ? live.get(c.id).pane_id : null;
+}

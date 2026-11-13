@@ -106,6 +106,39 @@ the tab has a pane at least 110 columns wide and three-quarters of the tab's hei
 otherwise as its own tab. `tab` always opens it as a tab. `prefix+t` toggles it per
 workspace either way; `prefix+alt+t` is the popup.
 
+### Agent lifecycle and resuming
+
+Default `"lifecycle": "ephemeral"`: an agent launched by ATF (via `spawn`, the board's `s`,
+or a relaunch) is closed once it is idle with nothing to do (15 s grace). Its session
+reference is saved on the tasks it worked on. When work appears for it again (a ready
+task in its package, a `block --on` dependency done, a question answered, a task
+reopened), the adapter relaunches it:
+
+- **resume** the earlier session if the task was already worked on and the agent kind
+  supports resuming (ATF's `launchPlan`, see `atf resume-info <task>`);
+- otherwise **fresh**, with a prompt pointing at the task's checkpoint and history.
+
+Agents you start yourself are never closed or relaunched. `"lifecycle": "persistent"`
+keeps launched agents alive (they are prompted instead). Every action is logged to
+`~/.local/state/herdr/plugins/atf.herdr/lifecycle.log`.
+
+Agent kinds (override or add in the plugin config under `"agents"`):
+
+```json
+{
+  "agent_kind": "pi",
+  "agents": {
+    "pi":     { "start": ["--skill", "{skill}"], "resume": ["--session", "{session}", "--skill", "{skill}"], "nativeSkill": true },
+    "claude": { "start": [], "resume": ["--resume", "{session}"] },
+    "codex":  { "start": [], "resume": ["resume", "{session}"] }
+  }
+}
+```
+
+The session reference comes from herdr (`agent_session` of the agent's pane), so it works
+for any agent kind herdr integrates. A kind without `resume` always starts fresh.
+The pi entry is verified; the claude/codex resume arguments are untested defaults.
+
 ### Pane layout for agents
 
 `atf-herdr spawn` splits the **largest** pane in the tab along its visually longer side,

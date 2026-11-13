@@ -235,3 +235,42 @@ test('block --on: dependency blocks resume when the other task is done', () => {
   run(['start', 'T1'], be);
   assert.deepEqual(run(['show', 'T1']).blocked_on, []);
 });
+
+test('agent context: checkpoint, session refs, launchPlan, answered', () => {
+  const { run } = sandbox();
+  run(['add', 'tests']); // T1
+  run(['add', 'page']); // T2
+  run(['add', 'question']); // T3
+  const be = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
+  assert.equal(run(['resume-info', 'T1']).mode, 'fresh', 'never started -> fresh');
+  run(['start', 'T1'], be);
+  run(['note', 'T1', 'done: x; left: y', '--kind', 'checkpoint'], be);
+  run(['block', 'T1', '-m', 'needs page', '--on', 'T2'], be);
+  assert.equal(run(['resume-info', 'T1']).mode, 'fresh', 'worked on but no session -> fresh (checkpoint)');
+  run(['session', 'T1', '/s/be.jsonl', '--kind', 'pi', '--for', 'be']);
+  let lp = run(['resume-info', 'T1']);
+  assert.equal(lp.mode, 'resume');
+  assert.equal(lp.session.ref, '/s/be.jsonl');
+  assert.equal(lp.checkpoint.message, 'done: x; left: y');
+  run(['edit', 'T1', '--resume', 'fresh']);
+  assert.equal(run(['resume-info', 'T1']).mode, 'fresh', 'task policy overrides');
+  run(['plan', 'update', '--resume', 'fresh']);
+  run(['edit', 'T1', '--resume', 'auto']);
+  assert.equal(run(['resume-info', 'T1']).mode, 'resume', 'task policy beats plan policy');
+  // question-block answered by someone else -> attention 'answered'
+  run(['start', 'T3'], be);
+  run(['block', 'T3', '-m', 'redis or cookies?'], be);
+  run(['note', 'T3', 'cookies', '--kind', 'decision']);
+  assert.deepEqual(run(['wait', '--timeout', '2000'], be).attention, [{ task: 'T3', reason: 'answered' }]);
+});
+
+test('wait: ephemeral lifecycle tells an idle agent to end its turn', () => {
+  const { run } = sandbox();
+  run(['add', 'a']);
+  run(['add', 'b']);
+  const be = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent', ATF_LIFECYCLE: 'ephemeral' };
+  run(['start', 'T1'], be);
+  run(['block', 'T1', '-m', 'needs b', '--on', 'T2'], be);
+  const r = run(['wait', '--timeout', '3000'], be);
+  assert.match(r.note, /end your turn/);
+});
