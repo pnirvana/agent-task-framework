@@ -16,6 +16,7 @@ import {
   RESUME_POLICIES,
   driverInbox,
   planSummary,
+  reviewRefusal,
 } from '../src/core.mjs';
 import {
   findRoot,
@@ -76,7 +77,7 @@ Tasks (worker)
   atf note <task> <msg> [--kind ${NOTE_KINDS.join('|')}]
   atf artifact <task> <ref> [--kind ${ARTIFACT_KINDS.join('|')}] [--desc D]
   atf note <task> "<done / left / how to verify>" --kind checkpoint
-                                        where the work stands (required before block)
+                                        where the work stands (write one before you block or stop)
   atf session <task> <ref> [--kind K] [--for WHO]
                                         record an agent session reference (for resuming)
   atf resume-info <task> [--for WHO]    resume or fresh? (used by launchers)
@@ -246,6 +247,20 @@ function ctx({ needPlan = true } = {}) {
   return { root, planId, actor: written, roleSource: role_source };
 }
 
+/** Refuse writes that would create a dependency cycle (it would deadlock the tasks in it). */
+function rejectCycles(st, evs) {
+  if (FLAGS.force) return;
+  const tasks = { ...st.tasks };
+  const order = [...st.order];
+  for (const e of evs) {
+    if (!e.task || !e.data?.deps) continue;
+    if (!tasks[e.task]) order.push(e.task);
+    tasks[e.task] = { ...(tasks[e.task] || {}), deps: e.data.deps };
+  }
+  const cyc = findCycles({ tasks, order });
+  if (cyc.length) die(`dependency cycle ${cyc[0].join(' → ')}: the tasks in it would wait on each other forever (use --force)`);
+}
+
 const needsReview = (t) => !!(t.review || (t.reviewer && t.reviewer !== 'coordinator'));
 
 function requireTask(state, id) {
@@ -360,10 +375,11 @@ function renderStatus(state) {
   const attention = state.order
     .map((id) => state.tasks[id])
     // a task blocked --on other tasks just waits for them (its owner is woken): not a matter for anyone
-    .filter((t) => (t.status === 'blocked' && !t.blocked_on.length) || t.status === 'review');
+    .filter((t) => (t.status === 'blocked' && !t.blocked_on.length && !t.answered) || t.status === 'review');
   if (attention.length) {
     lines.push('', bold('needs attention:'));
-    for (const t of attention) lines.push(`  ${t.id} ${badge(t.status)} ${t.last_message || ''}`);
+    for (const t of attention)
+      lines.push(`  ${t.id} ${badge(t.status)}${t.status === 'review' && t.reviewer && t.reviewer !== 'coordinator' ? magenta(` for ${t.reviewer}`) : ''} ${t.last_message || ''}`);
   }
   const actors = Object.values(state.actors).filter((a) => a.owned.some((id) => !TERMINAL.has(state.tasks[id].status)));
   if (actors.length) {
@@ -441,7 +457,21 @@ function renderTask(t, state) {
 function renderEvent(e) {
   const d = e.data || {};
   if (e.type === 'plan.review') return `${dim(`#${e.seq} ${e.ts.slice(11, 19)}`)} ${cyan(e.actor?.id ?? '?')} ${bold('review submitted')} ${d.summary ?? ''}`;
-  const bits = [d.status, d.percent != null ? `${d.percent}%` : null, d.assignee !== undefined ? `→ ${d.assignee ?? '(none)'}` : null, d.title, d.kind, d.ref, d.message]
+  const upd = e.type === 'task.updated' ? Object.entries(d).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(',') : typeof v === 'object' && v ? JSON.stringify(v) : v}`).join(' ') : null;
+  const bits = [
+    d.status,
+    d.on?.length ? `on ${d.on.join(',')}` : null,
+    d.changes ? 'changes requested' : null,
+    d.fresh ? 'fresh' : null,
+    d.early?.length ? `early (${d.early.join(',')} not done)` : null,
+    d.percent != null ? `${d.percent}%` : null,
+    d.assignee !== undefined ? `→ ${d.assignee ?? '(none)'}` : null,
+    upd,
+    e.type === 'task.updated' ? null : d.title,
+    d.kind,
+    d.ref,
+    d.message,
+  ]
     .filter((x) => x !== undefined && x !== null && x !== '');
   return `${dim(`#${e.seq} ${e.ts.slice(11, 19)}`)} ${cyan(e.actor?.id ?? '?')} ${bold(e.type)}${e.task ? ' ' + e.task : ''} ${bits.join(' · ')}`;
 }
@@ -459,15 +489,27 @@ function statusCmd(target, msgRequired) {
         if (target === 'in_progress' && t.waiting_on.length && !FLAGS.early)
           die(`${t.id} waits on ${t.waiting_on.join(', ')} (--early starts it anyway, for work that does not need them yet)`);
         if (target === 'in_progress' && t.children.length) die(`${t.id} has subtasks; start those instead (use --force)`);
-        if (t.owner && t.owner !== actor.id && actor.role !== 'coordinator' && target !== 'todo')
-          die(`${t.id} is ${t.assignee ? 'assigned to' : 'in a work package owned by'} ${t.owner} (use --force)`);
-        // a task marked for review is approved by its reviewer, not finished by its worker
-        if (target === 'done' && needsReview(t) && actor.role !== 'coordinator' && actor.id !== t.reviewer)
-          die(
-            t.status === 'review'
-              ? `${t.id} is waiting for review by ${t.reviewer && t.reviewer !== 'coordinator' ? t.reviewer : 'the coordinator'}; only they can mark it done`
-              : `${t.id} needs review: finish it with \`atf review ${t.id} -m "what to check"\` instead of done`,
-          );
+        // decisions on a task in review (approve = done, reopen) belong to its reviewer
+        const reviewing = t.status === 'review' && ['done', 'todo'].includes(target);
+        if (reviewing) {
+          const why = reviewRefusal(t, actor);
+          if (why) die(`${why}${target === 'done' && actor.id === t.owner ? ' (you submitted it; wait for the verdict)' : ''} (use --force)`);
+        } else {
+          const boss = actor.role === 'coordinator' || actor.role === 'human';
+          if (t.owner && t.owner !== actor.id && !boss)
+            die(`${t.id} is ${t.assignee ? 'assigned to' : 'in a work package owned by'} ${t.owner} (use --force)`);
+          // a task marked for review is approved by its reviewer, not finished by its worker
+          if (target === 'done' && needsReview(t) && reviewRefusal(t, actor))
+            die(
+              actor.id === t.owner || !boss
+                ? `${t.id} needs review: finish it with \`atf review ${t.id} -m "what to check"\` instead of done`
+                : `${reviewRefusal(t, actor)} (use --force)`,
+            );
+        }
+        if (target === 'blocked' && FLAGS.on)
+          for (const d of String(FLAGS.on).split(',').map((x) => x.trim()).filter(Boolean))
+            if (st.tasks[d] && TERMINAL.has(st.tasks[d].rollup_status ?? st.tasks[d].status))
+              die(`${d} is already ${st.tasks[d].rollup_status ?? st.tasks[d].status}: nothing to wait for (use --force)`);
       }
       const evs = [];
       if (target === 'in_progress' && t.assignee !== actor.id && (!t.assignee || FLAGS.force || t.owner === actor.id))
@@ -577,7 +619,15 @@ const commands = {
       if (st.tasks[id]) die(`task exists: ${id}`);
       const data = { title, ...taskFieldsFromFlags(FLAGS, st, id) };
       if (FLAGS.assign) data.assignee = FLAGS.assign;
-      return [{ type: 'task.created', task: id, data }];
+      // agents add tasks inside their own work package (to split work), not elsewhere
+      if (!FLAGS.force && actor.role !== 'coordinator' && actor.role !== 'human') {
+        const parent = data.parent && st.tasks[data.parent];
+        if (!parent || parent.owner !== actor.id)
+          die(`as ${actor.role} you can add tasks only inside your own work package (--parent <a task you own>); ask the coordinator for others, e.g. with a note (use --force)`);
+      }
+      const evs = [{ type: 'task.created', task: id, data }];
+      rejectCycles(st, evs);
+      return evs;
     });
     out({ ok: true, task: state.tasks[id] }, renderTaskLine(state.tasks[id], state));
   },
@@ -588,11 +638,11 @@ const commands = {
       const t = requireTask(st, pos[0]);
       const data = taskFieldsFromFlags(FLAGS, st, t.id);
       if (!Object.keys(data).length) die('nothing to update');
-      return [{ type: 'task.updated', task: t.id, data }];
+      const evs = [{ type: 'task.updated', task: t.id, data }];
+      rejectCycles(st, evs);
+      return evs;
     });
     const t = requireTask(state, pos[0]);
-    const cyc = findCycles(state);
-    if (cyc.length) process.stderr.write(yellow(`warning: dependency cycle ${cyc[0].join(' → ')}\n`));
     out({ ok: true, task: t }, renderTaskLine(t, state));
   },
 
@@ -663,7 +713,9 @@ const commands = {
       if (!items.length) return out({ ok: true, submitted: 0 }, 'no drafts to submit');
       let summary = '';
       transact(root, planId, actor, (st) => {
-        const r = reviewEvents(st, items, actor.id);
+        const r = reviewEvents(st, items, actor, { force: !!FLAGS.force });
+        if (r.refused.length)
+          die(`not submitted (drafts kept): ${r.refused.map((x) => `${x.action} ${x.task}: ${x.why}`).join('; ')}. Drop those drafts (atf feedback drop <task>) or use --force.`);
         summary = r.summary;
         return r.events;
       });
@@ -682,9 +734,11 @@ const commands = {
     const { state } = transact(root, planId, actor, (st) => {
       const t = requireTask(st, pos[0]);
       if (!['review', 'done'].includes(t.status) && !FLAGS.force) die(`${t.id} is ${t.status}; request changes on a task in review or done (use --force)`);
-      if (actor.role !== 'coordinator' && !FLAGS.force) die('only the coordinator requests changes (use --force)');
-      const evs = [{ type: 'task.status', task: t.id, data: { status: 'todo', message: msg, changes: true } }];
-      if (FLAGS.fresh) evs.push({ type: 'task.updated', task: t.id, data: { resume: 'fresh' } }); // wrong approach: clean start
+      const why = reviewRefusal(t, actor);
+      if (why && !FLAGS.force) die(`${why} (use --force)`);
+      // --fresh: the next attempt (only) starts from a clean agent
+      const evs = [{ type: 'task.status', task: t.id, data: { status: 'todo', message: msg, changes: true, ...(FLAGS.fresh ? { fresh: true } : {}) } }];
+      if (st.status !== 'active') evs.push({ type: 'plan.status', data: { status: 'active', message: `reopened: changes requested on ${t.id}` } });
       return evs;
     });
     const t = requireTask(state, pos[0]);
@@ -695,6 +749,8 @@ const commands = {
     const { root, planId, actor } = ctx();
     const { state } = transact(root, planId, actor, (st) => {
       const t = requireTask(st, pos[0]);
+      if (!FLAGS.force && t.owner && t.owner !== actor.id && actor.role !== 'coordinator' && actor.role !== 'human')
+        die(`${t.id} is ${t.assignee ? 'assigned to' : 'in a work package owned by'} ${t.owner}; only they or the coordinator can release it (use --force)`);
       const evs = [];
       if (t.status !== 'todo') evs.push({ type: 'task.status', task: t.id, data: { status: 'todo', ...(FLAGS.message ? { message: FLAGS.message } : {}) } });
       evs.push({ type: 'task.assigned', task: t.id, data: { assignee: null } });
@@ -942,14 +998,20 @@ const commands = {
         (e) =>
           e.actor?.id !== actor.id &&
           // a dependency block (`block --on`) is the owner's business, not a decision for the coordinator
-          ((isCoord && e.type === 'task.status' && ['done', 'failed', 'review'].includes(e.data?.status)) ||
+          ((isCoord && e.type === 'task.status' && ['done', 'failed'].includes(e.data?.status)) ||
+            // reviews for someone else (e.g. the human) are not the coordinator's to handle
+            (isCoord && e.type === 'task.status' && e.data?.status === 'review' && !reviewRefusal(st.tasks[e.task] ?? { id: e.task }, actor)) ||
             (isCoord && e.type === 'task.status' && e.data?.status === 'blocked' && !e.data?.on?.length) ||
             (isCoord && e.type === 'plan.review') ||
             // events on tasks this actor owns; an approval (done by someone else) leaves it
             // nothing to do, so it is not reported (cancel/fail by others are: stop working)
             (e.task && st.tasks[e.task]?.owner === actor.id && ['task.status', 'task.note', 'task.assigned', 'task.updated'].includes(e.type) && !(e.type === 'task.status' && e.data?.status === 'done'))),
       );
-      if (attention.length || hits.length) return finish(st, attention, hits);
+      // only the latest status change per task: "T8 review" then "T8 done" reports just done
+      const lastStatus = {};
+      for (const e of hits) if (e.type === 'task.status') lastStatus[e.task] = e.seq;
+      const news = hits.filter((e) => e.type !== 'task.status' || lastStatus[e.task] === e.seq);
+      if (attention.length || news.length) return finish(st, attention, news);
       if (isCoord && leaves(st).length && leaves(st).every((t) => TERMINAL.has(t.status))) return finish(st, [], [], 'all tasks are finished');
       if (!isCoord && !leaves(st).some((t) => t.owner === actor.id && !TERMINAL.has(t.status))) return finish(st, [], [], 'you own no open tasks');
       // Ephemeral agents don't idle: the launcher resumes or replaces them when work is available.
@@ -985,7 +1047,14 @@ const commands = {
     for (const cyc of findCycles(state)) problems.push(`dependency cycle: ${cyc.join(' → ')}`);
     for (const t of Object.values(state.tasks)) {
       for (const d of t.deps) if (!state.tasks[d]) problems.push(`${t.id}: unknown dep ${d}`);
-      if (t.status === 'done' && t.waiting_on.length) problems.push(`${t.id}: done while deps unfinished (${t.waiting_on.join(',')})`);
+      if (t.status === 'done' && t.waiting_on.length) {
+        // only a problem if the dep was unfinished when this task was done; a dep that was
+        // finished then and sent back later (review) is normal
+        const doneSeq = [...t.history].reverse().find((h) => h.type === 'status' && h.to === 'done')?.seq ?? Infinity;
+        const finishedBefore = (d) => (state.tasks[d]?.children.length ? true : state.tasks[d]?.history.some((h) => h.type === 'status' && TERMINAL.has(h.to) && h.seq < doneSeq));
+        const bad = t.waiting_on.filter((d) => !finishedBefore(d));
+        if (bad.length) problems.push(`${t.id}: done while deps unfinished (${bad.join(',')})`);
+      }
     }
     out({ ok: problems.length === 0, problems }, problems.length ? problems.map((x) => red('✗ ') + x).join('\n') : green('✓ valid'));
     if (problems.length) process.exitCode = 1;

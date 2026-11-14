@@ -155,7 +155,7 @@ subtasks inside its package.
   the actor's packages, then (unless `--package`) ready tasks with no owner at all.
 - `block`, `review`, `done`, `fail` require a message.
 - Task ids are `T<n>`, allocated sequentially under the lock. Other ids are allowed.
-- Dependency cycles and parent cycles are rejected or warned on write.
+- Dependency cycles and parent cycles are rejected on write.
 
 ### 5.4 Derived fields (computed by fold, never written)
 | field | meaning |
@@ -262,8 +262,15 @@ apply that to a follow-up in the package like to any task in it.
 **Reviewers and batch reviews.** A task's `reviewer` (null = the coordinator) says who
 must approve it; a subagent can set it when submitting (`atf review … --by human`).
 A task with `review: true`, or with a reviewer other than the coordinator, *needs
-review*: writers refuse `done` on it unless the actor is a coordinator or the task's
-reviewer, so the owner finishes with `review` and cannot approve its own work.
+review*: the owner finishes with `review` and cannot approve its own work. Review
+decisions (approve = done from review, request changes, reopen from review, and
+approvals/change requests in a feedback batch) belong to the reviewer: a named reviewer
+alone (`human` = an actor with role `human`), otherwise the coordinator or the human
+(`reviewRefusal`). Writers refuse other actors unless forced. Agents (role other than
+coordinator/human) may only change, release or split (`add --parent`) tasks they own.
+Requesting changes in a plan that is not active reactivates it. `changes --fresh` marks
+only the next attempt as fresh (derived `fresh_next`, cleared when the task is started).
+Writers refuse dependency cycles and `block --on` a task that is already finished.
 Coordinators get attention reason `review` only for tasks they review; tasks for other
 reviewers appear in the driver inbox as `your-review`. Review feedback is collected as
 drafts (`plans/<id>/drafts/<actor>.json`, not events) and submitted in one transaction

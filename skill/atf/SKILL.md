@@ -28,7 +28,9 @@ whose whole subtree you own. `atf list --mine` shows everything you own.
 
 For a work package, loop: `atf next --package` → do the task → finish it (step 6) → repeat.
 Sending a task to `review` does not end your work: move on to the next ready task. If a
-task is too big, split it inside your package: `atf add "<title>" --parent T4 --accept "..."`.
+task is too big, split it inside your package: `atf add "<title>" --parent T4 --accept "..."`
+(agents can add tasks only inside their own package; for anything else, note it for the
+coordinator). Reviewing, reopening or releasing other agents' tasks is not yours to do.
 
 **When nothing is ready for you**, run `atf wait --timeout 600000`. It returns at once if
 something already needs you, otherwise when something does (a dependency done, a review
@@ -182,7 +184,8 @@ instead of your transcript, so make it self-contained.
      `atf changes T4 -m "1. <concrete change> 2. <…>"`. Be specific and number the points;
      the owner gets it back with your feedback and continues with its own context. If
      the *approach* is wrong rather than the details, add `--fresh` so the next attempt
-     starts from a clean agent (it still sees the feedback and history).
+     (only that one) starts from a clean agent (it still sees the feedback and history).
+     Sending back a task of a completed plan reopens the plan.
    - **Meets them, but the review found more work** (extra edge cases, a refactor, a
      related feature) → approve it, then add the extra work as follow-up tasks:
      `atf add "<follow-up>" --from T4 --accept "…"`. A follow-up is placed under T4's
@@ -199,8 +202,9 @@ instead of your transcript, so make it self-contained.
    - **Cannot be done as specified** → `atf cancel T4 -m why` and re-plan.
 
    **Reviews by the human.** Tasks with a reviewer other than you (`--reviewer human` at
-   creation, or a subagent's `atf review … --by human`) are not yours to approve: they
-   show up in the human's inbox, and you wait for their verdict. Mark tasks that need
+   creation, or a subagent's `atf review … --by human`) are not yours to approve (`atf
+   done` refuses, and `atf wait` does not report them): they show up in the human's
+   inbox, and you wait for their verdict. Mark tasks that need
    manual testing up front: `atf add "…" --reviewer human`. When the human submits a
    review (on the board or with `atf feedback submit`), your `atf wait` reports
    `review submitted by …`: approved tasks are done, tasks with change requests went

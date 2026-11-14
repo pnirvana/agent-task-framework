@@ -53,6 +53,7 @@ function newTask(id, ev) {
     origin: null, // task this one is a follow-up of (scope found while reviewing it)
     reviewer: null, // who must review it: null/'coordinator' (default) or e.g. 'human'
     review: false, // must go through review before done (implied by a reviewer)
+    fresh_next: false, // the next attempt starts with a fresh agent (changes --fresh)
     feedback: [], // change requests: [{round, seq, ts, actor, message}]
     changes_requested: false, // sent back with requested changes, not yet resubmitted
     checkpoint: null, // latest checkpoint note: where the work stands
@@ -171,6 +172,10 @@ export function fold(events) {
         if (d.status === 'todo') t.percent = null;
         if (d.message) t.last_message = d.message;
         if (d.status === 'done' && d.message) t.result = d.message;
+        else if (from === 'done') t.result = null; // reopened / sent back: no longer the result
+        // `fresh`: the next attempt starts from a clean agent (one-shot, cleared on start)
+        if (d.fresh) t.fresh_next = true;
+        else if (d.status === 'in_progress') t.fresh_next = false;
         // `on`: tasks this one is blocked on (a dependency discovered mid-task)
         t.blocked_on = d.status === 'blocked' && Array.isArray(d.on) ? d.on : [];
         t.blocked_seq = d.status === 'blocked' ? ev.seq : null;
@@ -319,7 +324,7 @@ export function attentionFor(plan, actorId, role) {
       if (t.ready && !t.owner) out.push({ task: id, reason: 'dispatch' }); // ready, nobody to do it
       // tasks that ask a specific reviewer (e.g. the human) are not the coordinator's to approve
       if (t.status === 'review' && (!t.reviewer || t.reviewer === 'coordinator' || t.reviewer === actorId)) out.push({ task: id, reason: 'review' });
-      else if (t.status === 'blocked' && !t.blocked_on.length) out.push({ task: id, reason: 'blocked' });
+      else if (t.status === 'blocked' && !t.blocked_on.length && !t.answered) out.push({ task: id, reason: 'blocked' });
     }
   }
   return out;
@@ -377,7 +382,7 @@ export function planSummary(plan) {
 export function launchPlan(plan, taskId, actorId = null) {
   const t = plan.tasks[taskId];
   if (!t) return null;
-  const policy = t.resume_policy ?? t.resume ?? plan.resume ?? 'auto';
+  const policy = t.fresh_next ? 'fresh' : t.resume_policy ?? t.resume ?? plan.resume ?? 'auto';
   const session = (actorId && t.sessions[actorId]) || t.session || null;
   const worked = !!t.started_at;
   let mode = 'fresh';
@@ -386,6 +391,21 @@ export function launchPlan(plan, taskId, actorId = null) {
   else if (!session) reason = worked ? 'no session reference recorded; continue from checkpoint/notes' : reason;
   else if (policy === 'resume' || worked) (mode = 'resume'), (reason = policy === 'resume' ? 'policy: resume' : 'task was already worked on');
   return { mode, session: mode === 'resume' ? session : null, checkpoint: t.checkpoint, policy, reason, worked };
+}
+
+/**
+ * May `actor` ({id, role}) decide on a review of task `t` (approve it, request changes,
+ * reopen it)? A named reviewer decides alone ('human' = any actor with role human);
+ * otherwise the coordinator, or the human. Returns null if allowed, else the reason.
+ */
+export function reviewRefusal(t, actor) {
+  const named = t.reviewer && t.reviewer !== 'coordinator' ? t.reviewer : null;
+  if (named) {
+    if (actor.id === named || (named === 'human' && actor.role === 'human')) return null;
+    return `${t.id} is reviewed by ${named}${named === 'human' ? ' (on the board, or `ATF_ROLE=human atf feedback approve|change`)' : ''}, not by ${actor.id}`;
+  }
+  if (actor.role === 'coordinator' || actor.role === 'human') return null;
+  return `only the coordinator (or the human) reviews ${t.id}`;
 }
 
 /**

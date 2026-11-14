@@ -52,7 +52,7 @@ const argv = process.argv.slice(2);
 const sep = argv.indexOf('--');
 const agentArgs = sep >= 0 ? argv.slice(sep + 1) : [];
 const main = sep >= 0 ? argv.slice(0, sep) : argv;
-const BOOL = new Set(['dry-run', 'fresh', 'resume', 'early']);
+const BOOL = new Set(['help', 'dry-run', 'fresh', 'resume', 'early']);
 const flags = {};
 const pos = [];
 for (let i = 0; i < main.length; i++) {
@@ -94,7 +94,14 @@ function resolveRoot({ optional = false } = {}) {
 // ---------- spawn ----------
 function spawnAgent() {
   const taskArg = pos[1];
-  if (!taskArg) fail('usage: atf-herdr spawn <task> [--name NAME]');
+  if (flags.help || flags.h) {
+    const lines = HELP.split('\n');
+    const i = lines.findIndex((l) => l.includes('atf-herdr spawn'));
+    const j = lines.findIndex((l, k) => k > i && /^  atf-herdr /.test(l));
+    process.stdout.write(lines.slice(i, j).join('\n') + '\n');
+    process.exit(0);
+  }
+  if (!taskArg) fail('usage: atf-herdr spawn <task> [--name NAME] [--agent DEF] [--early] (atf-herdr --help)');
   if (!inHerdr() && !flags['dry-run']) fail('not running inside herdr (HERDR_ENV != 1)');
   const root = resolveRoot();
   const planId = flags.plan || getCurrentPlan(root);

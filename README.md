@@ -133,9 +133,12 @@ atf add "Rate-limit /login" --from T2 --accept "5/min per IP"    # extra scope f
 #   (placed under T2's parent; nothing else is copied: add --assign, --agent, --review as needed)
 ```
 
-Reviewing several tasks at once (e.g. as the human, or comments forwarded from an editor):
+Reviewing several tasks at once (e.g. as the human, or comments forwarded from an editor).
+Reviews are decided by the task's reviewer: the coordinator, or for `--reviewer human` tasks
+the human. The board acts as the human; on the command line set `ATF_ROLE=human`:
 
 ```sh
+export ATF_ROLE=human    # you, not the coordinator agent (both default to $USER as name)
 atf feedback approve T2 "works on mobile"
 atf feedback change T1 "error says 'undefined'" --file src/login.tsx --line 42
 atf feedback note T3 "nice docs"
@@ -148,6 +151,11 @@ Tasks that need the human to test something: `atf add … --reviewer human`, or 
 `atf review T3 -m "please test …" --by human`. The coordinator leaves those to you.
 
 ## Using it with pi + herdr
+
+The coordinator is a pi you start yourself, so `atf` must be on the PATH of its shell
+(see Install). It writes as `$ATF_ACTOR`, else your user name; the adapter finds its pane
+by that name or by the pane its ATF commands come from, to nudge it when something needs
+it (reviews, questions). Its herdr agent name does not matter.
 
 ```sh
 # inside herdr, in your coordinator's pane / project dir

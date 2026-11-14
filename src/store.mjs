@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { fold, PROTOCOL_VERSION } from './core.mjs';
+import { fold, PROTOCOL_VERSION, reviewRefusal } from './core.mjs';
 
 export const ROOT_NAME = '.atf';
 
@@ -375,10 +375,21 @@ export function writeDrafts(root, planId, actorId, items) {
  * become feedback notes. Approvals mark a task in review done. One plan.review event
  * summarizes the batch, so a coordinator waiting on the plan wakes once.
  */
-export function reviewEvents(state, items, actorId) {
+export function reviewEvents(state, items, actorOrId, { force = false } = {}) {
+  const actor = typeof actorOrId === 'string' ? { id: actorOrId, role: 'human' } : actorOrId;
+  const actorId = actor.id;
   const byTask = new Map();
+  const refused = [];
   for (const it of items) {
     if (!state.tasks[it.task]) continue;
+    // approving or sending back is a review decision; notes anyone may leave
+    if (it.action !== 'note' && !force) {
+      const why = reviewRefusal(state.tasks[it.task], actor);
+      if (why) {
+        refused.push({ task: it.task, action: it.action, why });
+        continue;
+      }
+    }
     if (!byTask.has(it.task)) byTask.set(it.task, []);
     byTask.get(it.task).push(it);
   }
@@ -391,7 +402,8 @@ export function reviewEvents(state, items, actorId) {
     const notes = its.filter((i) => i.action === 'note');
     const approve = its.find((i) => i.action === 'approve');
     if (changes.length && ['review', 'done'].includes(t.status)) {
-      const points = [...changes, ...notes].map((i, n) => `${n + 1}. ${i.message}${loc(i)}`).join('\n');
+      // change requests are the numbered points to address; notes ride along unnumbered
+      const points = [...changes.map((i, n) => `${n + 1}. ${i.message}${loc(i)}`), ...notes.map((i) => `(note) ${i.message}${loc(i)}`)].join('\n');
       evs.push({ type: 'task.status', task: id, data: { status: 'todo', changes: true, message: points } });
       summary.changes.push(id);
     } else {
@@ -405,8 +417,11 @@ export function reviewEvents(state, items, actorId) {
       }
     }
   }
+  // sending work back in a finished plan reopens the plan (else nothing would pick it up)
+  if (summary.changes.length && state.status !== 'active')
+    evs.push({ type: 'plan.status', data: { status: 'active', message: `reopened: changes requested on ${summary.changes.join(',')}` } });
   const parts = [summary.approved.length && `${summary.approved.length} approved (${summary.approved.join(',')})`, summary.changes.length && `${summary.changes.length} sent back with changes (${summary.changes.join(',')})`, summary.notes.length && `notes on ${summary.notes.join(',')}`].filter(Boolean);
   const text = `review by ${actorId}: ${parts.join('; ') || 'nothing applicable'}`;
   evs.push({ type: 'plan.review', data: { summary: text, items: items.map(({ task, action, message, file, line }) => ({ task, action, message, ...(file ? { file } : {}), ...(line ? { line } : {}) })) } });
-  return { events: evs, summary: text };
+  return { events: evs, summary: text, refused };
 }

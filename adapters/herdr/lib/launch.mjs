@@ -91,7 +91,7 @@ export function updateRegistry(fn) {
  * longer side (never the board), else reuse/open an "agents" tab. `direction` forces a
  * plain split of the reference pane.
  */
-export function placeAgentPane({ cwd, env, refPane, direction }) {
+export function placeAgentPane({ cwd, env, refPane, direction, workspace }) {
   const envArgs = Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
   const splitOf = (pane, dir) => herdr(['pane', 'split', '--pane', pane, '--direction', dir, '--cwd', cwd, '--no-focus', ...envArgs])?.pane?.pane_id;
   if (refPane && direction) return splitOf(refPane, direction);
@@ -100,7 +100,8 @@ export function placeAgentPane({ cwd, env, refPane, direction }) {
     const c = chooseSplit(refPane, { exclude });
     if (c) return splitOf(c.pane, c.direction);
   }
-  const ws = (refPane && tabLayout(refPane)?.workspace_id) || process.env.HERDR_WORKSPACE_ID;
+  // the project's workspace (where its agents were), not wherever the writer happens to be
+  const ws = (refPane && tabLayout(refPane)?.workspace_id) || workspace || process.env.HERDR_WORKSPACE_ID;
   const tabs = (herdr(['tab', 'list', ...(ws ? ['--workspace', ws] : [])])?.tabs || []).filter((t) => /^agents/.test(t.label || ''));
   for (const t of tabs) {
     const anyPane = (herdr(['pane', 'list', '--workspace', t.workspace_id])?.panes || []).find((p) => p.tab_id === t.tab_id);
@@ -110,6 +111,8 @@ export function placeAgentPane({ cwd, env, refPane, direction }) {
   const label = tabs.length ? `agents-${tabs.length + 1}` : 'agents';
   return herdr(['tab', 'create', ...(ws ? ['--workspace', ws] : []), '--cwd', cwd, '--label', label, '--no-focus', ...envArgs])?.root_pane?.pane_id;
 }
+
+const paneWorkspace = (pane) => herdr(['pane', 'get', pane])?.pane?.workspace_id ?? (String(pane).includes(':') ? String(pane).split(':')[0] : null);
 
 // ---------- prompts ----------
 function lastNoteFromOthers(t) {
@@ -188,7 +191,7 @@ export function recordSession(root, planId, taskIds, name, kind) {
  * Start an agent for `taskId` (a leaf or a work package). Mode comes from ATF's
  * launchPlan unless forced. Returns {name, pane, mode, kind}.
  */
-export function launchAgent({ root, planId, taskId, name, kind, agent, early = false, refPane, direction, force, extraArgs = [], assign = true }) {
+export function launchAgent({ root, planId, taskId, name, kind, agent, early = false, refPane, direction, workspace, force, extraArgs = [], assign = true }) {
   const s = loadPlan(root, planId);
   const target = s.tasks[taskId];
   if (!target) throw new Error(`unknown task ${taskId}`);
@@ -226,7 +229,7 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
     ATF_LIFECYCLE: lifecycle(),
     PATH: `${ATF_BIN}:${process.env.PATH}`, // `atf` resolvable without a global install
   };
-  const pane = withPlacementLock(() => placeAgentPane({ cwd: path.dirname(root), env, refPane, direction }));
+  const pane = withPlacementLock(() => placeAgentPane({ cwd: path.dirname(root), env, refPane, direction, workspace }));
   if (!pane) throw new Error('could not create a pane');
   const sub = (a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session ?? '');
   // an installed skill is discovered by the agent itself: don't pass it again
@@ -240,7 +243,7 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
   // register before anything writes to the plan: hooks fired by the assignment below
   // must already know this agent was just launched (no duplicate kickoff nudge)
   updateRegistry((reg) => {
-    reg[regKey(root, name)] = { name, kind, agent, root, plan: planId, task: target.id, pane, socket: currentSocket(), launchedAt: Date.now(), idleSince: null };
+    reg[regKey(root, name)] = { name, kind, agent, root, plan: planId, task: target.id, pane, workspace: paneWorkspace(pane), socket: currentSocket(), launchedAt: Date.now(), idleSince: null };
   });
   if (assign && target.assignee !== name && !(target.owner === name && !isPackage)) {
     // write as whoever called spawn, with the same identity the atf CLI uses for them
@@ -279,7 +282,7 @@ export function recordSessionsForEvents(root, planId, events) {
 export function nudgeText(s, actor, att) {
   const items = att.map((a) => `${a.task} ${a.reason} (${s.tasks[a.task]?.title ?? ''})`).join('; ');
   if (actor.role === 'coordinator')
-    return `[ATF] Plan "${s.title}" needs you: ${items}. Handle these (atf show <id>; approve with atf done -m, atf changes -m, or answer), then continue monitoring with \`atf wait\`.`;
+    return `[ATF] Plan "${s.title}" (--plan ${s.id}) needs you: ${items}. Handle these (atf show <id> --plan ${s.id}; approve with atf done -m, atf changes -m, or answer), then continue monitoring with \`atf wait --plan ${s.id}\`.`;
   // what to run depends on the reason and on whether the task came with a work package
   const how = (a) => {
     const t = s.tasks[a.task];
@@ -290,7 +293,7 @@ export function nudgeText(s, actor, att) {
     return viaPackage ? `${a.task}: \`atf next --package\`` : `${a.task}: \`atf start ${a.task}\``;
   };
   const steps = [...new Set(att.map(how))];
-  return `[ATF] Work is available for you in plan "${s.title}": ${items}. ${steps.length > 1 ? 'Next: ' + steps.join('; ') : 'Next: ' + steps[0]}.`;
+  return `[ATF] Work is available for you in plan "${s.title}" (--plan ${s.id}): ${items}. ${steps.length > 1 ? 'Next: ' + steps.join('; ') : 'Next: ' + steps[0]}.`;
 }
 
 // Has the agent acted (written to ATF) since it was launched? Then it has read its
@@ -340,6 +343,7 @@ function sweepLocked(root) {
   const touched = new Set();
   const nudges = readJson('nudges.json');
   const live = liveAgents();
+  const livePane = new Map([...live.values()].map((a) => [a.pane_id, a]));
   const now = Date.now();
 
   for (const id of listPlanIds(root)) {
@@ -353,9 +357,19 @@ function sweepLocked(root) {
       if (rec?.socket && currentSocket() && rec.socket !== currentSocket()) rec = undefined;
       if (!planOpen && rec?.plan !== s.id) continue; // closed plan: only agents launched for it
       if (rec) touched.add(regKey(root, actor.id));
-      const agent = live.get(actor.id);
+      let agent = liveAgentOf(s, actor, live, livePane);
       const role = actor.role === 'coordinator' ? 'coordinator' : 'subagent';
       const att = planOpen ? attentionFor(s, actor.id, role) : [];
+      // changes --fresh: a fresh agent takes the next attempt, so this one is closed and relaunched
+      if (agent && rec && ['idle', 'done'].includes(agent.agent_status) && att.some((a) => s.tasks[a.task]?.fresh_next)) {
+        recordSession(root, s.id, workedThisLaunch(s, actor, rec), actor.id, rec.kind);
+        herdr(['pane', 'close', agent.pane_id]);
+        rec.pane = null;
+        rec.closedAt = now;
+        actions.push(`closed ${actor.id} for a fresh attempt`);
+        agent = null;
+        att.sort((a, b) => Number(!!s.tasks[b.task]?.fresh_next) - Number(!!s.tasks[a.task]?.fresh_next));
+      }
       const nkey = `${root}#${s.id}#${actor.id}`;
       const attKey = att.map((a) => `${a.task}:${a.reason}`).join(',');
       if (!att.length) delete nudges[nkey];
@@ -377,7 +391,7 @@ function sweepLocked(root) {
             pending = true; // its first atf write fires the hook, which sweeps at once
             continue;
           }
-          if (nudges[nkey] !== attKey && herdr(['agent', 'prompt', actor.id, nudgeText(s, actor, att)])) {
+          if (nudges[nkey] !== attKey && herdr(['agent', 'prompt', agent.name, nudgeText(s, actor, att)])) {
             nudges[nkey] = attKey;
             actions.push(`nudged ${actor.id}: ${attKey}`);
           }
@@ -397,8 +411,7 @@ function sweepLocked(root) {
           pending = true;
           continue;
         }
-        const touched = s.order.filter((tid) => s.tasks[tid].owner === actor.id && !s.tasks[tid].children.length && (!TERMINAL.has(s.tasks[tid].status) || s.tasks[tid].status === 'done'));
-        recordSession(root, s.id, touched.filter((tid) => s.tasks[tid].started_at), actor.id, rec.kind);
+        recordSession(root, s.id, workedThisLaunch(s, actor, rec), actor.id, rec.kind);
         herdr(['pane', 'close', agent.pane_id]);
         rec.pane = null;
         rec.idleSince = null;
@@ -417,8 +430,11 @@ function sweepLocked(root) {
       const first = s.tasks[att[0].task];
       const pkgId = [...first.path].reverse().find((pid) => s.tasks[pid].assignee === actor.id);
       try {
-        const refPane = Object.values(reg).find((r) => r.pane && r.root === root && live.has(r.name))?.pane || coordinatorPane(s, live);
-        const r = launchAgent({ root, planId: s.id, taskId: pkgId && first.ready && !first.assignee ? pkgId : first.id, name: actor.id, kind: rec.kind, agent: rec.agent, refPane, assign: false });
+        const refPane = Object.values(reg).find((r) => r.pane && r.root === root && live.has(r.name))?.pane || coordinatorPane(s, live, livePane);
+        // no live pane to place it next to: the workspace it ran in before, or the coordinator's
+        const coord = Object.values(s.actors).find((a) => a.role === 'coordinator' && sameServer(a));
+        const workspace = rec.workspace || coord?.ctx?.herdr_workspace || null;
+        const r = launchAgent({ root, planId: s.id, taskId: pkgId && first.ready && !first.assignee ? pkgId : first.id, name: actor.id, kind: rec.kind, agent: rec.agent, refPane, workspace, assign: false });
         touched.delete(regKey(root, actor.id)); // launchAgent wrote the fresh entry itself
         actions.push(`relaunched ${actor.id} for ${r.leaf} (${r.mode}: ${r.reason})`);
         pending = true;
@@ -438,7 +454,33 @@ function sweepLocked(root) {
   return { actions, pending, soon };
 }
 
-function coordinatorPane(s, live) {
-  const c = Object.values(s.actors).find((a) => a.role === 'coordinator' && live.has(a.id));
-  return c ? live.get(c.id).pane_id : null;
+/**
+ * The live herdr agent of an ATF actor: by name (agents ATF launched are named after
+ * their actor), else by the herdr pane its last ATF write came from (a coordinator
+ * started by hand has its own herdr name, e.g. "pi", but writes as $ATF_ACTOR/$USER).
+ */
+function liveAgentOf(s, actor, live, livePane) {
+  const byName = live.get(actor.id);
+  if (byName) return byName;
+  const a = actor.ctx?.herdr_pane && livePane.get(actor.ctx.herdr_pane);
+  if (!a || (s.actors[a.name] && a.name !== actor.id)) return null; // that pane belongs to another actor now
+  return a;
+}
+
+function coordinatorPane(s, live, livePane) {
+  for (const a of Object.values(s.actors)) {
+    if (a.role !== 'coordinator') continue;
+    const l = liveAgentOf(s, a, live, livePane);
+    if (l) return l.pane_id;
+  }
+  return null;
+}
+
+/** Leaves this actor changed during its current launch (to file that launch's session on). */
+function workedThisLaunch(s, actor, rec) {
+  const since = rec?.launchedAt ?? 0;
+  return s.order.filter((tid) => {
+    const t = s.tasks[tid];
+    return t.owner === actor.id && !t.children.length && t.history.some((h) => h.actor === actor.id && Date.parse(h.ts) >= since - 1000);
+  });
 }

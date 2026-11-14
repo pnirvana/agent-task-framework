@@ -479,7 +479,7 @@ test('reviews: --by human tasks are not for the coordinator; feedback drafts sub
   run(['start', 'T2'], w2);
   run(['review', 'T2', '-m', 'docs done'], w2);
   assert.deepEqual(run(['wait', '--timeout', '2000']).attention, [{ task: 'T2', reason: 'review' }], 'T1 waits for the human');
-  const me = { ATF_ACTOR: 'pascal' };
+  const me = { ATF_ACTOR: 'pascal', ATF_ROLE: 'human' }; // the human (the board sets this role)
   run(['feedback', 'change', 'T1', 'error message unclear'], me);
   run(['feedback', 'change', 'T1', 'focus lost', '--file', 'a.tsx', '--line', '4'], me);
   run(['feedback', 'approve', 'T2'], me);
@@ -561,7 +561,7 @@ test('--review: the owner must submit for review; the coordinator approves', () 
   run(['start', 'T1'], be);
   assert.match(runFail(['done', 'T1', '-m', 'ok'], be).error, /needs review.*atf review T1/);
   run(['review', 'T1', '-m', 'check the migration'], be);
-  assert.match(runFail(['done', 'T1', '-m', 'self-approve'], be).error, /waiting for review by the coordinator/);
+  assert.match(runFail(['done', 'T1', '-m', 'self-approve'], be).error, /only the coordinator \(or the human\) reviews T1.*wait for the verdict/);
   run(['done', 'T1', '-m', 'approved']); // coordinator
   assert.equal(run(['show', 'T1']).status, 'done');
   run(['start', 'T2'], be);
@@ -664,4 +664,57 @@ test('herdr sessions: filed on the tasks a launched agent works on, not on a gue
   } finally {
     process.env = saved;
   }
+});
+
+test('e2e findings: review permissions, answered questions, fresh is one-shot, plan reopens, cycles', () => {
+  const { run, runFail } = sandbox();
+  const carol = { ATF_ACTOR: 'carol', ATF_ROLE: 'subagent' };
+  const bob = { ATF_ACTOR: 'bob', ATF_ROLE: 'subagent' };
+  const human = { ATF_ACTOR: 'pascal', ATF_ROLE: 'human' };
+  run(['add', 'ui', '--assign', 'carol', '--reviewer', 'human']); // T1
+  run(['add', 'api', '--assign', 'bob']); // T2
+  run(['start', 'T1'], carol);
+  run(['review', 'T1', '-m', 'please test'], carol);
+  // a subagent cannot approve its own task through feedback, nor send back someone else's
+  run(['feedback', 'approve', 'T1'], carol);
+  assert.match(runFail(['feedback', 'submit'], carol).error, /reviewed by human/);
+  run(['feedback', 'drop'], carol);
+  // the coordinator does not approve a task for the human either
+  assert.match(runFail(['done', 'T1', '-m', 'ok']).error, /reviewed by human/);
+  run(['feedback', 'approve', 'T1'], human);
+  run(['feedback', 'submit'], human);
+  assert.equal(run(['show', 'T1']).status, 'done');
+  // others cannot reopen or release a task they don't own
+  assert.match(runFail(['reopen', 'T1'], bob).error, /assigned to carol/);
+  run(['start', 'T2'], bob);
+  assert.match(runFail(['release', 'T2'], carol).error, /only they or the coordinator/);
+  // agents add only inside their package
+  assert.match(runFail(['add', 'stray'], bob).error, /inside your own work package/);
+  // an answered question stops needing the coordinator
+  run(['block', 'T2', '-m', 'which db?'], bob);
+  assert.deepEqual(run(['wait', '--timeout', '1000']).attention, [{ task: 'T2', reason: 'blocked' }]);
+  run(['note', 'T2', 'postgres']);
+  assert.equal(runFail(['wait', '--timeout', '700']).timeout, true, 'answered: nothing for the coordinator');
+  // --fresh applies to the next attempt only
+  run(['start', 'T2'], bob);
+  run(['review', 'T2', '-m', 'done'], bob);
+  run(['changes', 'T2', '-m', '1. wrong approach', '--fresh']);
+  assert.equal(run(['resume-info', 'T2']).mode, 'fresh');
+  run(['start', 'T2'], bob);
+  run(['review', 'T2', '-m', 'again'], bob);
+  run(['changes', 'T2', '-m', '1. small fix']);
+  assert.equal(run(['resume-info', 'T2', '--for', 'bob']).policy, 'auto', 'not sticky');
+  // sending back a task in a completed plan reopens the plan
+  run(['start', 'T2'], bob);
+  run(['review', 'T2', '-m', 'ok'], bob);
+  run(['done', 'T2', '-m', 'approved']);
+  run(['plan', 'status', 'completed']);
+  run(['changes', 'T2', '-m', '1. one more thing']);
+  assert.equal(run(['status']).status, 'active');
+  // dependency cycles are refused
+  run(['add', 'x', '--dep', 'T2']); // T3
+  assert.match(runFail(['edit', 'T2', '--dep', 'T3']).error, /dependency cycle/);
+  // block --on a finished task is refused
+  run(['start', 'T2'], bob);
+  assert.match(runFail(['block', 'T2', '-m', 'w', '--on', 'T1'], bob).error, /already done/);
 });

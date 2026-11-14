@@ -1067,7 +1067,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   // ---------- review drafts (sent together with S) ----------
-  const me = resolveActor();
+  const me = resolveActor({ role: process.env.ATF_ROLE || 'human' }); // the board is the human's
   const draftsOf = (root, plan) => {
     try {
       return readDrafts(root, plan, me.id);
@@ -1138,13 +1138,16 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       const items = draftsOf(p.root, p.id);
       try {
         let summary = '';
+        let refused = [];
         transact(p.root, p.id, me, (st) => {
-          const r = reviewEvents(st, items, me.id);
+          const r = reviewEvents(st, items, me);
           summary = r.summary;
+          refused = r.refused;
           return r.events;
         });
-        writeDrafts(p.root, p.id, me.id, []);
-        done.push(summary.replace(/^review by \S+: /, ''));
+        // refused drafts (tasks someone else reviews) stay as drafts
+        writeDrafts(p.root, p.id, me.id, items.filter((i) => refused.some((x) => x.task === i.task && x.action === i.action)));
+        done.push(summary.replace(/^review by \S+: /, '') + (refused.length ? ` · not yours: ${refused.map((x) => x.task).join(',')}` : ''));
       } catch (e) {
         return flash(`submit failed: ${e.message}`, 'red');
       }
