@@ -342,3 +342,185 @@ harness server. Writers record a server identity in `actor.ctx` (herdr:
 
 `v` is bumped only for incompatible envelope or semantics changes. New event types,
 new optional `data` fields and new `ctx` keys are minor, non-breaking additions.
+
+## 12. Interaction model v2: the coordinator decides (proposed)
+
+**Status: agreed design, not implemented yet.** Once implemented, it replaces the parts of
+§9 that let subagents wait, get relaunched with their old session, or receive review
+feedback directly. Until then §1–§11 describe the current behaviour.
+
+### 12.1 Why
+
+In v1, decisions are spread out: subagents wait for feedback, receive change requests
+from the human directly, may ask questions in notes that wake nobody, and the herdr
+launcher relaunches and resumes them on its own. That makes the model hard to follow
+(who reacts to what?) and asks decision-making of subagents, which may run cheaper models
+chosen for one kind of work. v2 makes the coordinator the only decision maker and keeps
+every other role simple.
+
+### 12.2 Roles
+
+- **Coordinator: the brain of the plan.** Always running while its plan is active. It
+  plans, dispatches, reviews, answers, re-plans, and is the only one who starts
+  subagents. It works from the plan's documents (§12.7) and ATF; it can be closed and
+  restarted with a fresh context at any time and continues from them.
+- **Subagent: one assignment, then exit.** Started by the coordinator for a task or a
+  work package, with a focused prompt. It works, writes a checkpoint, finishes with
+  `done`, `review` or `block`, and exits. It never waits and never decides beyond its
+  task: anything that needs a decision is a `block` with a precise question. If the task
+  comes back, the coordinator starts a **new instance** (fresh context) with the task,
+  its checkpoint and the coordinator's instructions. Resuming the earlier session is an
+  explicit choice of the coordinator, not the default.
+- **Human: supervises through the coordinator.** Sees every request for attention
+  scoped to the task (or plan) it is about, with its context, and answers there. The
+  answer goes to the coordinator, never to a subagent. Exception: approving a task that
+  waits for the human's review takes effect directly (it decides nothing new; the
+  coordinator sees the `done` event).
+
+### 12.3 Who is woken by what
+
+Only the coordinator is woken; subagents are started, never woken.
+
+| event | wakes | the coordinator then |
+|---|---|---|
+| subagent `done` | coordinator | checks progress, dispatches what became ready |
+| subagent `review` | coordinator | reviews, or (task's reviewer is `human`) leaves it to the human |
+| subagent `block` (question) | coordinator | answers it and starts a new instance, or escalates to the human (§12.4) |
+| subagent `fail` | coordinator | re-plans, retries, or escalates |
+| human approves | coordinator (as `done`) | as for `done` |
+| human input on a task or plan (§12.5) | coordinator | interprets it and acts |
+
+`block --on <tasks>` (waiting on dependencies) wakes nobody when it is set; when the
+dependencies are done the coordinator gets `unblocked` and starts a new instance.
+
+### 12.4 Requests to the human are scoped
+
+The human must see *which task* needs them and why without reading an agent's terminal.
+So every request for the human's attention is an ATF record on a task, or on the plan
+when it concerns the whole plan:
+
+- **Task in review for the human:** the task's `reviewer` is `human` (as in v1).
+- **Question for the human:** the coordinator escalates a task: `atf block T3 --for human
+  -m "<question, with its own summary and recommendation>"`. The task stays blocked;
+  its block now names the human as recipient. A subagent's own question is a block
+  for the coordinator (the default `--for coordinator`).
+- **Question about the whole plan:** `atf plan ask -m "…"` (a plan-level note of kind
+  `question` for the human).
+- **Failed task the coordinator cannot resolve:** escalated like a question.
+
+Frontends list these under "needs you" with the task's context (the question or review
+summary, the checkpoint, artifacts, the subagent's original question if the coordinator
+escalated one). The skill tells the coordinator never to ask the human only in its
+prompt. A frontend may still show "coordinator waits for input" (from harness state)
+as a fallback for coordinators that do.
+
+### 12.5 Human input goes to the coordinator, who interprets it
+
+Whatever the human writes on a task (an answer, a change request, a remark) is
+recorded on that task as a note by `human` addressed to the coordinator, and wakes it
+(attention reason `human`, with the task). The task's status does not change by itself:
+a task in review stays in review until the coordinator acts.
+
+The coordinator is free to interpret, combine, correct or extend the input. It decides
+what happens: send the task back to a new subagent instance with its own instructions
+(`atf changes T1 -m "…"`), create follow-up tasks (`atf add … --from T1`), change
+acceptance criteria, re-plan, or answer the human back with a question. The human's
+original words stay in the task's history, so the human can see what became of them
+and a restarted coordinator can find them; the subagent sees only the coordinator's
+instructions (and the human's words only if the coordinator passes them on).
+
+### 12.6 Coordinator lifecycle
+
+- **Start:** a launcher command (herdr: `atf-herdr coordinate [plan]`) starts the
+  coordinator agent in the project with the right identity (`ATF_ACTOR` = the plan's
+  coordinator, `ATF_ROLE=coordinator`, `ATF_PLAN`) and a kickoff prompt: read the plan's
+  documents and the plan-level checkpoint, run `atf status`, handle what needs
+  attention, then `atf wait`.
+- **Resume the plan:** the coordinator's session is recorded on the plan (plan-level
+  session reference). If the coordinator disappeared (closed pane, crash, restart), the
+  same command **resumes** that session by default, with a prompt to catch up on what
+  happened since (`atf wait` reports it from its cursor). `--fresh` starts a new session
+  instead, from the checkpoint and documents: for a context that grew too large or went
+  wrong.
+- **Fresh coordinator on demand:** the human can replace the coordinator with a new
+  session at any time, also while it runs (its context grew too large or went wrong).
+  If one is running, it is first asked to write the plan-level checkpoint and stop;
+  once it has (or after a timeout, with a warning that the newest state may be missing),
+  its pane is closed and a new coordinator starts fresh from the checkpoint, the
+  documents and ATF. The new session becomes the plan's session (`plan.session`).
+- **Presence:** while a plan is active and no coordinator runs for it, frontends show
+  that under "needs you" (it blocks the whole plan) with one key to resume it and one to
+  start it fresh. Launchers may also relaunch it.
+- **Handoff:** before stopping (or when its context grows large), the coordinator
+  writes a **plan-level checkpoint**: where the plan stands, what it is waiting for,
+  what it intends next. A new coordinator starts from that, the documents and ATF.
+
+### 12.7 Plan documents
+
+Design and plan files are not replaced by ATF; they hold what ATF does not: the
+reasoning. Division of labour:
+
+- **`design.md`** (or decision records): the why: requirements settled in the
+  pre-planning ("grill me") phase, alternatives rejected, architecture, constraints.
+  Human-curated, versioned with the code, outlives the plan.
+- **`plan.md`**: approach and phases and the reasons for them. No status or checkboxes:
+  ATF holds status (a readable status file can be generated from ATF, e.g. a Markdown
+  export of `atf plan show`).
+- **ATF**: execution: tasks, owners, status, progress, checkpoints, feedback, and the
+  decisions made during execution.
+
+ATF links a plan to its documents (`docs`: a list of paths relative to the project,
+set with `atf plan new|update --doc <path>`), shows them in frontends and points every
+new coordinator at them. Closing a plan includes a write-back step: the coordinator
+collects the decisions recorded during execution (`atf plan show` lists them) and folds
+the lasting ones into `design.md`.
+
+Typical flow: grill-me phase → `design.md`, `plan.md` → `atf plan new --doc design.md
+--doc plan.md` and tasks from `plan.md` → execution → write-back → close.
+
+### 12.8 Protocol changes
+
+All additive (§11): new optional fields and one new attention reason; no version bump.
+
+- `task.status` to `blocked`: optional `data.for` = `coordinator` (default) | `human`.
+  Derived: `blocked_for`. `driverInbox` lists blocks for the human (and, as a
+  fallback, any block while no coordinator runs); `attentionFor(coordinator)` lists
+  blocks for the coordinator.
+- `task.note` by the human: derived `human_input` (unhandled notes by `human` since the
+  coordinator last wrote on the task). Coordinator attention reason `human`. Wait
+  reports them to the coordinator, not to the task's owner.
+- Plan-level notes: `plan.note {kind, message, for?}` (kinds `checkpoint`, `question`,
+  `decision`, `info`). Derived: `plan.checkpoint`, `plan.questions`.
+- Plan field `docs` (list of paths).
+- `plan.session {kind, ref, actor}`: the coordinator's session, for resuming the plan.
+  Derived: `plan.session`.
+- Resume policy default becomes `fresh`; `resume` stays available per task/plan and per
+  launch.
+
+### 12.9 What changes in the reference implementation
+
+- **CLI:** `block --for`, `plan ask`, `plan note`, `plan new|update --doc`; human input
+  on a task becomes a note for the coordinator; `atf wait` is the coordinator's (a
+  subagent calling it is told to finish instead); subagents' `note --kind question`
+  is discouraged in favour of `block`.
+- **Skill:** subagent part reduced to: do the task, checkpoint, finish with
+  done/review/block, exit. Coordinator part: the only decision maker; escalate scoped
+  (§12.4); interpret human input (§12.5); plan documents and handoff (§12.6–12.7).
+- **herdr adapter:** the sweep no longer relaunches or resumes subagents and no longer
+  nudges them; it closes subagents that finished, nudges the coordinator, and reports a
+  missing coordinator. New: `atf-herdr coordinate`. `spawn` stays (the coordinator's tool),
+  defaulting to a fresh instance.
+- **Board:** "needs you" adds blocks for the human, plan questions and "no coordinator
+  running" (with a key to start one). `x` and `r` record the human's input for the
+  coordinator; `a` approves directly. Review drafts and batch submit are removed. `s`
+  no longer starts subagents (dispatching is the coordinator's). On a plan, or on the
+  "no coordinator running" item: `s` resumes the plan's coordinator, `S` starts a new
+  coordinator with a fresh session (press twice; a running coordinator first writes its
+  checkpoint and is replaced, §12.6). The Plan tab shows and opens the plan's documents.
+
+### 12.10 Implementation order
+
+1. Protocol and CLI (§12.8, §12.9 CLI), with tests.
+2. Skill (both roles), including the document and handoff rules.
+3. herdr adapter: simplified sweep, `atf-herdr coordinate`, fresh-by-default spawn.
+4. Board: needs-you items, input routing, documents, removals.
