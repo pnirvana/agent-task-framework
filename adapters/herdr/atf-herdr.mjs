@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchPlan } from '../../src/core.mjs';
 import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig, skillInstalled } from '../../src/store.mjs';
-import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isBoardPane } from './lib/herdr.mjs';
+import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isBoardPane, isLiveBoard } from './lib/herdr.mjs';
 import { sync, notifyForEvents } from './lib/sync.mjs';
 import { chooseBoardSplit, tabLayout, planRebuild, withPlacementLock } from './lib/layout.mjs';
 import { discoverAgents, resolveAgentDef, piArgsForAgent } from './lib/agents.mjs';
@@ -191,8 +191,12 @@ function toggleBoard(placement, start) {
   const here = ctx.tab_id || process.env.HERDR_TAB_ID || null;
   if (placement !== 'popup') {
     const panes = herdr(['pane', 'list', ...(ws ? ['--workspace', ws] : [])])?.panes || [];
-    const boards = panes.filter(isBoardPane);
     const close = (p) => herdr(['plugin', 'pane', 'close', p.pane_id]) || herdr(['pane', 'close', p.pane_id]);
+    // "ATF board" panes without a running board (a shell herdr restored in its place):
+    // leftovers, closed unless something else (an agent) runs in them now
+    const labelled = panes.filter(isBoardPane);
+    const boards = labelled.filter(isLiveBoard);
+    labelled.filter((p) => !boards.includes(p) && !p.agent).forEach(close);
     const inTab = boards.filter((p) => p.tab_id === here);
     if (inTab.length) {
       inTab.forEach(close);
@@ -378,6 +382,7 @@ function enableSync(on) {
  * so the hook alone would never see them idle; a delayed sweep does. At most one
  * pending sweep per root (a newer request replaces the timestamp; the old one exits).
  */
+const SOON_S = 3; // follow-up sweep while an agent finishes its turn or another sweep holds the lock
 function scheduleSweep(root, delaySec) {
   const marker = path.join(stateDir(), `sweep-${Buffer.from(root).toString('base64url').slice(-40)}`);
   const due = Date.now() + delaySec * 1000;
@@ -406,9 +411,11 @@ async function sweepCmd() {
       fs.rmSync(flags.marker, { force: true });
     } catch {}
   }
-  const { actions, pending } = lifecycleSweep(root);
+  const { actions, pending, soon } = lifecycleSweep(root);
   if (actions.length) sync(root);
-  if (pending) scheduleSweep(root, 15); // keep watching while ATF agents are alive or launching
+  // keep watching while ATF agents are alive or launching; closely while one is about to need us
+  if (soon) scheduleSweep(root, SOON_S);
+  else if (pending) scheduleSweep(root, 15);
   if (!flags.marker) process.stdout.write((actions.length ? actions.join('\n') : 'nothing to do') + '\n');
 }
 
@@ -419,9 +426,9 @@ function hook() {
   const plan = process.env.ATF_PLAN;
   if (!root || !plan) return;
   sync(root);
-  const { actions } = lifecycleSweep(root);
+  const { actions, soon } = lifecycleSweep(root);
   if (actions.length) sync(root);
-  scheduleSweep(root, 20);
+  scheduleSweep(root, soon ? SOON_S : 20);
   if ((process.env.ATF_HOOK_TYPES || '').split(',').includes('task.status'))
     notifyForEvents(root, plan, Number(process.env.ATF_HOOK_FROM_SEQ), Number(process.env.ATF_HOOK_TO_SEQ));
 }

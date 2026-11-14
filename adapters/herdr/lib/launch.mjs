@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TERMINAL, attentionFor, launchPlan } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, transact, skillInstalled, resolveActor } from '../../../src/store.mjs';
-import { herdr, pluginConfig, sameServer, currentSocket, liveAgents, boardPaneIds } from './herdr.mjs';
+import { herdr, pluginConfig, sameServer, currentSocket, liveAgents, boardPaneIds, pluginStateDir } from './herdr.mjs';
 import { chooseSplit, tabLayout, withPlacementLock } from './layout.mjs';
 import { resolveAgentDef, piArgsForAgent } from './agents.mjs';
 
@@ -39,11 +39,7 @@ const GRACE_MS = 15_000; // idle this long (with nothing to do) before an epheme
 const RELAUNCH_COOLDOWN_MS = 60_000;
 
 // ---------- plugin state ----------
-export function stateDir() {
-  const dir = process.env.HERDR_PLUGIN_STATE_DIR || path.join(os.homedir(), '.local/state/herdr/plugins/atf.herdr');
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
+export const stateDir = pluginStateDir;
 const readJson = (f, d = {}) => {
   try {
     return JSON.parse(fs.readFileSync(path.join(stateDir(), f), 'utf8'));
@@ -168,7 +164,9 @@ export function buildPrompt({ s, t, name, mode, pkg, kindCfg, early = false }) {
   return (
     `You are subagent "${name}". Your ATF task is ${t.id}: ${t.title}.${history} ` +
     `Run \`atf show ${t.id}\` for details and acceptance criteria, then \`atf start ${t.id}\` and do the work. ${skill} ` +
-    `Report progress with atf and finish with atf done/review/block/fail.`
+    (t.review || (t.reviewer && t.reviewer !== 'coordinator')
+      ? `Report progress with atf. This task needs review: finish with \`atf review ${t.id} -m "<summary + what to check>"\` (not done), or block/fail.`
+      : `Report progress with atf and finish with atf done/review/block/fail.`)
   );
 }
 
@@ -258,19 +256,37 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
 }
 
 // ---------- lifecycle sweep ----------
-function nudgeText(s, actor, att) {
+export function nudgeText(s, actor, att) {
   const items = att.map((a) => `${a.task} ${a.reason} (${s.tasks[a.task]?.title ?? ''})`).join('; ');
   if (actor.role === 'coordinator')
-    return `[ATF] Plan "${s.title}" needs you: ${items}. Handle these (atf show <id>; approve with atf done -m, reopen, or answer), then continue monitoring with \`atf wait\`.`;
-  return `[ATF] Work is available for you in plan "${s.title}": ${items}. Continue: \`atf next --package\` (or \`atf start <id>\` for an unblocked or answered task).`;
+    return `[ATF] Plan "${s.title}" needs you: ${items}. Handle these (atf show <id>; approve with atf done -m, atf changes -m, or answer), then continue monitoring with \`atf wait\`.`;
+  // what to run depends on the reason and on whether the task came with a work package
+  const how = (a) => {
+    const t = s.tasks[a.task];
+    if (a.reason === 'changes') return `${a.task}: changes were requested, read the feedback with \`atf show ${a.task}\`, then \`atf start ${a.task}\``;
+    if (a.reason === 'unblocked') return `${a.task}: \`atf start ${a.task}\` and continue from your checkpoint (blocked on ${t.blocked_on.join(',')}, now done)`;
+    if (a.reason === 'answered') return `${a.task}: your question was answered (\`atf show ${a.task}\`), then \`atf start ${a.task}\``;
+    const viaPackage = t && t.assignee !== actor.id; // owned through an assigned parent
+    return viaPackage ? `${a.task}: \`atf next --package\`` : `${a.task}: \`atf start ${a.task}\``;
+  };
+  const steps = [...new Set(att.map(how))];
+  return `[ATF] Work is available for you in plan "${s.title}": ${items}. ${steps.length > 1 ? 'Next: ' + steps.join('; ') : 'Next: ' + steps[0]}.`;
 }
+
+// Has the agent acted (written to ATF) since it was launched? Then it has read its
+// kickoff prompt, and the post-launch cooldown no longer applies.
+const actedSince = (actor, launchedAt) => !!(actor.last_seen && Date.parse(actor.last_seen) >= launchedAt);
+// An agent that wrote this recently and is busy is most likely just finishing its turn:
+// check again soon instead of at the normal cadence.
+const WRAP_UP_MS = 60_000;
 
 /**
  * One pass over all active plans in `root`:
  *  - live + idle + something needs it      -> nudge (prompt) it, once per situation
  *  - live + idle + nothing to do (ephemeral)-> after a grace period: save session refs, close pane
  *  - gone + something needs it (ATF-spawned)-> relaunch: resume the task's session or start fresh
- * Returns {actions, pending} where pending=true means another sweep is useful soon.
+ * Returns {actions, pending, soon}: pending = sweep again at the normal cadence; soon =
+ * an agent is about to need a nudge or relaunch (or another sweep held the lock): in seconds.
  */
 export function lifecycleSweep(root) {
   // one sweep at a time per machine; a concurrent one is skipped (and rescheduled)
@@ -279,11 +295,11 @@ export function lifecycleSweep(root) {
     fs.mkdirSync(lock);
   } catch {
     try {
-      if (Date.now() - fs.statSync(lock).mtimeMs < 120_000) return { actions: [], pending: true };
+      if (Date.now() - fs.statSync(lock).mtimeMs < 120_000) return { actions: [], pending: true, soon: true, busy: true };
       fs.rmSync(lock, { recursive: true, force: true });
       fs.mkdirSync(lock);
     } catch {
-      return { actions: [], pending: true };
+      return { actions: [], pending: true, soon: true, busy: true };
     }
   }
   try {
@@ -299,6 +315,7 @@ export function lifecycleSweep(root) {
 function sweepLocked(root) {
   const actions = [];
   let pending = false;
+  let soon = false; // something is about to need a nudge/relaunch: sweep again in seconds
   const reg = readRegistry(); // snapshot; changes are written back per entry at the end
   const touched = new Set();
   const nudges = readJson('nudges.json');
@@ -328,13 +345,16 @@ function sweepLocked(root) {
         if (!idle) {
           if (rec) rec.idleSince = null;
           if (rec) pending = true;
+          // work is waiting for it and it wrote recently: it is probably wrapping up its turn
+          if (att.length && nudges[nkey] !== attKey && actor.last_seen && now - Date.parse(actor.last_seen) < WRAP_UP_MS) soon = true;
           continue;
         }
         if (att.length) {
           // a just-launched agent is idle until it reads its kickoff prompt: don't double-prompt it
-          const justLaunched = rec?.launchedAt && now - rec.launchedAt < RELAUNCH_COOLDOWN_MS;
+          // (once it has written anything, it has read it)
+          const justLaunched = rec?.launchedAt && now - rec.launchedAt < RELAUNCH_COOLDOWN_MS && !actedSince(actor, rec.launchedAt);
           if (justLaunched) {
-            pending = true;
+            pending = true; // its first atf write fires the hook, which sweeps at once
             continue;
           }
           if (nudges[nkey] !== attKey && herdr(['agent', 'prompt', actor.id, nudgeText(s, actor, att)])) {
@@ -369,7 +389,8 @@ function sweepLocked(root) {
 
       // not alive
       if (!att.length || !rec || rec.plan !== s.id) continue;
-      if (rec.launchedAt && now - rec.launchedAt < RELAUNCH_COOLDOWN_MS) {
+      // cooldown against relaunch loops (e.g. an agent that dies on start), not for one that worked and exited
+      if (rec.launchedAt && now - rec.launchedAt < RELAUNCH_COOLDOWN_MS && !actedSince(actor, rec.launchedAt)) {
         pending = true;
         continue;
       }
@@ -394,7 +415,7 @@ function sweepLocked(root) {
     }
   });
   writeJson('nudges.json', nudges);
-  return { actions, pending };
+  return { actions, pending, soon };
 }
 
 function coordinatorPane(s, live) {

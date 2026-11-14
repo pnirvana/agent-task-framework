@@ -57,8 +57,10 @@ Tasks (coordinator)
   atf add <title> [--desc D] [--accept A]... [--dep T1]... [--parent T1]
                   [--label L]... [--priority N] [--assign WHO] [--resume auto|resume|fresh]
                   [--agent NAME]   agent definition to run the task with (e.g. reviewer)
-                  [--from T3]      follow-up of T3 (scope found in review; joins T3's package)
-                  [--reviewer human]  who must review it (default: the coordinator)
+                  [--from T3]      follow-up of T3 (scope found in review); placed under T3's
+                                   parent, not assigned to T3's assignee (use --assign)
+                  [--review]       must go to review before done (--review=false clears it)
+                  [--reviewer human]  who must review it (default: the coordinator; implies --review)
   atf edit <task> [same flags as add; --dep/--accept/--label replace lists]
   atf assign <task> <who|->            assign / unassign. Assigning a parent task hands the
                                         whole subtree (work package) to that agent
@@ -81,7 +83,7 @@ Tasks (worker)
                                         needs help / input. --on: blocked on other tasks;
                                         becomes resumable automatically when they are done
   atf review <task> -m <summary>        ready for coordinator review
-  atf done <task> -m <summary>
+  atf done <task> -m <summary>          (tasks added with --review: atf review instead)
   atf fail <task> -m <reason>
   atf feedback approve|change|note <task> ["text"] [--file F --line N]
                                         draft review feedback (nothing is sent yet)
@@ -123,7 +125,7 @@ Global flags
 `;
 
 // ---------- args ----------
-const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early']);
+const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early', 'review']);
 const MULTI = new Set(['accept', 'dep', 'label']);
 const SHORT = { m: 'message', n: 'limit', h: 'help', j: 'json' };
 
@@ -241,6 +243,8 @@ function ctx({ needPlan = true } = {}) {
   return { root, planId, actor: written, roleSource: role_source };
 }
 
+const needsReview = (t) => !!(t.review || (t.reviewer && t.reviewer !== 'coordinator'));
+
 function requireTask(state, id) {
   if (!id) die('task id required');
   const t = state.tasks[id] || state.tasks[id.toUpperCase()] || state.tasks['T' + id];
@@ -265,6 +269,7 @@ function taskFieldsFromFlags(f, state, selfId) {
   if (f.label) d.labels = f.label.flatMap((l) => l.split(',')).map((s) => s.trim()).filter(Boolean);
   if (f.agent !== undefined) d.agent = f.agent === '-' || f.agent === '' ? null : f.agent;
   if (f.reviewer !== undefined) d.reviewer = f.reviewer === '-' || f.reviewer === '' ? null : f.reviewer;
+  if (f.review !== undefined) d.review = !!f.review;
   if (f.from !== undefined) {
     if (!state.tasks[f.from]) die(`unknown task in --from: ${f.from}`);
     d.origin = f.from;
@@ -394,9 +399,10 @@ function renderTask(t, state) {
   if (t.assignee) L.push(`assignee: ${cyan(t.assignee)}${t.children.length ? dim(' (owns this work package)') : ''}`);
   if (t.agent) L.push(`agent:    ${magenta(t.agent)} ${dim('(agent definition to run it with)')}`);
   if (t.reviewer) L.push(`reviewer: ${magenta(t.reviewer)} ${dim('(must approve it, not the coordinator)')}`);
+  else if (t.review) L.push(`review:   ${magenta('required')} ${dim(`(finish with atf review ${t.id} -m "what to check", not done)`)}`);
   if (t.origin) L.push(`follow-up of: ${t.origin} ${dim(state.tasks[t.origin]?.title ?? '')}`);
+  if (!t.assignee && t.owner) L.push(`owner:    ${cyan(t.owner)} ${dim(`(via package ${[...t.path].reverse().find((id) => state.tasks[id].assignee)})`)}`);
   if (t.followups?.length) L.push(`follow-ups:   ${t.followups.map((id) => `${id}(${state.tasks[id].status})`).join(', ')}`);
-  else if (t.owner) L.push(`owner:    ${cyan(t.owner)} ${dim(`(via package ${[...t.path].reverse().find((id) => state.tasks[id].assignee)})`)}`);
   if (t.children.length)
     L.push(`subtasks: ${t.children.map((id) => `${id}(${state.tasks[id].rollup_status ?? state.tasks[id].status}${state.tasks[id].owner && state.tasks[id].owner !== t.owner ? ' @' + state.tasks[id].owner : ''})`).join(', ')}`);
   if (t.blocked_on.length) L.push(`blocked on: ${t.blocked_on.map((d) => `${d}(${state.tasks[d]?.rollup_status ?? state.tasks[d]?.status ?? '?'})`).join(', ')}${t.can_resume ? green('  → can resume') : ''}`);
@@ -451,6 +457,13 @@ function statusCmd(target, msgRequired) {
         if (target === 'in_progress' && t.children.length) die(`${t.id} has subtasks; start those instead (use --force)`);
         if (t.owner && t.owner !== actor.id && actor.role !== 'coordinator' && target !== 'todo')
           die(`${t.id} is ${t.assignee ? 'assigned to' : 'in a work package owned by'} ${t.owner} (use --force)`);
+        // a task marked for review is approved by its reviewer, not finished by its worker
+        if (target === 'done' && needsReview(t) && actor.role !== 'coordinator' && actor.id !== t.reviewer)
+          die(
+            t.status === 'review'
+              ? `${t.id} is waiting for review by ${t.reviewer && t.reviewer !== 'coordinator' ? t.reviewer : 'the coordinator'}; only they can mark it done`
+              : `${t.id} needs review: finish it with \`atf review ${t.id} -m "what to check"\` instead of done`,
+          );
       }
       const evs = [];
       if (target === 'in_progress' && t.assignee !== actor.id && (!t.assignee || FLAGS.force || t.owner === actor.id))
@@ -924,7 +937,9 @@ const commands = {
       const hits = evs.filter((e) => !(e.task && (ownLastOnTask[e.task] ?? 0) > e.seq)).filter(
         (e) =>
           e.actor?.id !== actor.id &&
-          ((isCoord && e.type === 'task.status' && ['done', 'failed', 'blocked', 'review'].includes(e.data?.status)) ||
+          // a dependency block (`block --on`) is the owner's business, not a decision for the coordinator
+          ((isCoord && e.type === 'task.status' && ['done', 'failed', 'review'].includes(e.data?.status)) ||
+            (isCoord && e.type === 'task.status' && e.data?.status === 'blocked' && !e.data?.on?.length) ||
             (isCoord && e.type === 'plan.review') ||
             (e.task && st.tasks[e.task]?.owner === actor.id && ['task.status', 'task.note', 'task.assigned', 'task.updated'].includes(e.type))),
       );

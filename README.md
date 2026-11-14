@@ -130,6 +130,7 @@ atf done T2 -m "approved: tests pass, edge cases covered"       # meets its crit
 atf changes T2 -m "1. return 401 on bad password 2. add a test"  # send back with feedback
 atf changes T2 -m "use the existing auth service" --fresh        # wrong approach: clean restart
 atf add "Rate-limit /login" --from T2 --accept "5/min per IP"    # extra scope found in review
+#   (placed under T2's parent; add --assign to give it to T2's agent)
 ```
 
 Reviewing several tasks at once (e.g. as the human, or comments forwarded from an editor):
@@ -141,6 +142,8 @@ atf feedback note T3 "nice docs"
 atf feedback submit      # one write: T2 done, T1 back with all points, note on T3
 ```
 
+Tasks the coordinator wants to check before they count as done: `atf add … --review`
+(the owner must finish with `atf review`; `atf done` refuses).
 Tasks that need the human to test something: `atf add … --reviewer human`, or a subagent's
 `atf review T3 -m "please test …" --by human`. The coordinator leaves those to you.
 

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { TERMINAL, driverInbox, planSummary } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, readDrafts, writeDrafts, reviewEvents } from '../../../src/store.mjs';
-import { herdrAsync, agentIndex, inHerdr, sameServer, discoverRoots } from './herdr.mjs';
+import { herdrAsync, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess } from './herdr.mjs';
 import { progressText } from './sync.mjs';
 
 const ESC = '\x1b[';
@@ -400,6 +400,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (t.labels.length) meta.push([`#${t.labels.join(' #')}  `, 'magenta']);
     if (t.agent) meta.push([`agent ${t.agent}  `, 'magenta']);
     if (t.reviewer) meta.push([`reviewer ${t.reviewer}  `, 'magenta']);
+    else if (t.review) meta.push(['review required  ', 'magenta']);
     meta.push([`updated ${ago(t.updated_at)} ago`, 'dim']);
     L.push(meta);
     if (a?.stale) L.push([['⚠ agent is idle but the task is still in progress: it may have stopped without reporting', 'red']]);
@@ -1360,6 +1361,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   } else setScope({ level: 'all' }, { tab: 'overview' });
   if (initialRoot) ui.focus = ui.focus || { root: initialRoot, plan: pickPlan(initialRoot) };
 
+  registerBoardProcess(); // lets the toggle tell this board from a shell restored in its pane
   out.write(`${ESC}?1049h${ESC}?25l${ESC}2J`);
   process.on('SIGTERM', quit);
   process.on('SIGHUP', quit);

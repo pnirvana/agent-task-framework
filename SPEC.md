@@ -88,7 +88,7 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 ### Task events
 | type | data | notes |
 |------|------|-------|
-| `task.created`  | `{title, description?, acceptance?: string[], deps?: id[], parent?: id, labels?: string[], priority?: number, assignee?: string, agent?: string, origin?: id, meta?: object}` | `agent`: name of the agent definition to run the task with (opaque; resolved by the launcher, e.g. a pi agent named `reviewer`) |
+| `task.created`  | `{title, description?, acceptance?: string[], deps?: id[], parent?: id, labels?: string[], priority?: number, assignee?: string, agent?: string, origin?: id, reviewer?: string, review?: boolean, meta?: object}` | `agent`: name of the agent definition to run the task with (opaque; resolved by the launcher, e.g. a pi agent named `reviewer`) |
 | `task.updated`  | any subset of the definition fields | lists are replaced, not merged |
 | `task.assigned` | `{assignee: string\|null}` | `null` = unassign |
 | `task.status`   | `{status, message?, on?: id[], changes?: true}` | `message` on `done` is the task's **result summary**; `on` with `blocked`: tasks it is blocked on; `changes` with `todo`: **changes requested** from review (`message` is the feedback) |
@@ -253,10 +253,14 @@ change requests, numbered `round`s) and `changes_requested` (until the task is n
 submitted, approved, failed or cancelled). The owner's attention reason is then
 `changes` instead of `ready`. Work found in review beyond a task's acceptance criteria is
 a new task with `origin` pointing at the reviewed one (derived reverse link: `followups`);
-it defaults to the origin's parent (work package).
+it defaults to the origin's parent, so it inherits an owner only through an assigned work
+package. It never copies the origin's own `assignee`.
 
 **Reviewers and batch reviews.** A task's `reviewer` (null = the coordinator) says who
 must approve it; a subagent can set it when submitting (`atf review … --by human`).
+A task with `review: true`, or with a reviewer other than the coordinator, *needs
+review*: writers refuse `done` on it unless the actor is a coordinator or the task's
+reviewer, so the owner finishes with `review` and cannot approve its own work.
 Coordinators get attention reason `review` only for tasks they review; tasks for other
 reviewers appear in the driver inbox as `your-review`. Review feedback is collected as
 drafts (`plans/<id>/drafts/<actor>.json`, not events) and submitted in one transaction
@@ -272,6 +276,9 @@ never lost. Without a cursor the wait starts from the actor's own last event, or
 brand-new actor with no events, from now (it has no history to catch up on). An event
 about a task is not reported if the actor wrote anything about that task after it (it
 was handled, e.g. after being woken by a message). `--since SEQ` overrides the start.
+Relevant events, by others: for a coordinator, `task.status` to done, failed or review,
+to blocked only without `on` (a dependency block is the owner's business), and
+`plan.review`; for any actor, status, note, assignment and update events on tasks it owns.
 Attention items are level-triggered and repeat until resolved.
 
 **Launcher contract.** A launcher (e.g. the herdr adapter) that starts agents:

@@ -25,7 +25,7 @@ export function canTransition(from, to) {
   return from === to ? false : (TRANSITIONS[from] || []).includes(to);
 }
 
-const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume', 'agent', 'origin', 'reviewer'];
+const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume', 'agent', 'origin', 'reviewer', 'review'];
 const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume', 'coordinator'];
 
 function pick(obj, keys) {
@@ -52,6 +52,7 @@ function newTask(id, ev) {
     agent: null, // name of the agent definition to run this task with (opaque; launchers resolve it)
     origin: null, // task this one is a follow-up of (scope found while reviewing it)
     reviewer: null, // who must review it: null/'coordinator' (default) or e.g. 'human'
+    review: false, // must go through review before done (implied by a reviewer)
     feedback: [], // change requests: [{round, seq, ts, actor, message}]
     changes_requested: false, // sent back with requested changes, not yet resubmitted
     checkpoint: null, // latest checkpoint note: where the work stands
@@ -280,6 +281,11 @@ export function derive(plan) {
     a.tasks = plan.order.filter((id) => tasks[id].assignee === a.id && !tasks[id].children.length && open(tasks[id]));
     a.packages = plan.order.filter((id) => tasks[id].assignee === a.id && tasks[id].children.length);
     a.owned = plan.order.filter((id) => tasks[id].owner === a.id && !tasks[id].children.length);
+    // no role written yet (e.g. assigned but not started): derive one for display
+    if (!a.role) {
+      const role = plan.coordinator === a.id ? 'coordinator' : a.owned.length || a.packages.length || a.tasks.length ? 'subagent' : null;
+      if (role) Object.assign(a, { role, role_inferred: true });
+    }
   }
   return plan;
 }
@@ -381,7 +387,8 @@ export function launchPlan(plan, taskId, actorId = null) {
  */
 export function inferRole(plan, actorId) {
   if (plan?.coordinator && plan.coordinator === actorId) return { role: 'coordinator', source: 'recorded as this plan\'s coordinator' };
-  const prev = plan?.actors?.[actorId]?.role;
+  const known = plan?.actors?.[actorId];
+  const prev = known && !known.role_inferred ? known.role : null; // only roles the actor itself wrote
   if (prev && prev !== 'agent') return { role: prev, source: 'role used in earlier events of this plan' };
   return { role: 'agent', source: 'default (not the plan\'s coordinator, no ATF_ROLE)' };
 }

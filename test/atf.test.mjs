@@ -413,6 +413,24 @@ test('wait: per-actor cursor; tasks finished before the wait are reported once; 
   assert.deepEqual(r.attention, []);
 });
 
+test('wait: the coordinator is not woken by `block --on`, only by question-blocks', () => {
+  const { run, runFail } = sandbox();
+  run(['add', 'tests']); // T1
+  run(['add', 'page']); // T2
+  run(['assign', 'T1', 'be']);
+  run(['assign', 'T2', 'fe']);
+  runFail(['wait', '--timeout', '500']); // nothing yet; sets the coordinator's cursor
+  const be = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
+  run(['start', 'T1'], be);
+  run(['block', 'T1', '-m', 'needs page', '--on', 'T2'], be);
+  assert.equal(runFail(['wait', '--timeout', '800']).timeout, true, 'dependency block is not the coordinator\'s business');
+  run(['start', 'T1'], be);
+  run(['block', 'T1', '-m', 'which framework?'], be);
+  const r = run(['wait', '--timeout', '2000']);
+  assert.deepEqual(r.attention, [{ task: 'T1', reason: 'blocked' }]);
+  assert.deepEqual(r.events.map((e) => [e.task, e.data.status, e.data.on ?? null]), [['T1', 'blocked', null]]);
+});
+
 test('review: request changes, resubmit, approve; follow-up joins the package', () => {
   const { run, runFail } = sandbox();
   run(['add', 'API']); // T1 (package)
@@ -518,4 +536,71 @@ test('wait: no old events for a new agent; events already acted on are not repea
   r = run(['wait', '--timeout', '1500']);
   assert.deepEqual(r.events.map((e) => [e.task, e.data.status]), [['T2', 'done']], 'T1 review event not repeated, T2 still reported');
   assert.deepEqual(r.attention, [{ task: 'T1', reason: 'review' }], 'T1 is still in review: level attention remains');
+});
+
+test('herdr nudge: per-reason instructions; next --package only for package tasks', async () => {
+  const { nudgeText } = await import('../adapters/herdr/lib/launch.mjs');
+  const s = { title: 'P', tasks: { T2: { title: 'in pkg', assignee: null, blocked_on: [] }, T3: { title: 'single', assignee: 'be', blocked_on: [] } } };
+  const be = { id: 'be', role: 'subagent' };
+  const single = nudgeText(s, be, [{ task: 'T3', reason: 'changes' }]);
+  assert.match(single, /atf show T3.*atf start T3/);
+  assert.doesNotMatch(single, /--package/);
+  assert.match(nudgeText(s, be, [{ task: 'T2', reason: 'ready' }]), /atf next --package/);
+});
+
+test('--review: the owner must submit for review; the coordinator approves', () => {
+  const { run, runFail } = sandbox();
+  run(['add', 'migrate', '--review', '--assign', 'be']); // T1
+  run(['add', 'docs', '--assign', 'be']); // T2
+  const be = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
+  assert.equal(run(['show', 'T1']).review, true);
+  run(['start', 'T1'], be);
+  assert.match(runFail(['done', 'T1', '-m', 'ok'], be).error, /needs review.*atf review T1/);
+  run(['review', 'T1', '-m', 'check the migration'], be);
+  assert.match(runFail(['done', 'T1', '-m', 'self-approve'], be).error, /waiting for review by the coordinator/);
+  run(['done', 'T1', '-m', 'approved']); // coordinator
+  assert.equal(run(['show', 'T1']).status, 'done');
+  run(['start', 'T2'], be);
+  run(['done', 'T2', '-m', 'ok'], be); // no --review: done is fine
+  run(['edit', 'T2', '--review=false']);
+  run(['add', 'ui', '--reviewer', 'human', '--assign', 'be']); // T3: a reviewer implies review
+  run(['start', 'T3'], be);
+  assert.match(runFail(['done', 'T3', '-m', 'ok'], be).error, /needs review/);
+  run(['edit', 'T3', '--review']);
+  run(['edit', 'T3', '--review=false', '--reviewer', '-']);
+  assert.equal(run(['show', 'T3']).review, false);
+  run(['done', 'T3', '-m', 'ok'], be);
+});
+
+test('status: agents that have not started yet still show a role', () => {
+  const { run } = sandbox();
+  run(['add', 'a', '--assign', 'be']);
+  const be = run(['status']).actors?.be ?? run(['plan', 'show']).actors?.be;
+  assert.equal(be.role, 'subagent');
+  assert.equal(be.role_inferred, true);
+  assert.equal(run(['whoami'], { ATF_ACTOR: 'be', ATF_ROLE: '' }).role, 'agent', 'inferred display role is not a recorded one');
+});
+
+test('herdr board: a restored "ATF board" pane without a running board is not a board', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-board-'));
+  const saved = { ...process.env };
+  Object.assign(process.env, { HERDR_PLUGIN_STATE_DIR: dir, HERDR_SOCKET_PATH: '/tmp/test.sock', HERDR_PLUGIN_ID: 'atf.herdr' });
+  try {
+    const { isLiveBoard, registerBoardProcess } = await import('../adapters/herdr/lib/herdr.mjs');
+    const pane = { pane_id: 'w1:p9', label: 'ATF board' };
+    assert.equal(isLiveBoard(pane), false, 'no registration: a restored shell');
+    // a running board (any process whose command mentions atf-herdr) registers itself
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)', 'atf-herdr'], { stdio: 'ignore' });
+    process.env.HERDR_PANE_ID = 'w1:p9';
+    registerBoardProcess(); // writes this process's pid; point it at the child instead
+    const reg = path.join(dir, 'boards', fs.readdirSync(path.join(dir, 'boards'))[0]);
+    fs.writeFileSync(reg, JSON.stringify({ ...JSON.parse(fs.readFileSync(reg, 'utf8')), pid: child.pid }));
+    assert.equal(isLiveBoard(pane), true);
+    assert.equal(isLiveBoard({ ...pane, label: 'other' }), false);
+    child.kill();
+    await new Promise((r) => child.on('exit', r));
+    assert.equal(isLiveBoard(pane), false, 'board process gone');
+  } finally {
+    process.env = saved;
+  }
 });

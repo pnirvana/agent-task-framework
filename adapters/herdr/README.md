@@ -173,7 +173,11 @@ reopened), the adapter relaunches it:
 
 Agents you start yourself are never closed or relaunched. Sweeps run from the ATF hook
 after writes, from a self-rescheduling delayed sweep, and every 20 s from an open board,
-always in a separate `atf-herdr` process, so the board never blocks on herdr. Set
+always in a separate `atf-herdr` process, so the board never blocks on herdr. When work is
+waiting for a busy agent that wrote within the last minute (it is most likely finishing
+its turn), or another sweep held the lock, the next sweep runs after 3 s instead of 15 s.
+A freshly launched agent is not nudged or relaunched for 60 s unless it has already
+written to ATF. Set
 `ATF_HERDR_TRACE=<file>` to log which background runs a board triggers. `"lifecycle": "persistent"`
 keeps launched agents alive (they are prompted instead). Every action is logged to
 `~/.local/state/herdr/plugins/atf.herdr/lifecycle.log`.

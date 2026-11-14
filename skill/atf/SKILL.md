@@ -65,7 +65,9 @@ For each task:
 5. Record decisions others need to know: `atf note T3 "chose cookie sessions (no redis)" --kind decision`
 6. Finish with exactly one of:
    - `atf done T3 -m "<what was done, where, how verified>"`: all acceptance criteria met
-   - `atf review T3 -m "<summary + what to check>"`: done, but needs coordinator sign-off
+   - `atf review T3 -m "<summary + what to check>"`: done, but needs coordinator sign-off.
+     **Required** when `atf show T3` says `review: required` or names a reviewer: such a
+     task cannot be marked done by you (`atf done` refuses).
    - `atf block T3 -m "<precise question or missing input>"`: cannot continue without help
    - `atf fail T3 -m "<what was tried, why it failed>"`: cannot be done as specified
 7. If blocked on a question (no `--on`): write a checkpoint first, then block, and stop
@@ -116,7 +118,10 @@ instead of your transcript, so make it self-contained.
    atf add "Backend"                                     # parent/grouping task
    atf add "Token endpoint" --parent T2 --dep T1 --accept "POST /auth/callback returns session" --accept "tests pass"
    atf add "Login button" --dep T3 --label frontend
+   atf add "Migrate user table" --accept "…" --review    # must come back to you for review
    ```
+   Use `--review` (not a line in the description) for tasks you want to check before they
+   count as done: the subagent then has to finish with `atf review`, `atf done` refuses.
    Parents are containers; their status rolls up from subtasks. Only leaves get worked on.
    Declare every dependency that crosses packages (e.g. backend tests that check a page the
    frontend builds depend on that frontend task). Undeclared cross-package dependencies are
@@ -171,9 +176,12 @@ instead of your transcript, so make it self-contained.
      starts from a clean agent (it still sees the feedback and history).
    - **Meets them, but the review found more work** (extra edge cases, a refactor, a
      related feature) → approve it, then add the extra work as follow-up tasks:
-     `atf add "<follow-up>" --from T4 --accept "…"`. A follow-up joins T4's work package
-     (same owner) unless you pass `--parent`/`--assign`. Do not reopen or stretch a task
-     beyond its acceptance criteria.
+     `atf add "<follow-up>" --from T4 --accept "…"`. A follow-up is placed under T4's
+     parent, so if T4 sits in an assigned work package it goes to that package's owner.
+     It does **not** take over T4's own assignee: if T4 was assigned directly (or has no
+     parent), the follow-up starts unassigned. Dispatch it like any new task, or pass
+     `--assign <agent>` (e.g. T4's owner, to reuse its context) or `--parent` to place it
+     elsewhere. Do not reopen or stretch a task beyond its acceptance criteria.
    - **The criteria themselves were wrong** → fix them first
      (`atf edit T4 --accept "…"`, which replaces the list), then request changes.
    - **Cannot be done as specified** → `atf cancel T4 -m why` and re-plan.
