@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TERMINAL, attentionFor, launchPlan } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, transact, skillInstalled, resolveActor } from '../../../src/store.mjs';
-import { herdr, pluginConfig, sameServer, currentSocket, liveAgents, boardPaneIds, pluginStateDir } from './herdr.mjs';
+import { herdr, pluginConfig, sameServer, currentSocket, liveAgents, inProject, boardPaneIds, pluginStateDir } from './herdr.mjs';
 import { chooseSplit, tabLayout, withPlacementLock } from './layout.mjs';
 import { resolveAgentDef, piArgsForAgent } from './agents.mjs';
 
@@ -174,8 +174,10 @@ export function buildPrompt({ s, t, name, mode, pkg, kindCfg, early = false }) {
 }
 
 // ---------- launching ----------
-export function recordSession(root, planId, taskIds, name, kind) {
-  const a = herdr(['agent', 'get', name])?.agent;
+export function recordSession(root, planId, taskIds, name, kind, pane = null) {
+  // by pane when known: names repeat across projects; never another project's agent
+  const a = herdr(['agent', 'get', pane || name])?.agent;
+  if (a && !inProject(a, root)) return null;
   const ref = a?.agent_session?.value;
   if (!ref || !taskIds.length) return null;
   const state = loadPlan(root, planId);
@@ -253,10 +255,10 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
     ]);
   }
   const fresh = loadPlan(root, planId);
-  herdr(['agent', 'prompt', name, buildPrompt({ s: fresh, t: fresh.tasks[leaf.id], name, mode, pkg: isPackage ? fresh.tasks[target.id] : null, kindCfg, early })]);
+  herdr(['agent', 'prompt', pane, buildPrompt({ s: fresh, t: fresh.tasks[leaf.id], name, mode, pkg: isPackage ? fresh.tasks[target.id] : null, kindCfg, early })]);
   // file the session on what was spawned (the package or the task), not on a guess of
   // which leaf the agent will pick: leaves get it when the agent works on them (hook)
-  recordSession(root, planId, [target.id], name, kind);
+  recordSession(root, planId, [target.id], name, kind, pane);
   return { name, pane, mode, kind, agent, leaf: leaf.id, reason: lp.reason };
 }
 
@@ -275,7 +277,7 @@ export function recordSessionsForEvents(root, planId, events) {
     if (!byActor.has(rec)) byActor.set(rec, new Set());
     byActor.get(rec).add(e.task);
   }
-  for (const [rec, tasks] of byActor) recordSession(root, planId, [...tasks], rec.name, rec.kind);
+  for (const [rec, tasks] of byActor) recordSession(root, planId, [...tasks], rec.name, rec.kind, rec.pane);
 }
 
 // ---------- lifecycle sweep ----------
@@ -342,7 +344,7 @@ function sweepLocked(root) {
   const reg = readRegistry(); // snapshot; changes are written back per entry at the end
   const touched = new Set();
   const nudges = readJson('nudges.json');
-  const live = liveAgents();
+  const live = liveAgents(root); // this project's agents only: names repeat across projects
   const livePane = new Map([...live.values()].map((a) => [a.pane_id, a]));
   const now = Date.now();
 
@@ -362,7 +364,7 @@ function sweepLocked(root) {
       const att = planOpen ? attentionFor(s, actor.id, role) : [];
       // changes --fresh: a fresh agent takes the next attempt, so this one is closed and relaunched
       if (agent && rec && ['idle', 'done'].includes(agent.agent_status) && att.some((a) => s.tasks[a.task]?.fresh_next)) {
-        recordSession(root, s.id, workedThisLaunch(s, actor, rec), actor.id, rec.kind);
+        recordSession(root, s.id, workedThisLaunch(s, actor, rec), actor.id, rec.kind, agent.pane_id);
         herdr(['pane', 'close', agent.pane_id]);
         rec.pane = null;
         rec.closedAt = now;
@@ -391,7 +393,7 @@ function sweepLocked(root) {
             pending = true; // its first atf write fires the hook, which sweeps at once
             continue;
           }
-          if (nudges[nkey] !== attKey && herdr(['agent', 'prompt', agent.name, nudgeText(s, actor, att)])) {
+          if (nudges[nkey] !== attKey && herdr(['agent', 'prompt', agent.pane_id, nudgeText(s, actor, att)])) {
             nudges[nkey] = attKey;
             actions.push(`nudged ${actor.id}: ${attKey}`);
           }
@@ -411,7 +413,7 @@ function sweepLocked(root) {
           pending = true;
           continue;
         }
-        recordSession(root, s.id, workedThisLaunch(s, actor, rec), actor.id, rec.kind);
+        recordSession(root, s.id, workedThisLaunch(s, actor, rec), actor.id, rec.kind, agent.pane_id);
         herdr(['pane', 'close', agent.pane_id]);
         rec.pane = null;
         rec.idleSince = null;

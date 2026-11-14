@@ -104,9 +104,22 @@ export function sameServer(actor) {
 }
 
 /** Live agents of this server, by name. */
-export function liveAgents() {
+/**
+ * Is this herdr agent working in the project of `root`? Agent names repeat across
+ * projects (each may have a "coordinator"), so a name alone never identifies an actor:
+ * its directory must be the project's (or inside it, or a parent of it).
+ */
+export function inProject(agent, root) {
+  if (!root) return true;
+  const projDir = path.dirname(root);
+  const cwd = agent?.foreground_cwd || agent?.cwd;
+  return !cwd || cwd === projDir || cwd.startsWith(projDir + path.sep) || projDir.startsWith(cwd + path.sep);
+}
+
+/** Live named herdr agents by name; with `root`, only those working in that project. */
+export function liveAgents(root = null) {
   const m = new Map();
-  for (const a of herdr(['agent', 'list'])?.agents || []) if (a.name) m.set(a.name, a);
+  for (const a of herdr(['agent', 'list'])?.agents || []) if (a.name && inProject(a, root)) m.set(a.name, a);
   return m;
 }
 

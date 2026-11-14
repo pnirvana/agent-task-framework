@@ -5,7 +5,7 @@ actionable inside herdr. Optional: ATF itself does not depend on any of this.
 
 | feature | what you get |
 |---------|--------------|
-| **Task board** | interactive TUI as a full-height side column (`prefix+t`, toggle) or popup (`prefix+alt+t`); one scope for all tabs (all projects › project › plan): Overview, Tasks, Agents, Plan, Log |
+| **Task board** | interactive TUI as a full-height side column (`prefix+t`, toggle) or popup (`prefix+alt+t`); one scope for all tabs (all projects › project › plan): Overview, Tasks (as a tree or grouped by agent), Plan, Log |
 | **Agent pane labels** | each subagent's pane title becomes `T3 · Token endpoint`, with tokens `$atf_task`, `$atf_status` (`◐ in progress 40%`), `$atf_plan` |
 | **Sidebar progress** | workspace tokens `$atf_plan`, `$atf_progress` (`3/5 ✓ 1 ◐ 1 ⊘`) for the Spaces sidebar |
 | **Notifications** | herdr notification when a task becomes blocked, needs review, or fails, and when a plan finishes |
@@ -99,7 +99,7 @@ The board has one **scope**, shown as a breadcrumb in its header:
 `prefix+alt+t` start on the Overview of all projects (`"board_start": "plan"` in the
 plugin config makes `prefix+t` open the focused project's plan instead).
 
-Every tab shows its content for the scope (`Tab` / `0`–`4`):
+Every tab shows its content for the scope (`Tab` / `0`–`3`):
 
 - **Overview**: built for supervising several plans at once. Two sections, then the
   context of the selected row:
@@ -125,10 +125,12 @@ Every tab shows its content for the scope (`Tab` / `0`–`4`):
 - **Tasks**: at plan scope the task tree (with a needs-attention list and a preview of the
   selected task); at wider scopes one collapsible node per plan containing its tree
   (plans with open work start expanded). `▣ name` marks a work package, `↳name` an owner
-  inherited from the package.
-- **Agents**: per agent its packages and tasks with their path in the plan, live herdr
-  state and progress; at wider scopes grouped by project and plan, headed by how many
-  agents are live and working.
+  inherited from the package. `v` groups the tasks by agent instead: per agent a heading
+  with its live herdr state and pane, tasks done / total and when it last wrote, then its
+  work packages (▣) and tasks with their place in the plan; then the unassigned tasks
+  and how many are ready. `g` on a heading goes to that agent. (This replaces the former
+  Agents tab; the Overview's plan rows count the agents with open work: ⚙ working,
+  ! at a prompt, ◌ idle, · not running.)
 - **Plan**: one plan: goal, description, outcome, per-branch progress with owners,
   questions, decisions, warnings, blockers, artifacts. At wider scopes: one card per plan
   (goal, outcome, branch progress, counts); ←/→/space fold a card, `z` folds all, ⏎ opens
@@ -143,7 +145,8 @@ Rows always know their project and plan, so `g`, `s`, `a` and ⏎ work at any sc
 
 | key | action |
 |-----|--------|
-| `Tab` / `0`–`4` | switch view (`0` Overview) |
+| `Tab` / `0`–`3` | switch view: `0` Overview · `1` Tasks · `2` Plan · `3` Log |
+| `v` | Tasks: task tree ↔ grouped by agent |
 | `⏎` / `Esc` / `A` | narrow scope to the selected plan / widen / all projects |
 | `↑↓` / `jk`, PgUp/PgDn | select / scroll |
 | `←→` / `hl`, `space` | collapse / expand subtrees (`←` on a leaf jumps to its parent) |

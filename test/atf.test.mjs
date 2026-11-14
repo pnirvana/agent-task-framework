@@ -760,7 +760,7 @@ test('herdr board: the Log can be searched and filtered by plan', () => {
   run(['plan', 'new', 'Other plan']);
   run(['add', 'Unrelated']);
   const frames = JSON.parse(
-    execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '120', '30', JSON.stringify(['4', '/', ...'refund', '\r', '\x1b', 'p', ...'other', '\r'])], {
+    execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '120', '30', JSON.stringify(['3', '/', ...'refund', '\r', '\x1b', 'p', ...'other', '\r'])], {
       cwd: dir,
       env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
     }).toString(),
@@ -768,7 +768,7 @@ test('herdr board: the Log can be searched and filtered by plan', () => {
   const log = frames[1];
   assert.match(log, /plan all 2 plans/);
   assert.match(log, /Unrelated/);
-  const searched = frames[9]; // start, 4, /, six letters, ⏎
+  const searched = frames[9]; // start, 3 (Log), /, six letters, ⏎
   assert.match(searched, /search "refund"\s.*1 event/);
   assert.match(searched, /T1 blocked · which refund service\?/);
   assert.doesNotMatch(searched, /Unrelated|Docs/);
@@ -800,6 +800,58 @@ test('herdr board: the picker claims ctrl+h/j/k/l from pane-navigation plugins o
     fs.writeFileSync(marker, '1'); // a real Neovim's marker is never removed
     claimNavKeys(false);
     assert.equal(fs.readFileSync(marker, 'utf8'), '1');
+  } finally {
+    process.env = saved;
+  }
+});
+
+test('herdr board: Tasks groups by agent with v (the former Agents tab)', () => {
+  const { dir, env, run } = sandbox();
+  run(['add', 'API', '--assign', 'api']); // T1
+  run(['add', 'Payments', '--assign', 'pay']); // T2: a package
+  run(['add', 'Stripe', '--parent', 'T2']); // T3
+  run(['add', 'Docs']); // T4
+  run(['start', 'T1'], { ATF_ACTOR: 'api', ATF_ROLE: '' });
+  run(['done', 'T1', '-m', 'ok'], { ATF_ACTOR: 'api', ATF_ROLE: '' });
+  const [, , tree, byAgent] = JSON.parse(
+    execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '110', '30', JSON.stringify(['1', 'l', 'v'])], {
+      cwd: dir,
+      env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
+    }).toString(),
+  );
+  assert.match(tree, /0 Overview\s+1 Tasks\s+2 Plan\s+3 Log/, 'no Agents tab');
+  assert.match(tree, /▾T2 ◐? ?\S* ?Payments/);
+  assert.match(byAgent, /api\s.*1\/1/, 'agent heading with tasks done / total');
+  assert.match(byAgent, /api[^\n]*\n[^\n]*T1 ● API/);
+  assert.match(byAgent, /pay[^\n]*\n[^\n]*▣T2 [^\n]*Payments[^\n]*\n[^\n]*T3 ○ Stripe/, 'the package, then its tasks under it');
+  assert.doesNotMatch(byAgent, /▣ pay/, 'the heading names the agent once');
+  assert.match(byAgent, /unassigned\s+1 open · 1 ready\n[^\n]*T4 [^\n]*Docs/);
+});
+
+test('herdr sweep: never nudges a same-named agent of another project', async () => {
+  const { dir, run } = sandbox(); // the plan's coordinator is "lead"
+  run(['add', 'api', '--assign', 'be']); // T1
+  run(['start', 'T1'], { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' });
+  run(['block', 'T1', '-m', 'which db?'], { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' }); // the coordinator has work
+  const root = path.join(dir, '.atf');
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-state-'));
+  const calls = path.join(state, 'calls.log');
+  const fake = path.join(state, 'herdr');
+  // herdr knows an idle agent named "lead", but it works in another project's directory
+  const list = (cwd) => JSON.stringify({ result: { agents: [{ name: 'lead', pane_id: 'w9:p1', agent_status: 'idle', cwd }] } });
+  const script = (cwd) => `#!/bin/sh\necho "$@" >> '${calls}'\ncase "$1 $2" in\n  "agent list") echo '${list(cwd)}';;\n  *) echo '{"result":{}}';;\nesac\n`;
+  const saved = { ...process.env };
+  Object.assign(process.env, { HERDR_BIN_PATH: fake, HERDR_PLUGIN_STATE_DIR: state, ATF_REGISTRY: path.join(dir, 'registry.json') });
+  delete process.env.HERDR_SOCKET_PATH;
+  try {
+    const { lifecycleSweep } = await import('../adapters/herdr/lib/launch.mjs');
+    fs.writeFileSync(fake, script('/somewhere/else'), { mode: 0o755 });
+    lifecycleSweep(root);
+    assert.doesNotMatch(fs.readFileSync(calls, 'utf8'), /agent prompt/, 'the other project’s "lead" is left alone');
+    // the same agent working in this project is the coordinator and is nudged, by pane
+    fs.writeFileSync(fake, script(dir), { mode: 0o755 });
+    lifecycleSweep(root);
+    assert.match(fs.readFileSync(calls, 'utf8'), /agent prompt w9:p1 \[ATF\][^\n]*T1 blocked/);
   } finally {
     process.env = saved;
   }

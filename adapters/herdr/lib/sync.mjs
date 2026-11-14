@@ -31,7 +31,7 @@ function activePlans(root) {
  *  panes:      paneId -> { title, tokens } | null (clear)
  *  workspaces: wsId   -> tokens
  */
-export function desiredState(root, extraWorkspace, live = liveAgents()) {
+export function desiredState(root, extraWorkspace, live = liveAgents(root)) {
   const plans = activePlans(root);
   const current = getCurrentPlan(root);
   const panes = new Map();
