@@ -10,7 +10,7 @@ actionable inside herdr. Optional: ATF itself does not depend on any of this.
 | **Sidebar progress** | workspace tokens `$atf_plan`, `$atf_progress` (`3/5 ✓ 1 ◐ 1 ⊘`) for the Spaces sidebar |
 | **Notifications** | herdr notification when a task becomes blocked, needs review, or fails, and when a plan finishes |
 | **Stall detection** | board flags `stale?` when a task is in progress but its herdr agent has been idle > 90s (an agent that stopped without reporting) |
-| **Overview** | tab `0`: every plan in scope unfolded to its live slice (in progress, review, blocked, failed), plus an inbox of everything that needs you, oldest first; ⏎ opens the plan/task, `g` jumps to the agent or plan, `c` closes a plan |
+| **Overview** | tab `0`, where the board starts: what needs you (agents waiting for input, your reviews, finished plans), then per plan only the tasks being worked on with their latest progress; a context panel for the selected row; approve, request changes, reply, open the review artifact or jump to the agent's terminal with one key |
 | **Spawn** | `s` on a ready task or package (or `atf-herdr spawn T3`) places a pane in a balanced grid, starts the agent (pi by default; the atf skill is discovered once installed with `atf skill install`), assigns the task and sends the kickoff prompt |
 | **Reviews** | `a` / `x` / `n` on any task draft an approval, change request or note (`d` drops, `S` submits all at once: one write per plan, so the coordinator wakes once and each owner gets all its points). Tasks that ask you to test something show as `◎ for you` |
 | **Agent lifecycle** | ATF-launched agents are closed when idle with nothing to do and relaunched when work appears for them, resuming their earlier session when they return to a task they worked on |
@@ -95,17 +95,33 @@ Then `herdr server reload-config`.
 
 The board has one **scope**, shown as a breadcrumb in its header:
 `all projects › project › plan`. ⏎ on a plan narrows to it, Esc widens again
-(plan → project → all projects → quit), `A` jumps to all projects. `prefix+t` starts at
-the plan scope of the focused pane's project, `prefix+alt+t` at all projects.
+(plan → project → all projects → quit), `A` jumps to all projects. Both `prefix+t` and
+`prefix+alt+t` start on the Overview of all projects (`"board_start": "plan"` in the
+plugin config makes `prefix+t` open the focused project's plan instead).
 
 Every tab shows its content for the scope (`Tab` / `0`–`4`):
 
-- **Overview**: every plan in scope, unfolded by default to its *live slice*: tasks in
-  progress (owner, live agent state, %), in review, blocked or failed, each with its
-  parent path, plus a summary line of the rest (`✓ 5 done · ○ 3 todo (2 ready)`).
-  ←/→/space fold a plan (▸ folded, ▾ live, ▿ full tree), `z` folds/unfolds all. Below:
-  the inbox (reviews, questions, failures, stalled agents, finished plans), oldest first.
-  `c` closes the selected plan (press twice), `f` shows/hides closed plans in all tabs.
+- **Overview**: built for supervising several plans at once. Two sections, then the
+  context of the selected row:
+  - **Needs you**, most urgent first: an agent waiting at a dialog in its terminal
+    (`! prompt`), a coordinator that finished its turn and waits for you (`? input`, with
+    the last lines of its terminal), tasks whose reviewer is the human (`◎ review`), and
+    finished plans to close. Questions, failures, stalled agents and the coordinator's
+    own reviews appear here only when no coordinator runs for the plan; otherwise the
+    plan row counts them as queued. Each item has its message on a second line.
+  - **In flight**: one row per plan (progress, coordinator state, queued items), then
+    only the tasks being worked on now (in progress, reworked after a review, answered)
+    with their latest progress message, owner and agent state. A plan with nothing in
+    flight says why (`nothing in progress: 1 in review, 2 ready, not started`).
+  - **Context panel**: for a task the question, the review summary with acceptance
+    criteria and artifacts, the change request, or the latest progress and checkpoint;
+    for a waiting agent the tail of its terminal; for a plan its goal and branches.
+
+  Actions there are sent at once (no drafts): `a` approves, `x` requests changes, `r`
+  replies (answers a question, messages a task's owner, or types into the prompt of a
+  waiting coordinator), `o` opens the task's artifact (PR/URL in the browser, a branch
+  diff, commit or file in a new herdr tab "review T<n>"), `g` goes to the agent's
+  terminal, ⏎ opens the full task or plan (Esc comes back), `c` closes a plan.
 - **Tasks**: at plan scope the task tree (with a needs-attention list and a preview of the
   selected task); at wider scopes one collapsible node per plan containing its tree
   (plans with open work start expanded). `▣ name` marks a work package, `↳name` an owner
@@ -117,7 +133,9 @@ Every tab shows its content for the scope (`Tab` / `0`–`4`):
   questions, decisions, warnings, blockers, artifacts. At wider scopes: one card per plan
   (goal, outcome, branch progress, counts); ←/→/space fold a card, `z` folds all, ⏎ opens
   the plan's full details.
-- **Log**: events of all plans in scope, newest first, tagged with their plan.
+- **Log**: events of all plans in scope, newest first, tagged with their plan. `/` searches
+  as you type (every word must match; matches highlighted), `p` picks one plan of the
+  scope to filter by (the plan picker popup), Esc clears the filter. A filtered log searches each plan's whole history.
 
 Rows always know their project and plan, so `g`, `s`, `a` and ⏎ work at any scope.
 
@@ -132,9 +150,18 @@ Rows always know their project and plan, so `g`, `s`, `a` and ⏎ work at any sc
 | `⏎` | full task details (scrollable) |
 | `g` | focus the owning agent's pane (closes the popup) |
 | `s` | spawn a subagent for the selected ready task **or work package** |
-| `a` / `x` / `n` | review drafts: approve / request changes / note (text input) |
+| `a` / `x` / `r` | Overview: approve / request changes / reply, sent at once |
+| `o` | Overview: open the task's artifact (PR, branch diff, commit, file, URL) |
+| `a` / `x` / `n` | Tasks view and details: review drafts: approve / request changes / note |
 | `d` / `S` | drop the task's drafts / submit all drafts (press twice) |
-| `p` / `P` | next / previous plan |
+| `p` | plan picker: a popup listing every plan by project with its goal and state; typing filters it; ⏎ goes to the plan (in the Log: filters the log to it) |
+| `/` | Log: search |
+
+In the plan picker, `ctrl+j` / `ctrl+k` also move the selection. If a pane-navigation
+plugin such as [herdr-nvim-nav](https://github.com/aimdevlee/herdr-nvim-nav) binds
+ctrl+h/j/k/l in herdr, the board registers its pane with it the way Neovim does, but only
+while the picker is open, so the keys still move between panes the rest of the time.
+Elsewhere in the board use `j` / `k` or the arrow keys.
 | `?` | help |
 | `q` | close view / quit |
 
@@ -143,7 +170,7 @@ Rows always know their project and plan, so `g`, `s`, `a` and ⏎ work at any sc
 `$(herdr plugin config-dir atf.herdr)/config.json`:
 
 ```json
-{ "agent_kind": "pi", "board_placement": "auto" }
+{ "agent_kind": "pi", "board_placement": "auto", "board_start": "overview" }
 ```
 
 `board_placement`:
@@ -156,6 +183,9 @@ Rows always know their project and plan, so `g`, `s`, `a` and ⏎ work at any sc
   parked panes back. Tabs narrower than 110 columns get the board as its own tab.
 - `beside`: no rearranging; the board splits the tallest pane that has room.
 - `tab`: always its own tab.
+
+`board_start`: `overview` (default) opens the board on the Overview of all projects;
+`plan` opens the focused project's plan in the Tasks view.
 
 `prefix+t` toggles it per workspace either way; `prefix+alt+t` is the overview popup.
 

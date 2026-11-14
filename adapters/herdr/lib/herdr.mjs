@@ -40,6 +40,17 @@ export function herdrAsync(args) {
   });
 }
 
+/** Run a herdr command asynchronously; resolves to its plain-text stdout, or null on failure. */
+export function herdrText(args) {
+  return new Promise((resolve) => {
+    let out = '';
+    const p = spawn(herdrBin(), args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    p.stdout.on('data', (d) => (out += d));
+    p.on('error', () => resolve(null));
+    p.on('close', (code) => resolve(code === 0 ? out : null));
+  });
+}
+
 export const inHerdr = () => process.env.HERDR_ENV === '1';
 
 export function pluginContext() {
@@ -57,12 +68,15 @@ export function notify(title, body, sound = 'request') {
   herdr(args);
 }
 
-/** Map of herdr agents keyed by both agent name and pane id. */
+/** Map of herdr agents keyed by agent name, pane id, and `names:<name>` (all agents of that name). */
 export async function agentIndex() {
   const res = await herdrAsync(['agent', 'list']);
   const idx = new Map();
   for (const a of res?.agents || []) {
-    if (a.name) idx.set(`name:${a.name}`, a);
+    if (a.name) {
+      idx.set(`name:${a.name}`, a);
+      idx.set(`names:${a.name}`, [...(idx.get(`names:${a.name}`) || []), a]); // names may repeat across projects
+    }
     idx.set(`pane:${a.pane_id}`, a);
   }
   return idx;
@@ -167,4 +181,27 @@ export function isLiveBoard(p) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Let ctrl+h/j/k/l reach this pane while `on`. Pane-navigation plugins like
+ * herdr-nvim-nav bind those keys in herdr and forward them only to panes that registered
+ * as Neovim: a file named after the pane holding the owner's pid. The board registers
+ * while a list wants ctrl+j/ctrl+k (the plan picker), so they still move between panes
+ * otherwise. A no-op outside herdr or without such a plugin.
+ */
+export function claimNavKeys(on) {
+  const pane = process.env.HERDR_PANE_ID;
+  if (!pane) return;
+  const file = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'herdr', 'nvim-panes', pane);
+  try {
+    if (on) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, String(process.pid));
+      if (!claimNavKeys.hooked) {
+        claimNavKeys.hooked = true;
+        process.on('exit', () => claimNavKeys(false));
+      }
+    } else if (fs.readFileSync(file, 'utf8').trim() === String(process.pid)) fs.rmSync(file, { force: true });
+  } catch {}
 }

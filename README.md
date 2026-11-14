@@ -182,7 +182,8 @@ they already worked on) when work appears. Details: [adapters/herdr/README.md](a
 
 **herdr plugin** (`herdr plugin link <repo>/adapters/herdr`): a task board (`prefix+t`, a
 full-height side column; `prefix+alt+t`, a popup) with one scope for all tabs
-(all projects › project › plan), an Overview of what is moving and what needs you,
+(all projects › project › plan), an Overview of what needs you and what is being worked on
+(approve, request changes, answer and open the review artifact right there),
 agent panes labelled with their task, plan progress in the sidebar, notifications, stalled-agent
 detection and the agent lifecycle. See [adapters/herdr/README.md](adapters/herdr/README.md).
 

@@ -719,3 +719,88 @@ test('e2e findings: review permissions, answered questions, fresh is one-shot, p
   run(['start', 'T2'], bob);
   assert.match(runFail(['block', 'T2', '-m', 'w', '--on', 'T1'], bob).error, /already done/);
 });
+
+test('herdr board: the Overview lists what needs the human and acts on it directly', () => {
+  const { dir, env, run } = sandbox();
+  run(['add', 'Cart API', '--reviewer', 'human', '--assign', 'api', '--accept', 'tests pass']); // T1
+  run(['add', 'Order model', '--assign', 'be']); // T2
+  run(['add', 'Docs']); // T3
+  run(['start', 'T1'], { ATF_ACTOR: 'api', ATF_ROLE: '' });
+  run(['artifact', 'T1', 'feature/cart', '--kind', 'branch'], { ATF_ACTOR: 'api', ATF_ROLE: '' });
+  run(['review', 'T1', '-m', 'cart endpoints with 14 tests', '--by', 'human'], { ATF_ACTOR: 'api', ATF_ROLE: '' });
+  run(['start', 'T2'], { ATF_ACTOR: 'be', ATF_ROLE: '' });
+  run(['progress', 'T2', 'migrations written, now the repository'], { ATF_ACTOR: 'be', ATF_ROLE: '' });
+  const render = (keys) =>
+    JSON.parse(
+      execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '120', '40', JSON.stringify(keys)], {
+        cwd: dir,
+        env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
+      }).toString(),
+    );
+  const [first, approved] = render(['a']);
+  const needs = first.slice(first.indexOf('NEEDS YOU'), first.indexOf('IN FLIGHT'));
+  assert.match(needs, /◎ review\s+T1 Cart API/);
+  assert.match(needs, /cart endpoints with 14 tests/, 'its message is right under it');
+  const flight = first.slice(first.indexOf('IN FLIGHT'));
+  assert.match(flight, /T2 Order model\s+migrations written, now the repository/, 'current work with its latest progress');
+  assert.doesNotMatch(flight.split('───')[0], /T3 Docs/, 'tasks nobody works on stay out of the overview');
+  assert.match(first, /artifacts[\s\S]*branch\s+feature\/cart/, 'context panel shows what to review');
+  assert.match(first, /a approve\s+x changes/);
+  assert.match(approved, /approved T1: done/);
+  assert.equal(run(['show', 'T1']).status, 'done', 'a approves at once, as the human');
+  assert.equal(run(['show', 'T1']).history.at(-1).actor, 'human');
+});
+
+test('herdr board: the Log can be searched and filtered by plan', () => {
+  const { dir, env, run } = sandbox();
+  run(['add', 'Stripe adapter', '--assign', 'pay']); // T1
+  run(['add', 'Docs']); // T2
+  run(['start', 'T1'], { ATF_ACTOR: 'pay', ATF_ROLE: '' });
+  run(['block', 'T1', '-m', 'which refund service?'], { ATF_ACTOR: 'pay', ATF_ROLE: '' });
+  run(['plan', 'new', 'Other plan']);
+  run(['add', 'Unrelated']);
+  const frames = JSON.parse(
+    execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '120', '30', JSON.stringify(['4', '/', ...'refund', '\r', '\x1b', 'p', ...'other', '\r'])], {
+      cwd: dir,
+      env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
+    }).toString(),
+  );
+  const log = frames[1];
+  assert.match(log, /plan all 2 plans/);
+  assert.match(log, /Unrelated/);
+  const searched = frames[9]; // start, 4, /, six letters, ⏎
+  assert.match(searched, /search "refund"\s.*1 event/);
+  assert.match(searched, /T1 blocked · which refund service\?/);
+  assert.doesNotMatch(searched, /Unrelated|Docs/);
+  const cleared = frames[10];
+  assert.match(cleared, /search —/, 'esc clears the search');
+  const picker = frames[11];
+  assert.match(picker, /┌─+┐/, 'p opens the plan picker as a popup');
+  assert.match(picker, /log of plan\s+2 plans/);
+  assert.match(picker, /all plans[\s\S]*(Other plan[\s\S]*Test plan|Test plan[\s\S]*Other plan)/, 'every plan is listed without typing');
+  assert.doesNotMatch(frames[16], /Test plan/, 'typing narrows the picker');
+  const onePlan = frames[17];
+  assert.match(onePlan, /plan Other plan \(p\)/, 'the picked plan filters the log');
+  assert.match(onePlan, /Unrelated/);
+  assert.doesNotMatch(onePlan, /Docs|refund/, 'only that plan’s events');
+});
+
+test('herdr board: the picker claims ctrl+h/j/k/l from pane-navigation plugins only while open', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-nav-'));
+  const saved = { ...process.env };
+  Object.assign(process.env, { XDG_CACHE_HOME: dir, HERDR_PANE_ID: 'w1:p7' });
+  try {
+    const { claimNavKeys } = await import('../adapters/herdr/lib/herdr.mjs');
+    const marker = path.join(dir, 'herdr', 'nvim-panes', 'w1:p7'); // herdr-nvim-nav's "this pane is Neovim" file
+    claimNavKeys(true);
+    assert.equal(fs.readFileSync(marker, 'utf8'), String(process.pid));
+    claimNavKeys(false);
+    assert.equal(fs.existsSync(marker), false);
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, '1'); // a real Neovim's marker is never removed
+    claimNavKeys(false);
+    assert.equal(fs.readFileSync(marker, 'utf8'), '1');
+  } finally {
+    process.env = saved;
+  }
+});

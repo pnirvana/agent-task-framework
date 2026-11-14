@@ -223,6 +223,7 @@ function toggleBoard(placement, start) {
   const entry = placement === 'popup' ? 'board-popup' : 'board';
   const args = ['plugin', 'pane', 'open', '--plugin', PLUGIN_ID, '--entrypoint', entry, '--cwd', dir, '--env', root ? `ATF_DIR=${root}` : `ATF_INIT_DIR=${dir}`];
   if (target) args.push('--env', `ATF_HERDR_TARGET_PANE=${target}`);
+  start ??= pluginConfig().board_start; // "plan": open the project's plan instead of the Overview
   if (start) args.push('--env', `ATF_BOARD_START=${start}`);
   if (placement === 'popup') args.push('--placement', 'popup', '--width', '90%', '--height', '85%');
   else {
