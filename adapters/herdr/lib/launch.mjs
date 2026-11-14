@@ -171,7 +171,7 @@ export function buildPrompt({ s, t, name, mode, pkg, kindCfg, early = false }) {
 }
 
 // ---------- launching ----------
-function recordSession(root, planId, taskIds, name, kind) {
+export function recordSession(root, planId, taskIds, name, kind) {
   const a = herdr(['agent', 'get', name])?.agent;
   const ref = a?.agent_session?.value;
   if (!ref || !taskIds.length) return null;
@@ -251,8 +251,28 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
   }
   const fresh = loadPlan(root, planId);
   herdr(['agent', 'prompt', name, buildPrompt({ s: fresh, t: fresh.tasks[leaf.id], name, mode, pkg: isPackage ? fresh.tasks[target.id] : null, kindCfg, early })]);
-  recordSession(root, planId, [leaf.id], name, kind);
+  // file the session on what was spawned (the package or the task), not on a guess of
+  // which leaf the agent will pick: leaves get it when the agent works on them (hook)
+  recordSession(root, planId, [target.id], name, kind);
   return { name, pane, mode, kind, agent, leaf: leaf.id, reason: lp.reason };
+}
+
+/**
+ * Called from the ATF hook for each write: when an agent ATF launched changes the status
+ * of a task (starts, blocks, submits, finishes it), file its session on that task, so a
+ * later relaunch of that task resumes the session that actually worked on it.
+ */
+export function recordSessionsForEvents(root, planId, events) {
+  const reg = readRegistry();
+  const byActor = new Map();
+  for (const e of events) {
+    if (e.type !== 'task.status' || !e.task || !e.actor?.id) continue;
+    const rec = reg[regKey(root, e.actor.id)];
+    if (!rec || (rec.socket && currentSocket() && rec.socket !== currentSocket())) continue;
+    if (!byActor.has(rec)) byActor.set(rec, new Set());
+    byActor.get(rec).add(e.task);
+  }
+  for (const [rec, tasks] of byActor) recordSession(root, planId, [...tasks], rec.name, rec.kind);
 }
 
 // ---------- lifecycle sweep ----------

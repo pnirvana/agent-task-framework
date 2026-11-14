@@ -58,7 +58,8 @@ Tasks (coordinator)
                   [--label L]... [--priority N] [--assign WHO] [--resume auto|resume|fresh]
                   [--agent NAME]   agent definition to run the task with (e.g. reviewer)
                   [--from T3]      follow-up of T3 (scope found in review); placed under T3's
-                                   parent, not assigned to T3's assignee (use --assign)
+                                   parent; copies nothing else from T3 (not its assignee,
+                                   --agent, --review, labels): pass what it needs
                   [--review]       must go to review before done (--review=false clears it)
                   [--reviewer human]  who must review it (default: the coordinator; implies --review)
   atf edit <task> [same flags as add; --dep/--accept/--label replace lists]
@@ -82,8 +83,10 @@ Tasks (worker)
   atf block <task> -m <reason> [--on T8,T9]
                                         needs help / input. --on: blocked on other tasks;
                                         becomes resumable automatically when they are done
-  atf review <task> -m <summary>        ready for coordinator review
-  atf done <task> -m <summary>          (tasks added with --review: atf review instead)
+  atf done <task> -m <summary>          criteria met and verified by you (the normal ending)
+  atf review <task> -m <summary>        someone must check it first: required for --review
+                                        tasks; else for unverifiable criteria, deviations,
+                                        risky changes, proposals
   atf fail <task> -m <reason>
   atf feedback approve|change|note <task> ["text"] [--file F --line N]
                                         draft review feedback (nothing is sent yet)
@@ -356,7 +359,8 @@ function renderStatus(state) {
   ].filter((l) => l !== null);
   const attention = state.order
     .map((id) => state.tasks[id])
-    .filter((t) => t.status === 'blocked' || t.status === 'review');
+    // a task blocked --on other tasks just waits for them (its owner is woken): not a matter for anyone
+    .filter((t) => (t.status === 'blocked' && !t.blocked_on.length) || t.status === 'review');
   if (attention.length) {
     lines.push('', bold('needs attention:'));
     for (const t of attention) lines.push(`  ${t.id} ${badge(t.status)} ${t.last_message || ''}`);
@@ -412,7 +416,7 @@ function renderTask(t, state) {
   if (t.rollup_percent != null) L.push(`progress: ${t.rollup_percent}% (rolled up)`);
   if (t.feedback?.length) {
     const fb = t.feedback[t.feedback.length - 1];
-    L.push('', (t.changes_requested ? magenta(bold('changes requested')) : bold('last review feedback')) + dim(` (round ${fb.round} of ${t.feedback.length}, ${fb.actor ?? '?'}):`), fb.message);
+    L.push('', (t.changes_requested ? magenta(bold('changes requested')) : bold('last review feedback')) + dim(` (round ${fb.round}, ${fb.actor ?? '?'}):`), fb.message);
   }
   if (t.description) L.push('', t.description);
   if (t.acceptance.length) L.push('', bold('acceptance criteria:'), ...t.acceptance.map((a) => `  - [${t.status === 'done' ? 'x' : ' '}] ${a}`));
@@ -941,7 +945,9 @@ const commands = {
           ((isCoord && e.type === 'task.status' && ['done', 'failed', 'review'].includes(e.data?.status)) ||
             (isCoord && e.type === 'task.status' && e.data?.status === 'blocked' && !e.data?.on?.length) ||
             (isCoord && e.type === 'plan.review') ||
-            (e.task && st.tasks[e.task]?.owner === actor.id && ['task.status', 'task.note', 'task.assigned', 'task.updated'].includes(e.type))),
+            // events on tasks this actor owns; an approval (done by someone else) leaves it
+            // nothing to do, so it is not reported (cancel/fail by others are: stop working)
+            (e.task && st.tasks[e.task]?.owner === actor.id && ['task.status', 'task.note', 'task.assigned', 'task.updated'].includes(e.type) && !(e.type === 'task.status' && e.data?.status === 'done'))),
       );
       if (attention.length || hits.length) return finish(st, attention, hits);
       if (isCoord && leaves(st).length && leaves(st).every((t) => TERMINAL.has(t.status))) return finish(st, [], [], 'all tasks are finished');

@@ -80,6 +80,10 @@ test('fold is lenient: unknown types and tasks', () => {
 test('rollupStatus', () => {
   assert.equal(rollupStatus(['done', 'todo']), 'in_progress');
   assert.equal(rollupStatus(['blocked', 'in_progress']), 'blocked');
+  // blocked --on another task is waiting, not a question: the package is still in progress
+  assert.equal(rollupStatus([{ status: 'blocked', waiting: true }, { status: 'in_progress', waiting: false }]), 'in_progress');
+  assert.equal(rollupStatus([{ status: 'blocked', waiting: true }, { status: 'todo', waiting: false }]), 'in_progress');
+  assert.equal(rollupStatus([{ status: 'blocked', waiting: true }, { status: 'done', waiting: false }]), 'blocked', 'all that is left waits');
   assert.equal(rollupStatus(['done', 'review']), 'review');
   assert.equal(rollupStatus(['todo', 'todo']), 'todo');
 });
@@ -600,6 +604,63 @@ test('herdr board: a restored "ATF board" pane without a running board is not a 
     child.kill();
     await new Promise((r) => child.on('exit', r));
     assert.equal(isLiveBoard(pane), false, 'board process gone');
+  } finally {
+    process.env = saved;
+  }
+});
+
+test('rollup: a package with one task in progress and one blocked --on it is in progress', () => {
+  const { run } = sandbox();
+  run(['add', 'pkg', '--assign', 'be']); // T1
+  run(['add', 'api', '--parent', 'T1']); // T2
+  run(['add', 'tests', '--parent', 'T1']); // T3
+  const be = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
+  run(['start', 'T2'], be);
+  run(['start', 'T3'], be);
+  run(['block', 'T3', '-m', 'needs the api', '--on', 'T2'], be);
+  assert.equal(run(['show', 'T1']).rollup_status, 'in_progress');
+  run(['block', 'T2', '-m', 'which auth scheme?'], be); // a question: now it is blocked
+  const t1 = run(['show', 'T1']);
+  assert.equal(t1.rollup_status, 'blocked');
+  assert.equal(t1.rollup_waiting, false);
+});
+
+test('wait: an owner is not woken by the approval of its own task', () => {
+  const { run, runFail } = sandbox();
+  run(['add', 'a', '--assign', 'be']); // T1
+  run(['add', 'b', '--assign', 'be']); // T2: keeps be with an open task
+  const be = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
+  run(['start', 'T1'], be);
+  run(['review', 'T1', '-m', 'check it'], be);
+  run(['start', 'T2'], be);
+  run(['done', 'T1', '-m', 'approved']); // coordinator
+  assert.equal(runFail(['wait', '--timeout', '800'], be).timeout, true, 'approval is not news to act on');
+  run(['cancel', 'T2', '-m', 'not needed']); // but a cancel is: stop working on it
+  const r = run(['wait', '--timeout', '2000'], be);
+  assert.ok(r.note === 'you own no open tasks' || r.events.some((e) => e.task === 'T2' && e.data.status === 'cancelled'));
+});
+
+test('herdr sessions: filed on the tasks a launched agent works on, not on a guessed leaf', async () => {
+  const { dir, run } = sandbox();
+  run(['add', 'pkg', '--assign', 'be']); // T1
+  run(['add', 'a', '--parent', 'T1']); // T2
+  run(['add', 'b', '--parent', 'T1']); // T3
+  const root = path.join(dir, '.atf');
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-state-'));
+  const fake = path.join(state, 'herdr');
+  fs.writeFileSync(fake, '#!/bin/sh\necho \'{"result":{"agent":{"agent_session":{"value":"sess-1"}}}}\'\n', { mode: 0o755 });
+  const { getCurrentPlan, readEvents } = await import('../src/store.mjs');
+  const planId = getCurrentPlan(root);
+  fs.writeFileSync(path.join(state, 'agents.json'), JSON.stringify({ [`${root}#be`]: { name: 'be', kind: 'pi', root, plan: planId } }));
+  const saved = { ...process.env };
+  Object.assign(process.env, { HERDR_BIN_PATH: fake, HERDR_PLUGIN_STATE_DIR: state, ATF_REGISTRY: path.join(dir, 'registry.json') });
+  delete process.env.HERDR_SOCKET_PATH;
+  try {
+    const { recordSessionsForEvents } = await import('../adapters/herdr/lib/launch.mjs');
+    run(['start', 'T3'], { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' }); // the agent picked T3
+    recordSessionsForEvents(root, planId, readEvents(root, planId));
+    assert.equal(run(['show', 'T3']).sessions.be?.ref, 'sess-1');
+    assert.equal(run(['show', 'T2']).sessions.be, undefined, 'not on a task it did not touch');
   } finally {
     process.env = saved;
   }

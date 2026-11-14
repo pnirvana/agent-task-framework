@@ -130,7 +130,7 @@ atf done T2 -m "approved: tests pass, edge cases covered"       # meets its crit
 atf changes T2 -m "1. return 401 on bad password 2. add a test"  # send back with feedback
 atf changes T2 -m "use the existing auth service" --fresh        # wrong approach: clean restart
 atf add "Rate-limit /login" --from T2 --accept "5/min per IP"    # extra scope found in review
-#   (placed under T2's parent; add --assign to give it to T2's agent)
+#   (placed under T2's parent; nothing else is copied: add --assign, --agent, --review as needed)
 ```
 
 Reviewing several tasks at once (e.g. as the human, or comments forwarded from an editor):

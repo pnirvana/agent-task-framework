@@ -6,12 +6,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchPlan } from '../../src/core.mjs';
-import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig, skillInstalled } from '../../src/store.mjs';
+import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig, skillInstalled, readEvents } from '../../src/store.mjs';
 import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isBoardPane, isLiveBoard } from './lib/herdr.mjs';
 import { sync, notifyForEvents } from './lib/sync.mjs';
 import { chooseBoardSplit, tabLayout, planRebuild, withPlacementLock } from './lib/layout.mjs';
 import { discoverAgents, resolveAgentDef, piArgsForAgent } from './lib/agents.mjs';
-import { agentKinds, launchAgent, lifecycle, lifecycleSweep, stateDir } from './lib/launch.mjs';
+import { agentKinds, launchAgent, lifecycle, lifecycleSweep, stateDir, recordSessionsForEvents } from './lib/launch.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SELF = path.join(HERE, 'atf-herdr.mjs');
@@ -429,8 +429,12 @@ function hook() {
   const { actions, soon } = lifecycleSweep(root);
   if (actions.length) sync(root);
   scheduleSweep(root, soon ? SOON_S : 20);
-  if ((process.env.ATF_HOOK_TYPES || '').split(',').includes('task.status'))
-    notifyForEvents(root, plan, Number(process.env.ATF_HOOK_FROM_SEQ), Number(process.env.ATF_HOOK_TO_SEQ));
+  if ((process.env.ATF_HOOK_TYPES || '').split(',').includes('task.status')) {
+    const from = Number(process.env.ATF_HOOK_FROM_SEQ);
+    const to = Number(process.env.ATF_HOOK_TO_SEQ);
+    recordSessionsForEvents(root, plan, readEvents(root, plan).filter((e) => e.seq >= from && e.seq <= to));
+    notifyForEvents(root, plan, from, to);
+  }
 }
 
 // ---------- dispatch ----------

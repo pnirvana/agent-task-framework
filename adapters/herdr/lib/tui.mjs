@@ -619,7 +619,13 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const blocked = s.order.map((id) => s.tasks[id]).filter((t) => t.status === 'blocked');
     if (blocked.length) {
       L.push([], [[' blocked', 'bold red']]);
-      for (const t of blocked) L.push([[`  ${t.id} `, 'bold'], [t.last_message || t.title, 'red']]);
+      // question-blocks need someone; blocks --on other tasks only wait for them
+      for (const t of blocked)
+        L.push(
+          t.blocked_on.length
+            ? [[`  ${t.id} `, 'bold'], [t.can_resume ? 'can resume ' : `⧗ on ${t.blocked_on.join(',')} `, t.can_resume ? 'green' : 'dim'], [t.last_message || t.title, 'dim']]
+            : [[`  ${t.id} `, 'bold'], [t.last_message || t.title, 'red']],
+        );
     }
     const arts = s.order.flatMap((id) => s.tasks[id].artifacts.map((x) => ({ ...x, task: id })));
     if (arts.length) {

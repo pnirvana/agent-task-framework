@@ -65,9 +65,18 @@ For each task:
 5. Record decisions others need to know: `atf note T3 "chose cookie sessions (no redis)" --kind decision`
 6. Finish with exactly one of:
    - `atf done T3 -m "<what was done, where, how verified>"`: all acceptance criteria met
-   - `atf review T3 -m "<summary + what to check>"`: done, but needs coordinator sign-off.
-     **Required** when `atf show T3` says `review: required` or names a reviewer: such a
-     task cannot be marked done by you (`atf done` refuses).
+     **and you verified each one yourself** (tests run, output checked). This is the
+     normal ending for a well-specified task.
+   - `atf review T3 -m "<summary + what to check>"`: the work is finished, but someone
+     else has to look before it counts as done. **Required** when `atf show T3` says
+     `review: required` or names a reviewer (`atf done` refuses then). Otherwise use it
+     only when one of these holds, and say which in the message:
+     - a criterion is one you cannot verify yourself (needs judgement, another system, a person);
+     - you deviated from the task or its criteria, or made a decision the coordinator should confirm;
+     - the change is risky for others: shared interfaces, data migrations, deletions;
+     - the result is a proposal or options for the coordinator to choose from.
+     Not "to be safe": every review costs the coordinator a round, so when the criteria
+     are met and checked, finish with done. Needs the human? See step 9.
    - `atf block T3 -m "<precise question or missing input>"`: cannot continue without help
    - `atf fail T3 -m "<what was tried, why it failed>"`: cannot be done as specified
 7. If blocked on a question (no `--on`): write a checkpoint first, then block, and stop
@@ -181,7 +190,10 @@ instead of your transcript, so make it self-contained.
      It does **not** take over T4's own assignee: if T4 was assigned directly (or has no
      parent), the follow-up starts unassigned. Dispatch it like any new task, or pass
      `--assign <agent>` (e.g. T4's owner, to reuse its context) or `--parent` to place it
-     elsewhere. Do not reopen or stretch a task beyond its acceptance criteria.
+     elsewhere. Nothing else is copied from T4 either: not its agent definition
+     (`--agent`; only a work package's agent applies to everything in it), reviewer or
+     `--review`, labels, priority or dependencies. Pass what the follow-up needs.
+     Do not reopen or stretch a task beyond its acceptance criteria.
    - **The criteria themselves were wrong** → fix them first
      (`atf edit T4 --accept "…"`, which replaces the list), then request changes.
    - **Cannot be done as specified** → `atf cancel T4 -m why` and re-plan.

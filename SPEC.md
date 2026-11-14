@@ -165,7 +165,8 @@ subtasks inside its package.
 | `owner` | `assignee`, else the nearest assigned ancestor (work package owner) |
 | `waiting_on` | deps whose effective status is not `done` |
 | `ready` | `status == todo && waiting_on == [] && children == []` |
-| `rollup_status` | parents only, derived from children (see `rollupStatus()`) |
+| `rollup_status` | parents only, derived from children (see `rollupStatus()`): `failed` if any child failed; `blocked` if a child is question-blocked, or if everything still open is blocked `--on` other tasks; a child blocked `--on` next to other open work counts as in progress |
+| `rollup_waiting` | parents only: `blocked` only because of `--on` waits, no question |
 | `rollup_percent` | parents only, mean of leaf percents (cancelled excluded) |
 | `percent` | last reported percent; `100` on done; reset on `todo` |
 | `last_message` | last status/progress message |
@@ -254,7 +255,9 @@ submitted, approved, failed or cancelled). The owner's attention reason is then
 `changes` instead of `ready`. Work found in review beyond a task's acceptance criteria is
 a new task with `origin` pointing at the reviewed one (derived reverse link: `followups`);
 it defaults to the origin's parent, so it inherits an owner only through an assigned work
-package. It never copies the origin's own `assignee`.
+package. Nothing else is copied from the origin: not its `assignee`, `agent`, `reviewer`,
+`review`, labels, priority or deps. Launchers that fall back to a work package's `agent`
+apply that to a follow-up in the package like to any task in it.
 
 **Reviewers and batch reviews.** A task's `reviewer` (null = the coordinator) says who
 must approve it; a subagent can set it when submitting (`atf review … --by human`).
@@ -278,7 +281,8 @@ about a task is not reported if the actor wrote anything about that task after i
 was handled, e.g. after being woken by a message). `--since SEQ` overrides the start.
 Relevant events, by others: for a coordinator, `task.status` to done, failed or review,
 to blocked only without `on` (a dependency block is the owner's business), and
-`plan.review`; for any actor, status, note, assignment and update events on tasks it owns.
+`plan.review`; for any actor, status, note, assignment and update events on tasks it owns,
+except a status change to done (an approval leaves the owner nothing to act on).
 Attention items are level-triggered and repeat until resolved.
 
 **Launcher contract.** A launcher (e.g. the herdr adapter) that starts agents:

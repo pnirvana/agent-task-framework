@@ -198,7 +198,9 @@ then discovers it itself:
 ```
 
 The session reference comes from herdr (`agent_session` of the agent's pane), so it works
-for any agent kind herdr integrates. A kind without `resume` always starts fresh.
+for any agent kind herdr integrates. It is filed on the spawned task (a package or a single
+task) at launch, on each task the agent starts, blocks or finishes (via the ATF hook), and
+on all tasks it touched when its pane is closed. A kind without `resume` always starts fresh.
 The pi entry is verified; the claude/codex resume arguments are untested defaults.
 
 ### Named agent definitions

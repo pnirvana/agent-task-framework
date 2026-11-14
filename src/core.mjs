@@ -235,12 +235,20 @@ export function derive(plan) {
     if (!t.children.length) return leafPct(t);
     const vals = t.children.map((c) => rollup(tasks[c])).filter((v) => v !== null);
     t.rollup_percent = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
-    t.rollup_status = rollupStatus(t.children.map((c) => tasks[c].rollup_status ?? tasks[c].status));
+    // a child blocked `--on` other tasks is waiting, not stuck on a question (same for a
+    // sub-package whose blocked rollup only comes from such waits)
+    const kids = t.children.map((c) => {
+      const k = tasks[c];
+      return k.children.length ? { status: k.rollup_status, waiting: !!k.rollup_waiting } : { status: k.status, waiting: k.status === 'blocked' && k.blocked_on.length > 0 };
+    });
+    t.rollup_status = rollupStatus(kids);
+    t.rollup_waiting = t.rollup_status === 'blocked' && !kids.some((k) => k.status === 'blocked' && !k.waiting);
     return t.rollup_percent;
   };
   for (const t of Object.values(tasks)) {
     delete t.rollup_status;
     delete t.rollup_percent;
+    delete t.rollup_waiting;
   }
   for (const id of plan.order) if (!tasks[id].parent || !tasks[tasks[id].parent]) rollup(tasks[id]);
 
@@ -393,13 +401,24 @@ export function inferRole(plan, actorId) {
   return { role: 'agent', source: 'default (not the plan\'s coordinator, no ATF_ROLE)' };
 }
 
-/** Status of a parent task derived from its children's (effective) statuses. */
-export function rollupStatus(ss) {
+/**
+ * Status of a parent task derived from its children's (effective) statuses. Items are
+ * statuses or {status, waiting}; `waiting` marks a child blocked on other tasks
+ * (`block --on`) rather than on a question. Such a child counts as work in progress;
+ * the parent is blocked only by a question-block, or when everything still open in it
+ * is waiting.
+ */
+export function rollupStatus(items) {
+  const xs = items.map((x) => (typeof x === 'string' ? { status: x, waiting: false } : x));
+  const ss = xs.map((x) => x.status);
   if (!ss.length) return 'todo';
   if (ss.every((s) => s === 'cancelled')) return 'cancelled';
   if (ss.every((s) => s === 'done' || s === 'cancelled')) return 'done';
   if (ss.includes('failed')) return 'failed';
-  if (ss.includes('blocked')) return 'blocked';
+  if (xs.some((x) => x.status === 'blocked' && !x.waiting)) return 'blocked';
+  const open = xs.filter((x) => !TERMINAL.has(x.status));
+  if (open.length && open.every((x) => x.status === 'blocked')) return 'blocked'; // all of it waits
+  if (ss.includes('blocked')) return 'in_progress'; // some of it waits, the rest goes on
   if (ss.every((s) => s === 'todo')) return 'todo';
   if (ss.every((s) => TERMINAL.has(s) || s === 'review')) return 'review';
   return 'in_progress';
