@@ -259,13 +259,18 @@ package. Nothing else is copied from the origin: not its `assignee`, `agent`, `r
 `review`, labels, priority or deps. Launchers that fall back to a work package's `agent`
 apply that to a follow-up in the package like to any task in it.
 
+**The human.** The person driving the agents writes as the actor `human` (role `human`):
+frontends do so, and on the command line `--as human`. Not as their user name, which
+is the default identity of an agent started by hand without `ATF_ACTOR` (e.g. the
+coordinator), so their writes are not taken for that agent's own.
+
 **Reviewers and batch reviews.** A task's `reviewer` (null = the coordinator) says who
 must approve it; a subagent can set it when submitting (`atf review … --by human`).
 A task with `review: true`, or with a reviewer other than the coordinator, *needs
 review*: the owner finishes with `review` and cannot approve its own work. Review
 decisions (approve = done from review, request changes, reopen from review, and
 approvals/change requests in a feedback batch) belong to the reviewer: a named reviewer
-alone (`human` = an actor with role `human`), otherwise the coordinator or the human
+alone (`human` = the actor `human`, or role `human`), otherwise the coordinator or the human
 (`reviewRefusal`). Writers refuse other actors unless forced. Agents (role other than
 coordinator/human) may only change, release or split (`add --parent`) tasks they own.
 Requesting changes in a plan that is not active reactivates it. `changes --fresh` marks

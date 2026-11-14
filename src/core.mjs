@@ -3,6 +3,12 @@
 
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * The person driving the agents acts as this actor (the board does; on the command line
+ * `--as human`), so their writes are never mistaken for the coordinator's: a coordinator
+ * started by hand defaults to the user's name too, and a wait skips the actor's own events.
+ */
+export const HUMAN = 'human';
 export const PLAN_STATUSES = ['active', 'paused', 'completed', 'failed', 'cancelled'];
 export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'review', 'done', 'failed', 'cancelled'];
 export const TERMINAL = new Set(['done', 'failed', 'cancelled']);
@@ -395,14 +401,15 @@ export function launchPlan(plan, taskId, actorId = null) {
 
 /**
  * May `actor` ({id, role}) decide on a review of task `t` (approve it, request changes,
- * reopen it)? A named reviewer decides alone ('human' = any actor with role human);
+ * reopen it)? A named reviewer decides alone ('human' = the actor "human", or any actor
+ * with role human);
  * otherwise the coordinator, or the human. Returns null if allowed, else the reason.
  */
 export function reviewRefusal(t, actor) {
   const named = t.reviewer && t.reviewer !== 'coordinator' ? t.reviewer : null;
   if (named) {
     if (actor.id === named || (named === 'human' && actor.role === 'human')) return null;
-    return `${t.id} is reviewed by ${named}${named === 'human' ? ' (on the board, or `ATF_ROLE=human atf feedback approve|change`)' : ''}, not by ${actor.id}`;
+    return `${t.id} is reviewed by ${named}${named === 'human' ? ' (on the board, or `atf feedback approve|change … --as human`)' : ''}, not by ${actor.id}`;
   }
   if (actor.role === 'coordinator' || actor.role === 'human') return null;
   return `only the coordinator (or the human) reviews ${t.id}`;
@@ -414,6 +421,7 @@ export function reviewRefusal(t, actor) {
  * in earlier events; otherwise 'agent'. Returns {role, source}.
  */
 export function inferRole(plan, actorId) {
+  if (actorId === HUMAN) return { role: 'human', source: 'the human (actor "human")' };
   if (plan?.coordinator && plan.coordinator === actorId) return { role: 'coordinator', source: 'recorded as this plan\'s coordinator' };
   const known = plan?.actors?.[actorId];
   const prev = known && !known.role_inferred ? known.role : null; // only roles the actor itself wrote

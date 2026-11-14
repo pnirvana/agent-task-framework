@@ -479,7 +479,8 @@ test('reviews: --by human tasks are not for the coordinator; feedback drafts sub
   run(['start', 'T2'], w2);
   run(['review', 'T2', '-m', 'docs done'], w2);
   assert.deepEqual(run(['wait', '--timeout', '2000']).attention, [{ task: 'T2', reason: 'review' }], 'T1 waits for the human');
-  const me = { ATF_ACTOR: 'pascal', ATF_ROLE: 'human' }; // the human (the board sets this role)
+  const me = { ATF_ACTOR: 'human' }; // the human: a distinct actor (the board writes as it too)
+  assert.equal(run(['whoami'], me).role, 'human', 'even with $ATF_ROLE=coordinator in the shell');
   run(['feedback', 'change', 'T1', 'error message unclear'], me);
   run(['feedback', 'change', 'T1', 'focus lost', '--file', 'a.tsx', '--line', '4'], me);
   run(['feedback', 'approve', 'T2'], me);
@@ -670,7 +671,7 @@ test('e2e findings: review permissions, answered questions, fresh is one-shot, p
   const { run, runFail } = sandbox();
   const carol = { ATF_ACTOR: 'carol', ATF_ROLE: 'subagent' };
   const bob = { ATF_ACTOR: 'bob', ATF_ROLE: 'subagent' };
-  const human = { ATF_ACTOR: 'pascal', ATF_ROLE: 'human' };
+  const human = { ATF_ACTOR: 'human' };
   run(['add', 'ui', '--assign', 'carol', '--reviewer', 'human']); // T1
   run(['add', 'api', '--assign', 'bob']); // T2
   run(['start', 'T1'], carol);

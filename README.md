@@ -135,10 +135,13 @@ atf add "Rate-limit /login" --from T2 --accept "5/min per IP"    # extra scope f
 
 Reviewing several tasks at once (e.g. as the human, or comments forwarded from an editor).
 Reviews are decided by the task's reviewer: the coordinator, or for `--reviewer human` tasks
-the human. The board acts as the human; on the command line set `ATF_ROLE=human`:
+the human. You act as the actor `human`: the board does this by itself; on the command
+line `export ATF_ACTOR=human` in your own shell (or add `--as human` to each command;
+drafts are kept per actor). This keeps your writes apart from a coordinator you started
+by hand, which uses your user name:
 
 ```sh
-export ATF_ROLE=human    # you, not the coordinator agent (both default to $USER as name)
+export ATF_ACTOR=human   # in your shell, not the coordinator's
 atf feedback approve T2 "works on mobile"
 atf feedback change T1 "error says 'undefined'" --file src/login.tsx --line 42
 atf feedback note T3 "nice docs"

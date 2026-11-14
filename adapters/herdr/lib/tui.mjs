@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { TERMINAL, driverInbox, planSummary } from '../../../src/core.mjs';
+import { TERMINAL, driverInbox, planSummary, HUMAN } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, readDrafts, writeDrafts, reviewEvents } from '../../../src/store.mjs';
 import { herdrAsync, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess } from './herdr.mjs';
 import { progressText } from './sync.mjs';
@@ -65,6 +65,10 @@ export function runBoard(opts) {
   const start = opts.start ?? process.env.ATF_BOARD_START ?? (opts.root ? null : 'overview-all');
   return runMain({ ...opts, start, initDir: opts.initDir || process.cwd() });
 }
+
+// The board is the human's: it writes as the actor "human", never under the user's name,
+// which a coordinator started by hand uses too (its waits would skip "its own" writes).
+const humanActor = () => resolveActor({ id: HUMAN, role: 'human' });
 
 const TABS = [
   ['overview', 'Overview'],
@@ -822,7 +826,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     }
     ui.confirm = null;
     try {
-      transact(r.root, r.plan, resolveActor({ role: 'coordinator' }), () => [{ type: 'plan.status', data: { status: 'completed', message: 'closed via board' } }]);
+      transact(r.root, r.plan, humanActor(), () => [{ type: 'plan.status', data: { status: 'completed', message: 'closed via board' } }]);
       flash(`closed "${r.st.title}"${ui.showClosed ? '' : ' (f shows closed plans)'}`, 'green');
     } catch (e) {
       flash(e.message, 'red');
@@ -1067,7 +1071,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   // ---------- review drafts (sent together with S) ----------
-  const me = resolveActor({ role: process.env.ATF_ROLE || 'human' }); // the board is the human's
+  const me = humanActor();
   const draftsOf = (root, plan) => {
     try {
       return readDrafts(root, plan, me.id);

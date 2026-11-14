@@ -17,6 +17,7 @@ import {
   driverInbox,
   planSummary,
   reviewRefusal,
+  HUMAN,
 } from '../src/core.mjs';
 import {
   findRoot,
@@ -233,6 +234,7 @@ function ctx({ needPlan = true } = {}) {
     if (!fs.existsSync(eventsPath(root, planId))) die(`plan not found: ${planId}`);
   }
   const actor = resolveActor({ id: FLAGS.as, role: FLAGS.role });
+  if (actor.id === HUMAN && !FLAGS.role) actor.role = 'human'; // whatever $ATF_ROLE the shell has
   // No explicit role (--role / $ATF_ROLE): infer it from the plan, so a coordinator that
   // was started by hand (no ATF env) is still treated as the coordinator.
   actor.role_source = FLAGS.role ? '--role' : process.env.ATF_ROLE ? '$ATF_ROLE' : null;

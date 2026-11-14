@@ -204,7 +204,8 @@ instead of your transcript, so make it self-contained.
    **Reviews by the human.** Tasks with a reviewer other than you (`--reviewer human` at
    creation, or a subagent's `atf review … --by human`) are not yours to approve (`atf
    done` refuses, and `atf wait` does not report them): they show up in the human's
-   inbox, and you wait for their verdict. Mark tasks that need
+   inbox, and you wait for their verdict. The human writes as the actor `human`; never
+   use `--as human` yourself. Mark tasks that need
    manual testing up front: `atf add "…" --reviewer human`. When the human submits a
    review (on the board or with `atf feedback submit`), your `atf wait` reports
    `review submitted by …`: approved tasks are done, tasks with change requests went
