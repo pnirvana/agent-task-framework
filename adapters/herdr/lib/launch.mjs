@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TERMINAL, attentionFor, launchPlan } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, transact, skillInstalled, resolveActor } from '../../../src/store.mjs';
-import { herdr, pluginConfig, sameServer, currentSocket, liveAgents, inProject, boardPaneIds, pluginStateDir } from './herdr.mjs';
+import { herdr, notify, pluginConfig, sameServer, currentSocket, liveAgents, inProject, boardPaneIds, pluginStateDir } from './herdr.mjs';
 import { chooseSplit, tabLayout, withPlacementLock } from './layout.mjs';
 import { resolveAgentDef, piArgsForAgent } from './agents.mjs';
 
@@ -35,8 +35,7 @@ export function agentKinds() {
 }
 
 export const lifecycle = () => process.env.ATF_LIFECYCLE_MODE || pluginConfig().lifecycle || 'ephemeral';
-const GRACE_MS = 15_000; // idle this long (with nothing to do) before an ephemeral agent is closed
-const RELAUNCH_COOLDOWN_MS = 60_000;
+const GRACE_MS = 15_000; // idle this long (with nothing in progress) before an agent ATF launched is closed
 
 // ---------- plugin state ----------
 export const stateDir = pluginStateDir;
@@ -127,12 +126,12 @@ function wasReopened(t) {
 function situation(s, t) {
   if (t.changes_requested) {
     const fb = t.feedback[t.feedback.length - 1];
-    return `changes were requested (review round ${fb.round}) by ${fb.actor ?? 'the coordinator'}: "${fb.message}". Address every point, say in an atf note how, then send it to review again.`;
+    return `it came back from review (round ${fb.round}) with these instructions from ${fb.actor ?? 'the coordinator'}: "${fb.message}". Address every point, say in an atf note how, then send it to review again.`;
   }
-  if (t.can_resume) return `${t.blocked_on.join(', ')} ${t.blocked_on.length > 1 ? 'are' : 'is'} done now (you were blocked on ${t.blocked_on.length > 1 ? 'them' : 'it'}).`;
+  if (t.can_resume) return `it was blocked on ${t.blocked_on.join(', ')}, which ${t.blocked_on.length > 1 ? 'are' : 'is'} done now.`;
   if (t.answered) {
     const n = lastNoteFromOthers(t);
-    return `your question was answered${n ? ` by ${n.actor}: "${n.message}"` : ''}.`;
+    return `its question was answered${n ? ` by ${n.actor}: "${n.message}"` : ''}.`;
   }
   if (wasReopened(t)) {
     const h = [...t.history].reverse().find((x) => x.type === 'status' && x.to === 'todo');
@@ -143,33 +142,36 @@ function situation(s, t) {
 
 export function buildPrompt({ s, t, name, mode, pkg, kindCfg, early = false }) {
   const skill = kindCfg.nativeSkill || skillInstalled() ? 'Follow the atf skill (load it if it is not loaded yet).' : `First read ${SKILL_FILE} and follow its subagent section.`;
+  // v2: a subagent does its assignment and ends; it never waits
+  const end = 'When your assignment is finished (or blocked and nothing else is ready for you), end your turn: do not wait; the coordinator starts a new agent when there is more.';
   const why = situation(s, t);
   if (mode === 'resume')
     return (
       `[ATF] You are resumed in your earlier session for ${t.id} (${t.title})${why ? `: ${why}` : '.'} ` +
-      `Run \`atf show ${t.id}\` to see what changed, then \`atf start ${t.id}\` and continue where you left off. ${skill}`
+      `Run \`atf show ${t.id}\` to see what changed, then \`atf start ${t.id}\` and continue where you left off. ${end} ${skill}`
     );
   if (early && t.waiting_on?.length)
     return (
       `You are subagent "${name}". Your ATF task is ${t.id}: ${t.title}. It is started EARLY: it depends on ${t.waiting_on.join(', ')}, which ${t.waiting_on.length > 1 ? 'are' : 'is'} not done yet. ` +
       `Run \`atf show ${t.id}\`, then \`atf start ${t.id} --early\` and do everything that does not need ${t.waiting_on.join(', ')}. ` +
-      `When you reach what does, write a checkpoint (\`atf note ${t.id} --kind checkpoint "done: … left: …"\`) and run \`atf block ${t.id} --on ${t.waiting_on.join(',')} -m "<what you need>"\`; you will be resumed when it is done. ${skill}`
+      `When you reach what does, write a checkpoint (\`atf note ${t.id} --kind checkpoint "done: … left: …"\`) and run \`atf block ${t.id} --on ${t.waiting_on.join(',')} -m "<what you need>"\`. ${end} ${skill}`
     );
   const history = t.started_at
-    ? ` This task was worked on before by another session: \`atf show ${t.id}\` has its checkpoint, notes and earlier result${why ? `, and ${why}` : '.'} Continue from there instead of starting over.`
+    ? ` This task was worked on before: ${why ? why + ' ' : ''}\`atf show ${t.id}\` has its checkpoint, notes and history. Continue from there instead of starting over.`
     : '';
   if (pkg)
     return (
       `You are subagent "${name}". You own ATF work package ${pkg.id}: ${pkg.title} (the whole subtree); your next task is ${t.id}: ${t.title}.${history} ` +
       `Run \`atf show ${pkg.id}\` and \`atf list --mine\` to see the package. Then loop: \`atf next --package\`, do the task, finish it ` +
-      `(done/review/block/fail). You may split a task with \`atf add <title> --parent <id>\`. ${skill}`
+      `(done/review/block/fail). You may split a task with \`atf add <title> --parent <id>\`. Questions and decisions go to the coordinator as a block. ${end} ${skill}`
     );
   return (
     `You are subagent "${name}". Your ATF task is ${t.id}: ${t.title}.${history} ` +
     `Run \`atf show ${t.id}\` for details and acceptance criteria, then \`atf start ${t.id}\` and do the work. ${skill} ` +
     (t.review || (t.reviewer && t.reviewer !== 'coordinator')
-      ? `Report progress with atf. This task needs review: finish with \`atf review ${t.id} -m "<summary + what to check>"\` (not done), or block/fail.`
-      : `Report progress with atf and finish with atf done/review/block/fail.`)
+      ? `Report progress with atf. This task needs review: finish with \`atf review ${t.id} -m "<summary + what to check>"\` (not done), or block/fail. `
+      : `Report progress with atf and finish with atf done/review/block/fail. `) +
+    `Questions and decisions go to the coordinator: \`atf block ${t.id} -m "<question>"\` after a checkpoint. ${end}`
   );
 }
 
@@ -197,6 +199,10 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
   const s = loadPlan(root, planId);
   const target = s.tasks[taskId];
   if (!target) throw new Error(`unknown task ${taskId}`);
+  // one agent per owner at a time: a running one continues with its work (it finishes,
+  // then the coordinator starts the next)
+  const running = liveAgents(root).get(name);
+  if (running) throw new Error(`agent "${name}" is still running (pane ${running.pane_id}, ${running.agent_status}); wait until it ends, or pass another --name`);
   const kinds = agentKinds();
   kind = kind || process.env.ATF_AGENT_KIND || pluginConfig().agent_kind || 'pi';
   const kindCfg = kinds[kind] || { start: [] };
@@ -262,6 +268,81 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
   return { name, pane, mode, kind, agent, leaf: leaf.id, reason: lp.reason };
 }
 
+// ---------- the coordinator ----------
+const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+export function coordinatorPrompt(s, mode, name) {
+  const plan = `--plan ${s.id}`;
+  if (mode === 'resume')
+    return `[ATF] You are resumed as the coordinator of plan "${s.title}" (${plan}). Catch up: \`atf wait ${plan}\` reports what happened since your last wait, \`atf status ${plan}\` shows where things stand. Handle what needs you, then continue the \`atf wait ${plan}\` loop. Follow the atf skill (coordinator part).`;
+  const docs = s.docs?.length ? ` the documents it lists (${s.docs.join(', ')}),` : '';
+  return (
+    `You are "${name}", the coordinator of ATF plan "${s.title}" (${plan}), in a new session. Follow the atf skill, coordinator part: you make the decisions and start every subagent. ` +
+    `Get up to speed first: \`atf plan show ${plan}\` (goal, documents, the plan checkpoint from the previous session),${docs} then \`atf status ${plan}\`. ` +
+    `Then handle what needs attention and keep running \`atf wait ${plan}\` in a loop. Your identity is set (ATF_ACTOR=${name}, ATF_ROLE=coordinator).`
+  );
+}
+
+/**
+ * Start (or resume) the coordinator of a plan in its own tab (SPEC §12.6). By default the
+ * plan's recorded coordinator session is resumed; `fresh` starts a new session, and a
+ * coordinator that is still running is first asked for a plan checkpoint, then replaced.
+ * Returns {name, pane, mode}; mode 'running' if one runs already (nothing started).
+ */
+export function launchCoordinator({ root, planId, fresh = false, kind, handoffMs = 180_000, say = () => {}, dryRun = false }) {
+  const s = loadPlan(root, planId);
+  const name = s.coordinator || resolveActor().id;
+  kind = kind || process.env.ATF_AGENT_KIND || pluginConfig().agent_kind || 'pi';
+  const kindCfg = agentKinds()[kind] || { start: [] };
+  const live = liveAgents(root);
+  const livePane = new Map([...live.values()].map((a) => [a.pane_id, a]));
+  const actor = s.actors[name];
+  const running = actor && sameServer(actor) ? liveAgentOf(s, actor, live, livePane) : live.get(name) || null;
+  const mode = !fresh && s.session?.ref && kindCfg.resume ? 'resume' : 'fresh';
+  if (dryRun) return { name, pane: running?.pane_id ?? null, mode: running && !fresh ? 'running' : mode, session: mode === 'resume' ? s.session.ref : null };
+  let workspace = (actor && sameServer(actor) && actor.ctx?.herdr_workspace) || process.env.HERDR_WORKSPACE_ID || null;
+  if (running) {
+    if (!fresh) return { name, pane: running.pane_id, mode: 'running' };
+    workspace = running.workspace_id || workspace;
+    // hand over: interrupt it (it may sit in `atf wait`), ask for the plan checkpoint, replace it
+    const before = s.checkpoint?.seq ?? 0;
+    if (running.agent_status === 'working') herdr(['agent', 'send-keys', running.pane_id, 'esc']), sleepMs(1500);
+    herdr(['agent', 'prompt', running.pane_id, `[ATF] A new coordinator session takes over plan "${s.title}" (--plan ${s.id}). Write the handoff now: \`atf plan checkpoint --plan ${s.id} "<where the plan stands, what you are waiting for, what comes next, decisions not yet in the documents>"\`, then end your turn.`]);
+    say(`asked ${name} for a plan checkpoint…`);
+    let got = false;
+    for (const t0 = Date.now(); Date.now() - t0 < handoffMs; sleepMs(1000))
+      if ((loadPlan(root, planId).checkpoint?.seq ?? 0) > before) {
+        got = true;
+        break;
+      }
+    if (!got) say(`warning: ${name} wrote no checkpoint within ${Math.round(handoffMs / 1000)} s; the new session starts from the last one${s.checkpoint ? '' : ' (there is none)'}`);
+    sleepMs(2000); // let it end its turn
+    herdr(['pane', 'close', running.pane_id]);
+  }
+  const env = { ATF_DIR: root, ATF_PLAN: planId, ATF_ACTOR: name, ATF_ROLE: 'coordinator', ATF_HARNESS: 'herdr', PATH: `${ATF_BIN}:${process.env.PATH}` };
+  const envArgs = Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
+  const tab = herdr(['tab', 'create', ...(workspace ? ['--workspace', workspace] : []), '--cwd', path.dirname(root), '--label', `coordinator: ${s.title}`.slice(0, 40), '--focus', ...envArgs]);
+  const pane = tab?.root_pane?.pane_id;
+  if (!pane) throw new Error('could not open a tab for the coordinator');
+  // herdr agent names are unique per server: another project may have a "coordinator"
+  const hname = herdr(['agent', 'get', name])?.agent ? `${name}-${s.id.slice(-4)}` : name;
+  const session = mode === 'resume' ? s.session.ref : '';
+  const withoutSkill = (list) => (skillInstalled() ? list.filter((a, i) => a !== '{skill}' && list[i + 1] !== '{skill}') : list);
+  const args = withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []).map((a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session));
+  if (!herdr(['agent', 'start', hname, '--kind', kind, '--pane', pane, ...(args.length ? ['--', ...args] : [])], { timeout: 60_000 })) {
+    herdr(['pane', 'close', pane]);
+    throw new Error(`herdr could not start ${kind} agent "${hname}"`);
+  }
+  updateRegistry((reg) => {
+    reg[regKey(root, name)] = { name: hname, actor: name, role: 'coordinator', kind, root, plan: planId, pane, workspace: paneWorkspace(pane), socket: currentSocket(), launchedAt: Date.now() };
+  });
+  herdr(['agent', 'prompt', pane, coordinatorPrompt(s, mode, name)]);
+  // the plan's session: what `s` on the board resumes next time
+  const ref = herdr(['agent', 'get', pane])?.agent?.agent_session?.value;
+  if (ref && ref !== s.session?.ref) transact(root, planId, { id: 'atf-herdr', role: 'launcher', harness: 'herdr' }, () => [{ type: 'plan.session', data: { ref, kind, actor: name } }]);
+  return { name, hname, pane, mode };
+}
+
 /**
  * Called from the ATF hook for each write: when an agent ATF launched changes the status
  * of a task (starts, blocks, submits, finishes it), file its session on that task, so a
@@ -270,7 +351,16 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
 export function recordSessionsForEvents(root, planId, events) {
   const reg = readRegistry();
   const byActor = new Map();
+  // a coordinator ATF started: keep the plan's session current (resuming the plan uses it)
+  const coordRec = Object.values(reg).find((r) => r.role === 'coordinator' && r.root === root && r.plan === planId && events.some((e) => e.actor?.id === r.actor));
+  if (coordRec && coordRec.pane && !(coordRec.socket && currentSocket() && coordRec.socket !== currentSocket())) {
+    const a = herdr(['agent', 'get', coordRec.pane])?.agent;
+    const ref = a && inProject(a, root) ? a.agent_session?.value : null;
+    if (ref && loadPlan(root, planId).session?.ref !== ref)
+      transact(root, planId, { id: 'atf-herdr', role: 'launcher', harness: 'herdr' }, () => [{ type: 'plan.session', data: { ref, kind: coordRec.kind, actor: coordRec.actor } }]);
+  }
   for (const e of events) {
+    if (reg[regKey(root, e.actor?.id)]?.role === 'coordinator') continue;
     if (e.type !== 'task.status' || !e.task || !e.actor?.id) continue;
     const rec = reg[regKey(root, e.actor.id)];
     if (!rec || (rec.socket && currentSocket() && rec.socket !== currentSocket())) continue;
@@ -281,37 +371,30 @@ export function recordSessionsForEvents(root, planId, events) {
 }
 
 // ---------- lifecycle sweep ----------
-export function nudgeText(s, actor, att) {
-  const items = att.map((a) => `${a.task} ${a.reason} (${s.tasks[a.task]?.title ?? ''})`).join('; ');
-  if (actor.role === 'coordinator')
-    return `[ATF] Plan "${s.title}" (--plan ${s.id}) needs you: ${items}. Handle these (atf show <id> --plan ${s.id}; approve with atf done -m, atf changes -m, or answer), then continue monitoring with \`atf wait --plan ${s.id}\`.`;
-  // what to run depends on the reason and on whether the task came with a work package
-  const how = (a) => {
-    const t = s.tasks[a.task];
-    if (a.reason === 'changes') return `${a.task}: changes were requested, read the feedback with \`atf show ${a.task}\`, then \`atf start ${a.task}\``;
-    if (a.reason === 'unblocked') return `${a.task}: \`atf start ${a.task}\` and continue from your checkpoint (blocked on ${t.blocked_on.join(',')}, now done)`;
-    if (a.reason === 'answered') return `${a.task}: your question was answered (\`atf show ${a.task}\`), then \`atf start ${a.task}\``;
-    const viaPackage = t && t.assignee !== actor.id; // owned through an assigned parent
-    return viaPackage ? `${a.task}: \`atf next --package\`` : `${a.task}: \`atf start ${a.task}\``;
-  };
-  const steps = [...new Set(att.map(how))];
-  return `[ATF] Work is available for you in plan "${s.title}" (--plan ${s.id}): ${items}. ${steps.length > 1 ? 'Next: ' + steps.join('; ') : 'Next: ' + steps[0]}.`;
+/** The prompt that wakes an idle coordinator: what needs it, and how to go on. */
+export function nudgeText(s, actor, att, stalled = []) {
+  const items = [
+    ...att.map((a) => (a.task ? `${a.task} ${a.reason} (${s.tasks[a.task]?.title ?? ''})` : `plan: ${a.reason}`)),
+    ...stalled.map((t) => `${t.id} stalled (its agent ${t.owner} is idle but the task is still in progress)`),
+  ].join('; ');
+  return `[ATF] Plan "${s.title}" (--plan ${s.id}) needs you: ${items}. Handle these (atf show <id> --plan ${s.id}; spawn agents with atf-herdr spawn <id>), then continue with \`atf wait --plan ${s.id}\`.`;
 }
 
-// Has the agent acted (written to ATF) since it was launched? Then it has read its
-// kickoff prompt, and the post-launch cooldown no longer applies.
-const actedSince = (actor, launchedAt) => !!(actor.last_seen && Date.parse(actor.last_seen) >= launchedAt);
 // An agent that wrote this recently and is busy is most likely just finishing its turn:
 // check again soon instead of at the normal cadence.
 const WRAP_UP_MS = 60_000;
+const STALL_MS = 90_000; // a subagent idle this long with a task in progress has stalled
 
 /**
- * One pass over all active plans in `root`:
- *  - live + idle + something needs it      -> nudge (prompt) it, once per situation
- *  - live + idle + nothing to do (ephemeral)-> after a grace period: save session refs, close pane
- *  - gone + something needs it (ATF-spawned)-> relaunch: resume the task's session or start fresh
+ * One pass over the plans in `root` (v2: the coordinator decides, SPEC §12):
+ *  - subagents ATF launched that are idle with nothing in progress -> after a grace
+ *    period: record their session, close the pane (they finished or blocked)
+ *  - an idle coordinator with something to handle (or stalled subagents) -> nudge it,
+ *    once per situation
+ *  - an active plan without a running coordinator -> one herdr notification
+ * Subagents are never relaunched, resumed or nudged: the coordinator starts new ones.
  * Returns {actions, pending, soon}: pending = sweep again at the normal cadence; soon =
- * an agent is about to need a nudge or relaunch (or another sweep held the lock): in seconds.
+ * the coordinator is about to need a nudge (or another sweep held the lock): in seconds.
  */
 export function lifecycleSweep(root) {
   // one sweep at a time per machine; a concurrent one is skipped (and rescheduled)
@@ -340,109 +423,99 @@ export function lifecycleSweep(root) {
 function sweepLocked(root) {
   const actions = [];
   let pending = false;
-  let soon = false; // something is about to need a nudge/relaunch: sweep again in seconds
+  let soon = false;
   const reg = readRegistry(); // snapshot; changes are written back per entry at the end
   const touched = new Set();
   const nudges = readJson('nudges.json');
   const live = liveAgents(root); // this project's agents only: names repeat across projects
   const livePane = new Map([...live.values()].map((a) => [a.pane_id, a]));
   const now = Date.now();
+  const closed = new Set(); // actors closed in this pass (an actor may appear in several plans)
 
   for (const id of listPlanIds(root)) {
     const s = loadPlan(root, id);
-    // closed plans: nothing to nudge or relaunch, but their idle ATF agents still get closed
     const planOpen = s.status === 'active';
-    if (!planOpen && !Object.values(s.actors).some((a) => live.has(a.id) && reg[regKey(root, a.id)])) continue;
+    const coordId = s.coordinator || Object.values(s.actors).find((a) => a.role === 'coordinator')?.id || null;
+    const stalled = [];
+
+    // ---- subagents ATF launched: close the ones that are done
     for (const actor of Object.values(s.actors)) {
-      if (!sameServer(actor)) continue; // agents of another herdr session are not ours to manage
+      if (!sameServer(actor) || actor.id === coordId || closed.has(actor.id)) continue;
       let rec = reg[regKey(root, actor.id)];
       if (rec?.socket && currentSocket() && rec.socket !== currentSocket()) rec = undefined;
-      if (!planOpen && rec?.plan !== s.id) continue; // closed plan: only agents launched for it
+      if (rec?.role === 'coordinator') continue;
+      const agent = liveAgentOf(s, actor, live, livePane);
+      if (!agent) continue;
+      const working = s.order.some((tid) => s.tasks[tid].owner === actor.id && s.tasks[tid].status === 'in_progress' && !s.tasks[tid].children.length);
+      const idle = ['idle', 'done'].includes(agent.agent_status);
       if (rec) touched.add(regKey(root, actor.id));
-      let agent = liveAgentOf(s, actor, live, livePane);
-      const role = actor.role === 'coordinator' ? 'coordinator' : 'subagent';
-      const att = planOpen ? attentionFor(s, actor.id, role) : [];
-      // changes --fresh: a fresh agent takes the next attempt, so this one is closed and relaunched
-      if (agent && rec && ['idle', 'done'].includes(agent.agent_status) && att.some((a) => s.tasks[a.task]?.fresh_next)) {
-        recordSession(root, s.id, workedThisLaunch(s, actor, rec), actor.id, rec.kind, agent.pane_id);
-        herdr(['pane', 'close', agent.pane_id]);
-        rec.pane = null;
-        rec.closedAt = now;
-        actions.push(`closed ${actor.id} for a fresh attempt`);
-        agent = null;
-        att.sort((a, b) => Number(!!s.tasks[b.task]?.fresh_next) - Number(!!s.tasks[a.task]?.fresh_next));
-      }
-      const nkey = `${root}#${s.id}#${actor.id}`;
-      const attKey = att.map((a) => `${a.task}:${a.reason}`).join(',');
-      if (!att.length) delete nudges[nkey];
-
-      if (agent) {
-        const idle = ['idle', 'done'].includes(agent.agent_status);
-        if (!idle) {
-          if (rec) rec.idleSince = null;
-          if (rec) pending = true;
-          // work is waiting for it and it wrote recently: it is probably wrapping up its turn
-          if (att.length && nudges[nkey] !== attKey && actor.last_seen && now - Date.parse(actor.last_seen) < WRAP_UP_MS) soon = true;
-          continue;
-        }
-        if (att.length) {
-          // a just-launched agent is idle until it reads its kickoff prompt: don't double-prompt it
-          // (once it has written anything, it has read it)
-          const justLaunched = rec?.launchedAt && now - rec.launchedAt < RELAUNCH_COOLDOWN_MS && !actedSince(actor, rec.launchedAt);
-          if (justLaunched) {
-            pending = true; // its first atf write fires the hook, which sweeps at once
-            continue;
-          }
-          if (nudges[nkey] !== attKey && herdr(['agent', 'prompt', agent.pane_id, nudgeText(s, actor, att)])) {
-            nudges[nkey] = attKey;
-            actions.push(`nudged ${actor.id}: ${attKey}`);
-          }
-          if (rec) rec.idleSince = null;
-          continue;
-        }
-        // idle with nothing to do: only ATF-spawned agents in ephemeral mode are closed
-        if (!rec || lifecycle() !== 'ephemeral') continue;
-        const working = s.order.some((tid) => s.tasks[tid].owner === actor.id && s.tasks[tid].status === 'in_progress' && !s.tasks[tid].children.length);
-        if (working) continue; // stale rather than finished: leave it for a human to look at
-        if (!rec.idleSince) {
-          rec.idleSince = now;
-          pending = true;
-          continue;
-        }
-        if (now - rec.idleSince < GRACE_MS) {
-          pending = true;
-          continue;
-        }
-        recordSession(root, s.id, workedThisLaunch(s, actor, rec), actor.id, rec.kind, agent.pane_id);
-        herdr(['pane', 'close', agent.pane_id]);
-        rec.pane = null;
-        rec.idleSince = null;
-        rec.closedAt = now;
-        actions.push(`closed ${actor.id} (idle, nothing to do)`);
+      if (!idle) {
+        if (rec) (rec.idleSince = null), (pending = true);
         continue;
       }
-
-      // not alive
-      if (!att.length || !rec || rec.plan !== s.id) continue;
-      // cooldown against relaunch loops (e.g. an agent that dies on start), not for one that worked and exited
-      if (rec.launchedAt && now - rec.launchedAt < RELAUNCH_COOLDOWN_MS && !actedSince(actor, rec.launchedAt)) {
+      if (working) {
+        // idle with a task in progress: it stopped without reporting; the coordinator decides
+        if (!rec || !rec.idleSince) {
+          if (rec) rec.idleSince = now;
+          pending = true;
+        } else if (now - rec.idleSince > STALL_MS) {
+          for (const tid of s.order) if (s.tasks[tid].owner === actor.id && s.tasks[tid].status === 'in_progress' && !s.tasks[tid].children.length) stalled.push(s.tasks[tid]);
+        } else pending = true;
+        continue;
+      }
+      // finished, blocked or submitted: it ends; only agents ATF launched are closed
+      if (!rec || lifecycle() !== 'ephemeral') continue;
+      if (!rec.idleSince) {
+        rec.idleSince = now;
         pending = true;
         continue;
       }
-      const first = s.tasks[att[0].task];
-      const pkgId = [...first.path].reverse().find((pid) => s.tasks[pid].assignee === actor.id);
-      try {
-        const refPane = Object.values(reg).find((r) => r.pane && r.root === root && live.has(r.name))?.pane || coordinatorPane(s, live, livePane);
-        // no live pane to place it next to: the workspace it ran in before, or the coordinator's
-        const coord = Object.values(s.actors).find((a) => a.role === 'coordinator' && sameServer(a));
-        const workspace = rec.workspace || coord?.ctx?.herdr_workspace || null;
-        const r = launchAgent({ root, planId: s.id, taskId: pkgId && first.ready && !first.assignee ? pkgId : first.id, name: actor.id, kind: rec.kind, agent: rec.agent, refPane, workspace, assign: false });
-        touched.delete(regKey(root, actor.id)); // launchAgent wrote the fresh entry itself
-        actions.push(`relaunched ${actor.id} for ${r.leaf} (${r.mode}: ${r.reason})`);
+      if (now - rec.idleSince < GRACE_MS) {
         pending = true;
-      } catch (e) {
-        actions.push(`relaunch of ${actor.id} failed: ${e.message}`);
+        continue;
       }
+      recordSession(root, s.id, workedThisLaunch(s, actor, rec), actor.id, rec.kind, agent.pane_id);
+      herdr(['pane', 'close', agent.pane_id]);
+      rec.pane = null;
+      rec.idleSince = null;
+      rec.closedAt = now;
+      closed.add(actor.id);
+      actions.push(`closed ${actor.id} (finished its assignment)`);
+    }
+
+    if (!planOpen || !coordId) continue;
+    // ---- the coordinator
+    const coord = s.actors[coordId];
+    if (coord && !sameServer(coord)) continue; // runs in another herdr session
+    const agent = coord && liveAgentOf(s, coord, live, livePane);
+    const nkey = `${root}#${s.id}#${coordId}`;
+    if (!agent) {
+      // nobody decides for this plan: tell the human once (the board offers to start one)
+      const open = s.order.some((tid) => !s.tasks[tid].children.length && !TERMINAL.has(s.tasks[tid].status));
+      if (open && nudges[`${nkey}#absent`] !== true) {
+        notify(`ATF: no coordinator for "${s.title}"`, 'start one from the board (s) or with atf-herdr coordinate', 'request');
+        nudges[`${nkey}#absent`] = true;
+        actions.push(`no coordinator running for ${s.id}`);
+      }
+      continue;
+    }
+    delete nudges[`${nkey}#absent`];
+    const att = attentionFor(s, coordId, 'coordinator');
+    const attKey = [...att.map((a) => `${a.task}:${a.reason}`), ...stalled.map((t) => `${t.id}:stalled`)].join(',');
+    if (!attKey) {
+      delete nudges[nkey];
+      continue;
+    }
+    if (!['idle', 'done'].includes(agent.agent_status)) {
+      // busy (e.g. in `atf wait`, which reports it): if it wrote just now it is probably
+      // wrapping up its turn, so look again in seconds
+      if (nudges[nkey] !== attKey && coord.last_seen && now - Date.parse(coord.last_seen) < WRAP_UP_MS) soon = true;
+      pending = true;
+      continue;
+    }
+    if (nudges[nkey] !== attKey && herdr(['agent', 'prompt', agent.pane_id, nudgeText(s, coord, att, stalled)])) {
+      nudges[nkey] = attKey;
+      actions.push(`nudged ${coordId}: ${attKey}`);
     }
   }
   updateRegistry((fresh) => {
@@ -469,14 +542,6 @@ function liveAgentOf(s, actor, live, livePane) {
   return a;
 }
 
-function coordinatorPane(s, live, livePane) {
-  for (const a of Object.values(s.actors)) {
-    if (a.role !== 'coordinator') continue;
-    const l = liveAgentOf(s, a, live, livePane);
-    if (l) return l.pane_id;
-  }
-  return null;
-}
 
 /** Leaves this actor changed during its current launch (to file that launch's session on). */
 function workedThisLaunch(s, actor, rec) {

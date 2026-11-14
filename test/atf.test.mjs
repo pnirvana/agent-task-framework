@@ -221,8 +221,10 @@ test('wait: level-triggered, so a review that happened before waiting is not mis
   const r = run(['wait', '--timeout', '3000']);
   assert.deepEqual(r.attention, [{ task: 'T2', reason: 'review' }]);
   run(['done', 'T2', '-m', 'approved']);
-  // the subagent's wait returns at once: T3 became ready
-  assert.deepEqual(run(['wait', '--timeout', '3000'], fe).attention, [{ task: 'T3', reason: 'ready' }]);
+  // v2: fe exited after submitting; T3 became ready in its package, so the coordinator is
+  // told to start an agent for it (a subagent's wait just tells it to finish)
+  assert.deepEqual(run(['wait', '--timeout', '3000']).attention, [{ task: 'T3', reason: 'start' }]);
+  assert.match(run(['wait', '--timeout', '3000'], fe).note, /subagents do not wait/);
 });
 
 test('block --on: dependency blocks resume when the other task is done', () => {
@@ -239,7 +241,8 @@ test('block --on: dependency blocks resume when the other task is done', () => {
   run(['done', 'T2', '-m', 'ok']);
   t1 = run(['show', 'T1']);
   assert.equal(t1.can_resume, true);
-  assert.deepEqual(run(['wait', '--timeout', '3000'], be).attention, [{ task: 'T1', reason: 'unblocked' }]);
+  // the coordinator starts a new instance for it (be exited when it blocked)
+  assert.deepEqual(run(['wait', '--timeout', '3000']).attention, [{ task: 'T1', reason: 'unblocked' }]);
   run(['start', 'T1'], be);
   assert.deepEqual(run(['show', 'T1']).blocked_on, []);
 });
@@ -256,8 +259,10 @@ test('agent context: checkpoint, session refs, launchPlan, answered', () => {
   run(['block', 'T1', '-m', 'needs page', '--on', 'T2'], be);
   assert.equal(run(['resume-info', 'T1']).mode, 'fresh', 'worked on but no session -> fresh (checkpoint)');
   run(['session', 'T1', '/s/be.jsonl', '--kind', 'pi', '--for', 'be']);
+  assert.equal(run(['resume-info', 'T1']).mode, 'fresh', 'v2 default: a new instance starts fresh');
+  run(['plan', 'update', '--resume', 'auto']);
   let lp = run(['resume-info', 'T1']);
-  assert.equal(lp.mode, 'resume');
+  assert.equal(lp.mode, 'resume', 'auto: a task already worked on resumes');
   assert.equal(lp.session.ref, '/s/be.jsonl');
   assert.equal(lp.checkpoint.message, 'done: x; left: y');
   run(['edit', 'T1', '--resume', 'fresh']);
@@ -265,22 +270,26 @@ test('agent context: checkpoint, session refs, launchPlan, answered', () => {
   run(['plan', 'update', '--resume', 'fresh']);
   run(['edit', 'T1', '--resume', 'auto']);
   assert.equal(run(['resume-info', 'T1']).mode, 'resume', 'task policy beats plan policy');
-  // question-block answered by someone else -> attention 'answered'
+  // question-block answered by the coordinator -> it starts a new instance ('answered')
   run(['start', 'T3'], be);
   run(['block', 'T3', '-m', 'redis or cookies?'], be);
+  const t3 = (r) => r.attention.filter((a) => a.task === 'T3'); // T2 is unowned: also 'dispatch'
+  assert.deepEqual(t3(run(['wait', '--timeout', '2000'])), [{ task: 'T3', reason: 'blocked' }]);
   run(['note', 'T3', 'cookies', '--kind', 'decision']);
-  assert.deepEqual(run(['wait', '--timeout', '2000'], be).attention, [{ task: 'T3', reason: 'answered' }]);
+  assert.ok(run(['show', 'T3']).answered);
+  assert.deepEqual(t3(run(['wait', '--timeout', '2000'])), [{ task: 'T3', reason: 'answered' }]);
 });
 
-test('wait: ephemeral lifecycle tells an idle agent to end its turn', () => {
+test('wait: subagents do not wait, they are told to finish and end', () => {
   const { run } = sandbox();
   run(['add', 'a']);
   run(['add', 'b']);
-  const be = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent', ATF_LIFECYCLE: 'ephemeral' };
+  const be = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
   run(['start', 'T1'], be);
   run(['block', 'T1', '-m', 'needs b', '--on', 'T2'], be);
-  const r = run(['wait', '--timeout', '3000'], be);
-  assert.match(r.note, /end your turn/);
+  const r = run(['wait', '--timeout', '3000'], be); // returns at once
+  assert.match(r.note, /subagents do not wait: finish your task/);
+  assert.deepEqual(r.attention, []);
 });
 
 test('registry + plans/inbox across projects', () => {
@@ -408,13 +417,14 @@ test('wait: per-actor cursor; tasks finished before the wait are reported once; 
   run(['done', 'T1', '-m', 'finished early'], w1); // before the coordinator waits
   let r = run(['wait', '--timeout', '2000']);
   assert.deepEqual(r.events.map((e) => [e.task, e.data.status]), [['T1', 'done']]);
-  assert.deepEqual(r.attention, [{ task: 'T3', reason: 'dispatch' }], 'newly ready and unowned');
+  // T2: assigned to w2 who has not started it (start an agent); T3: newly ready, unowned
+  assert.deepEqual(r.attention, [{ task: 'T2', reason: 'start' }, { task: 'T3', reason: 'dispatch' }]);
   run(['assign', 'T3', 'w1']);
   run(['start', 'T2'], w2);
   run(['done', 'T2', '-m', 'between waits'], w2);
   r = run(['wait', '--timeout', '2000']);
   assert.deepEqual(r.events.map((e) => [e.task, e.data.status]), [['T2', 'done']], 'only what is new since the last wait');
-  assert.deepEqual(r.attention, []);
+  assert.deepEqual(r.attention, [{ task: 'T3', reason: 'start' }], 'assigned to w1, nobody started it yet');
 });
 
 test('wait: the coordinator is not woken by `block --on`, only by question-blocks', () => {
@@ -423,16 +433,17 @@ test('wait: the coordinator is not woken by `block --on`, only by question-block
   run(['add', 'page']); // T2
   run(['assign', 'T1', 'be']);
   run(['assign', 'T2', 'fe']);
-  runFail(['wait', '--timeout', '500']); // nothing yet; sets the coordinator's cursor
   const be = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
+  run(['start', 'T2'], { ATF_ACTOR: 'fe', ATF_ROLE: 'subagent' }); // fe is working on the page
   run(['start', 'T1'], be);
+  runFail(['wait', '--timeout', '500']); // nothing for the coordinator; sets its cursor
   run(['block', 'T1', '-m', 'needs page', '--on', 'T2'], be);
   assert.equal(runFail(['wait', '--timeout', '800']).timeout, true, 'dependency block is not the coordinator\'s business');
   run(['start', 'T1'], be);
   run(['block', 'T1', '-m', 'which framework?'], be);
   const r = run(['wait', '--timeout', '2000']);
   assert.deepEqual(r.attention, [{ task: 'T1', reason: 'blocked' }]);
-  assert.deepEqual(r.events.map((e) => [e.task, e.data.status, e.data.on ?? null]), [['T1', 'blocked', null]]);
+  assert.deepEqual(r.events.filter((e) => e.task === 'T1').map((e) => [e.task, e.data.status, e.data.on ?? null]), [['T1', 'blocked', null]]);
 });
 
 test('review: request changes, resubmit, approve; follow-up joins the package', () => {
@@ -450,7 +461,8 @@ test('review: request changes, resubmit, approve; follow-up joins the package', 
   assert.equal(t.changes_requested, true);
   assert.equal(t.owner, 'be', 'stays with its owner');
   assert.deepEqual(t.feedback.map((f) => [f.round, f.message]), [[1, '1. return 401 on bad password']]);
-  assert.deepEqual(run(['wait', '--timeout', '2000'], be).attention, [{ task: 'T2', reason: 'changes' }]);
+  // the coordinator is reminded to start a new instance for it
+  assert.deepEqual(run(['wait', '--timeout', '2000']).attention, [{ task: 'T2', reason: 'changes' }]);
   run(['start', 'T2'], be);
   run(['review', 'T2', '-m', 'fixed'], be);
   assert.equal(run(['show', 'T2']).changes_requested, false);
@@ -489,15 +501,23 @@ test('reviews: --by human tasks are not for the coordinator; feedback drafts sub
   run(['feedback', 'submit'], me);
   const lines = fs.readFileSync(path.join(dir, '.atf', 'plans', run(['status']).id, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   const batch = lines.slice(before);
-  assert.deepEqual(batch.map((e) => e.type), ['task.status', 'task.status', 'plan.review']);
+  // v2: the human's change requests do not send T1 back; they are one note for the
+  // coordinator, which decides. The approval of T2 takes effect directly.
+  assert.deepEqual(batch.map((e) => e.type), ['task.note', 'task.status', 'plan.review']);
   assert.equal(new Set(batch.map((e) => e.seq)).size, 3);
   const t1 = run(['show', 'T1']);
-  assert.equal(t1.changes_requested, true);
-  assert.equal(t1.feedback[0].message, '1. error message unclear\n2. focus lost (a.tsx:4)');
+  assert.equal(t1.status, 'review', 'stays in review until the coordinator acts');
+  assert.equal(t1.changes_requested, false);
+  assert.equal(t1.human_input[0].message, 'change request: 1. error message unclear\n2. focus lost (a.tsx:4)');
   assert.equal(run(['show', 'T2']).status, 'done');
   assert.equal(run(['feedback'], me).length, 0, 'drafts cleared');
   const r = run(['wait', '--timeout', '2000']);
   assert.ok(r.events.some((e) => e.type === 'plan.review'), 'coordinator hears about the review once');
+  assert.deepEqual(r.attention, [{ task: 'T1', reason: 'human' }]);
+  // the coordinator decides: it sends T1 back with its own instructions; handled
+  run(['changes', 'T1', '-m', '1. clearer error text 2. keep focus in the form']);
+  assert.deepEqual(run(['show', 'T1']).human_input, []);
+  assert.equal(run(['show', 'T1']).feedback[0].actor, 'lead');
 });
 
 test('start --early: before dependencies, then block --on and resume', () => {
@@ -513,7 +533,7 @@ test('start --early: before dependencies, then block --on and resume', () => {
   run(['block', 'T2', '--on', 'T1', '-m', 'needs the api'], w);
   run(['start', 'T1']);
   run(['done', 'T1', '-m', 'ok']);
-  assert.deepEqual(run(['wait', '--timeout', '2000'], w).attention, [{ task: 'T2', reason: 'unblocked' }]);
+  assert.deepEqual(run(['wait', '--timeout', '2000']).attention, [{ task: 'T2', reason: 'unblocked' }]);
   run(['edit', 'T2', '--dep', '']);
   assert.deepEqual(run(['show', 'T2']).deps, [], "--dep '' removes all dependencies");
 });
@@ -525,12 +545,10 @@ test('wait: no old events for a new agent; events already acted on are not repea
   run(['note', 'T1', 'context for whoever does T1']);
   run(['assign', 'T1', 'fresh']);
   const fresh = { ATF_ACTOR: 'fresh', ATF_ROLE: 'subagent' };
-  // a brand-new agent's first wait: ready work (level), but no history from before it existed
-  let r = run(['wait', '--timeout', '1500'], fresh);
-  assert.deepEqual(r.attention, [{ task: 'T1', reason: 'ready' }]);
-  assert.deepEqual(r.events, []);
+  // T1 is assigned but nobody works on it yet: the coordinator is told to start an agent
+  let r = run(['wait', '--timeout', '1500']);
+  assert.deepEqual(r.attention, [{ task: 'T1', reason: 'start' }, { task: 'T2', reason: 'dispatch' }]);
   // coordinator: T1 goes to review, coordinator acts on it without waiting (woken by a message)
-  run(['wait', '--timeout', '1500']); // coordinator is up to date here
   run(['start', 'T1'], fresh);
   run(['review', 'T1', '-m', 'check'], fresh); // coordinator is NOT waiting now ...
   run(['assign', 'T2', 'other']);
@@ -543,14 +561,57 @@ test('wait: no old events for a new agent; events already acted on are not repea
   assert.deepEqual(r.attention, [{ task: 'T1', reason: 'review' }], 'T1 is still in review: level attention remains');
 });
 
-test('herdr nudge: per-reason instructions; next --package only for package tasks', async () => {
-  const { nudgeText } = await import('../adapters/herdr/lib/launch.mjs');
-  const s = { title: 'P', tasks: { T2: { title: 'in pkg', assignee: null, blocked_on: [] }, T3: { title: 'single', assignee: 'be', blocked_on: [] } } };
-  const be = { id: 'be', role: 'subagent' };
-  const single = nudgeText(s, be, [{ task: 'T3', reason: 'changes' }]);
-  assert.match(single, /atf show T3.*atf start T3/);
-  assert.doesNotMatch(single, /--package/);
-  assert.match(nudgeText(s, be, [{ task: 'T2', reason: 'ready' }]), /atf next --package/);
+test('herdr sweep (v2): closes finished agents, never relaunches them, nudges the coordinator', async () => {
+  const { dir, run } = sandbox(); // coordinator "lead"
+  const sub = (who) => ({ ATF_ACTOR: who, ATF_ROLE: 'subagent' });
+  run(['add', 'api', '--assign', 'be']); // T1: be finishes it
+  run(['add', 'ui', '--assign', 'fe']); // T2: fe submits it, gets changes back, has exited
+  run(['add', 'db', '--assign', 'st']); // T3: st stalls (idle, task in progress)
+  run(['start', 'T1'], sub('be'));
+  run(['done', 'T1', '-m', 'ok'], sub('be'));
+  run(['start', 'T2'], sub('fe'));
+  run(['review', 'T2', '-m', 'check'], sub('fe'));
+  run(['changes', 'T2', '-m', '1. bigger buttons']);
+  run(['start', 'T3'], sub('st'));
+  const root = path.join(dir, '.atf');
+  const { getCurrentPlan } = await import('../src/store.mjs');
+  const planId = getCurrentPlan(root);
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-state-'));
+  const calls = path.join(state, 'calls.log');
+  const fake = path.join(state, 'herdr');
+  const agents = (coordinator) => [
+    ...(coordinator ? [{ name: 'lead', pane_id: 'w1:p1', agent_status: 'idle', cwd: dir }] : []),
+    { name: 'be', pane_id: 'w1:p2', agent_status: 'idle', cwd: dir },
+    { name: 'st', pane_id: 'w1:p3', agent_status: 'idle', cwd: dir },
+  ];
+  const script = (list) => `#!/bin/sh\necho "$@" >> '${calls}'\ncase "$1 $2" in\n  "agent list") echo '${JSON.stringify({ result: { agents: list } })}';;\n  "agent prompt") echo '{"result":{}}';;\n  *) echo '{"result":{}}';;\nesac\n`;
+  const long = Date.now() - 10 * 60_000; // idle for long: past the grace period and the stall time
+  const rec = (name) => ({ name, kind: 'pi', root, plan: planId, launchedAt: long, idleSince: long });
+  fs.writeFileSync(path.join(state, 'agents.json'), JSON.stringify({ [`${root}#be`]: rec('be'), [`${root}#fe`]: rec('fe'), [`${root}#st`]: rec('st') }));
+  const saved = { ...process.env };
+  Object.assign(process.env, { HERDR_BIN_PATH: fake, HERDR_PLUGIN_STATE_DIR: state, ATF_REGISTRY: path.join(dir, 'registry.json') });
+  delete process.env.HERDR_SOCKET_PATH;
+  try {
+    const { lifecycleSweep, nudgeText } = await import('../adapters/herdr/lib/launch.mjs');
+    fs.writeFileSync(fake, script(agents(true)), { mode: 0o755 });
+    const r = lifecycleSweep(root);
+    const log = fs.readFileSync(calls, 'utf8');
+    assert.match(log, /pane close w1:p2/, 'be finished its assignment: closed');
+    assert.doesNotMatch(log, /pane close w1:p3/, 'st has a task in progress: not closed');
+    assert.doesNotMatch(log, /agent start/, 'fe has work (changes) but is never relaunched by the sweep');
+    assert.match(log, /agent prompt w1:p1 \[ATF\][^\n]*T2 changes[^\n]*T3 stalled/, 'the coordinator is told: start an agent for T2; T3 stalled');
+    assert.ok(r.actions.some((a) => /closed be/.test(a)));
+    // no coordinator running: one notification, not repeated
+    fs.writeFileSync(calls, '');
+    fs.writeFileSync(fake, script(agents(false)), { mode: 0o755 });
+    lifecycleSweep(root);
+    lifecycleSweep(root);
+    assert.equal((fs.readFileSync(calls, 'utf8').match(/notification show ATF: no coordinator/g) || []).length, 1);
+    const st = { title: 'P', id: 'p1', tasks: { T2: { title: 'ui' } } };
+    assert.match(nudgeText(st, { id: 'lead' }, [{ task: 'T2', reason: 'changes' }], [{ id: 'T3', owner: 'st' }]), /T2 changes \(ui\); T3 stalled .*atf-herdr spawn/);
+  } finally {
+    process.env = saved;
+  }
 });
 
 test('--review: the owner must submit for review; the coordinator approves', () => {
@@ -626,19 +687,17 @@ test('rollup: a package with one task in progress and one blocked --on it is in 
   assert.equal(t1.rollup_waiting, false);
 });
 
-test('wait: an owner is not woken by the approval of its own task', () => {
+test('wait: the coordinator is not reminded about work its agents are doing', () => {
   const { run, runFail } = sandbox();
   run(['add', 'a', '--assign', 'be']); // T1
-  run(['add', 'b', '--assign', 'be']); // T2: keeps be with an open task
+  run(['add', 'b', '--assign', 'be']); // T2
   const be = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
   run(['start', 'T1'], be);
-  run(['review', 'T1', '-m', 'check it'], be);
-  run(['start', 'T2'], be);
-  run(['done', 'T1', '-m', 'approved']); // coordinator
-  assert.equal(runFail(['wait', '--timeout', '800'], be).timeout, true, 'approval is not news to act on');
-  run(['cancel', 'T2', '-m', 'not needed']); // but a cancel is: stop working on it
-  const r = run(['wait', '--timeout', '2000'], be);
-  assert.ok(r.note === 'you own no open tasks' || r.events.some((e) => e.task === 'T2' && e.data.status === 'cancelled'));
+  // be works on T1: its other ready task T2 is not the coordinator's business
+  assert.equal(runFail(['wait', '--timeout', '800']).timeout, true, 'be is busy: nothing to start');
+  run(['review', 'T1', '-m', 'check it'], be); // be finishes and exits
+  const r = run(['wait', '--timeout', '2000']);
+  assert.deepEqual(r.attention, [{ task: 'T1', reason: 'review' }, { task: 'T2', reason: 'start' }], 'review T1, start an agent for T2');
 });
 
 test('herdr sessions: filed on the tasks a launched agent works on, not on a guessed leaf', async () => {
@@ -691,11 +750,12 @@ test('e2e findings: review permissions, answered questions, fresh is one-shot, p
   assert.match(runFail(['release', 'T2'], carol).error, /only they or the coordinator/);
   // agents add only inside their package
   assert.match(runFail(['add', 'stray'], bob).error, /inside your own work package/);
-  // an answered question stops needing the coordinator
+  // an answered question: the coordinator now starts a new instance with the answer
   run(['block', 'T2', '-m', 'which db?'], bob);
   assert.deepEqual(run(['wait', '--timeout', '1000']).attention, [{ task: 'T2', reason: 'blocked' }]);
   run(['note', 'T2', 'postgres']);
-  assert.equal(runFail(['wait', '--timeout', '700']).timeout, true, 'answered: nothing for the coordinator');
+  assert.deepEqual(run(['wait', '--timeout', '1000']).attention, [{ task: 'T2', reason: 'answered' }]);
+  run(['plan', 'update', '--resume', 'auto']);
   // --fresh applies to the next attempt only
   run(['start', 'T2'], bob);
   run(['review', 'T2', '-m', 'done'], bob);
@@ -855,4 +915,100 @@ test('herdr sweep: never nudges a same-named agent of another project', async ()
   } finally {
     process.env = saved;
   }
+});
+
+test('v2: questions are scoped and escalated; the human talks to the coordinator', () => {
+  const { run, runFail } = sandbox(); // coordinator "lead"
+  const pay = { ATF_ACTOR: 'pay', ATF_ROLE: 'subagent' };
+  const human = { ATF_ACTOR: 'human' };
+  run(['add', 'Stripe adapter', '--assign', 'pay']); // T1
+  run(['start', 'T1'], pay);
+  run(['note', 'T1', 'done: client; left: refunds', '--kind', 'checkpoint'], pay);
+  // a subagent's question goes to the coordinator; it cannot address the human itself
+  assert.match(runFail(['block', 'T1', '--for', 'human', '-m', 'which?'], pay).error, /only the coordinator asks the human/);
+  run(['block', 'T1', '-m', 'refunds via the adapter or a separate service?'], pay);
+  let t = run(['show', 'T1']);
+  assert.equal(t.blocked_for, 'coordinator');
+  assert.deepEqual(run(['wait', '--timeout', '1500']).attention, [{ task: 'T1', reason: 'blocked' }]);
+  // the coordinator escalates the same task to the human: still blocked, now for the human
+  run(['block', 'T1', '--for', 'human', '-m', 'Refunds: adapter or separate service? I would use the adapter.']);
+  t = run(['show', 'T1']);
+  assert.equal(t.status, 'blocked');
+  assert.equal(t.blocked_for, 'human');
+  const inbox = run(['inbox']);
+  assert.deepEqual(inbox.filter((i) => i.task === 'T1').map((i) => [i.kind, i.for]), [['question', 'human']]);
+  runFail(['wait', '--timeout', '700']); // waiting for the human is not the coordinator's to act on
+  // a note by an agent does not answer a question for the human; the human's does
+  run(['note', 'T1', 'any news?'], pay);
+  assert.equal(run(['show', 'T1']).answered, false);
+  run(['note', 'T1', 'use the adapter'], human);
+  t = run(['show', 'T1']);
+  assert.equal(t.answered, true);
+  assert.deepEqual(t.human_input.map((n) => n.message), ['use the adapter']);
+  // the answer wakes the coordinator, not the subagent
+  const r = run(['wait', '--timeout', '1500']);
+  assert.ok(r.events.some((e) => e.type === 'task.note' && e.actor.id === 'human'));
+  assert.deepEqual(r.attention, [{ task: 'T1', reason: 'human' }]);
+  assert.match(run(['wait', '--timeout', '1500'], pay).note, /subagents do not wait/);
+  // the coordinator acts (here: a decision note): the human's input counts as handled
+  run(['note', 'T1', 'decision: use the adapter for refunds', '--kind', 'decision']);
+  assert.deepEqual(run(['show', 'T1']).human_input, []);
+  assert.deepEqual(run(['wait', '--timeout', '1500']).attention, [{ task: 'T1', reason: 'answered' }], 'now start a new instance');
+});
+
+test('v2: plan questions, checkpoint, documents and the coordinator session', () => {
+  const { run, runFail } = sandbox();
+  const human = { ATF_ACTOR: 'human' };
+  run(['plan', 'update', '--doc', 'design.md', '--doc', 'plan.md']);
+  run(['plan', 'checkpoint', 'T1 dispatched; waiting for the API; next: the UI']);
+  run(['plan', 'ask', 'Ship behind a feature flag?']);
+  run(['plan', 'session', '/s/coord.jsonl', '--kind', 'pi']);
+  let p = run(['plan', 'show']);
+  assert.deepEqual(p.docs, ['design.md', 'plan.md']);
+  assert.equal(p.checkpoint.message, 'T1 dispatched; waiting for the API; next: the UI');
+  assert.deepEqual(p.questions.map((q) => q.message), ['Ship behind a feature flag?']);
+  assert.deepEqual([p.session.ref, p.session.actor], ['/s/coord.jsonl', 'lead']);
+  assert.deepEqual(run(['inbox']).map((i) => [i.kind, i.for]), [['plan-question', 'human']]);
+  runFail(['wait', '--timeout', '600']); // set the cursor
+  run(['plan', 'note', 'yes, behind a flag'], human);
+  p = run(['plan', 'show']);
+  assert.deepEqual(p.questions, [], 'answered by the human');
+  const r = run(['wait', '--timeout', '1500']);
+  assert.deepEqual(r.attention, [{ task: null, reason: 'human' }]);
+  assert.ok(r.events.some((e) => e.type === 'plan.note' && e.actor.id === 'human'));
+  run(['plan', 'note', 'ok: flag ATF_NEW_CHECKOUT', '--kind', 'decision']);
+  assert.deepEqual(run(['plan', 'show']).human_input, []);
+  run(['plan', 'update', '--doc', '-']);
+  assert.deepEqual(run(['plan', 'show']).docs, []);
+  // the human's `atf changes` is input for the coordinator, not a send-back
+  run(['add', 'x', '--assign', 'w']); // T1
+  run(['start', 'T1'], { ATF_ACTOR: 'w', ATF_ROLE: 'subagent' });
+  run(['review', 'T1', '-m', 'done'], { ATF_ACTOR: 'w', ATF_ROLE: 'subagent' });
+  assert.equal(run(['changes', 'T1', '-m', 'also PATCH'], human).for, 'coordinator');
+  const t = run(['show', 'T1']);
+  assert.equal(t.status, 'review');
+  assert.deepEqual(t.human_input.map((n) => n.message), ['change request: also PATCH']);
+});
+
+test('herdr board (v2): an escalated question is for the human; the answer goes to the coordinator', () => {
+  const { dir, env, run } = sandbox();
+  const pay = { ATF_ACTOR: 'pay', ATF_ROLE: 'subagent' };
+  run(['add', 'Stripe adapter', '--assign', 'pay']); // T1
+  run(['start', 'T1'], pay);
+  run(['block', 'T1', '-m', 'adapter or separate service?'], pay);
+  run(['block', 'T1', '--for', 'human', '-m', 'Refunds: adapter or a separate service? I would use the adapter.']);
+  const frames = JSON.parse(
+    execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '120', '40', JSON.stringify(['r', ...'use the adapter', '\r'])], {
+      cwd: dir,
+      env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
+    }).toString(),
+  );
+  const first = frames[0];
+  assert.match(first, /⊘ question\s+T1 Stripe adapter[^\n]*for you/);
+  assert.match(first, /question for you[\s\S]*I would use the adapter[\s\S]*originally asked by pay:[\s\S]*adapter or separate service\?/);
+  assert.match(frames[1], /answer on T1, for the coordinator:/);
+  assert.match(frames.at(-1), /answer on T1 sent to the coordinator/);
+  const t = run(['show', 'T1']);
+  assert.deepEqual(t.human_input.map((n) => [n.actor, n.message]), [['human', 'use the adapter']]);
+  assert.deepEqual(run(['wait', '--timeout', '1500']).attention, [{ task: 'T1', reason: 'human' }]);
 });

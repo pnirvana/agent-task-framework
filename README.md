@@ -96,6 +96,19 @@ and optional plugin config (`$(herdr plugin config-dir atf.herdr)/config.json`; 
 pi agents, ephemeral lifecycle, full-height board). Plans live in each project's `.atf/`
 and move with the project only if you copy or commit that directory.
 
+## The model
+
+- **The coordinator** is the brain of a plan: it plans (ideally with the human first, in
+  `design.md` / `plan.md`, linked with `atf plan new … --doc`), starts every subagent,
+  reviews, answers and decides. It runs as long as the plan is active and can be
+  restarted with a fresh context from the plan checkpoint and documents.
+- **Subagents** do one assignment (a task or a work package), report, finish and end. If
+  a task comes back, the coordinator starts a new agent for it with precise instructions.
+- **The human** supervises: questions for them are scoped to a task or the plan, and
+  what they write goes to the coordinator, which decides what happens.
+
+Details: [SPEC.md §12](SPEC.md#12-interaction-model-v2-the-coordinator-decides).
+
 ## Quick start
 
 ```sh
@@ -107,45 +120,47 @@ atf add "Token endpoint" --dep T1 --accept "POST /auth/callback returns a sessio
 atf status
 ```
 
-A subagent (with `ATF_ACTOR=worker-1 ATF_ROLE=subagent ATF_PLAN=<id>` in its env):
+A subagent (with `ATF_ACTOR=worker-1 ATF_ROLE=subagent ATF_PLAN=<id>` in its env) does its
+task and ends:
 
 ```sh
 atf next                                   # claims + starts the next ready task
 atf progress T1 "draft done" --pct 60
 atf artifact T1 docs/auth.md
 atf done T1 -m "Flow documented in docs/auth.md; reviewed against RFC 6749"
+atf block T2 -m "which provider?"          # a decision it cannot make: to the coordinator
 ```
 
-The coordinator waits for anything that needs attention:
+The coordinator waits for anything that needs it, decides, and hands over between sessions:
 
 ```sh
-atf wait --timeout 600000     # returns when something needs you (review, blocker, task to dispatch, ...)
+atf wait --timeout 600000     # what needs you: dispatch/start agents, reviews, questions, the human's input
 atf status                    # board + "needs attention" + active agents
+atf block T2 --for human -m "Provider: GitHub only, or Google too? I'd start with GitHub."
+atf plan ask "Ship behind a feature flag?"          # a question about the whole plan
+atf plan checkpoint "T1 done, T2 waits for the human; next: the login button"
 ```
 
 Reviewing a task in `review`:
 
 ```sh
 atf done T2 -m "approved: tests pass, edge cases covered"       # meets its criteria
-atf changes T2 -m "1. return 401 on bad password 2. add a test"  # send back with feedback
-atf changes T2 -m "use the existing auth service" --fresh        # wrong approach: clean restart
+atf changes T2 -m "1. return 401 on bad password 2. add a test"  # send back; then start an agent for it
 atf add "Rate-limit /login" --from T2 --accept "5/min per IP"    # extra scope found in review
 #   (placed under T2's parent; nothing else is copied: add --assign, --agent, --review as needed)
 ```
 
-Reviewing several tasks at once (e.g. as the human, or comments forwarded from an editor).
-Reviews are decided by the task's reviewer: the coordinator, or for `--reviewer human` tasks
-the human. You act as the actor `human`: the board does this by itself; on the command
-line `export ATF_ACTOR=human` in your own shell (or add `--as human` to each command;
-drafts are kept per actor). This keeps your writes apart from a coordinator you started
-by hand, which uses your user name:
+As the human (the board does this for you): you act as the actor `human`. On the command
+line `export ATF_ACTOR=human` in your own shell (not the coordinator's), or add `--as human`.
+Approving a task that waits for your review takes effect directly; everything else you
+write goes to the coordinator, which decides what happens:
 
 ```sh
-export ATF_ACTOR=human   # in your shell, not the coordinator's
-atf feedback approve T2 "works on mobile"
-atf feedback change T1 "error says 'undefined'" --file src/login.tsx --line 42
-atf feedback note T3 "nice docs"
-atf feedback submit      # one write: T2 done, T1 back with all points, note on T3
+export ATF_ACTOR=human
+atf done T2 -m "works on mobile"                     # approve (a task with --reviewer human)
+atf changes T1 -m "the error says 'undefined'"       # a change request, for the coordinator
+atf note T3 "use the adapter"                        # an answer or remark, for the coordinator
+atf plan note "yes, behind a flag"                   # answers the plan's question
 ```
 
 Tasks the coordinator wants to check before they count as done: `atf add … --review`
@@ -155,14 +170,17 @@ Tasks that need the human to test something: `atf add … --reviewer human`, or 
 
 ## Using it with pi + herdr
 
-The coordinator is a pi you start yourself, so `atf` must be on the PATH of its shell
-(see Install). It writes as `$ATF_ACTOR`, else your user name; the adapter finds its pane
-by that name or by the pane its ATF commands come from, to nudge it when something needs
-it (reviews, questions). Its herdr agent name does not matter.
+Start the coordinator with `atf-herdr coordinate` (or `s` on the board): a tab with pi as
+the plan's coordinator (right identity, kickoff prompt), resuming its last session;
+`--fresh` (`S`) starts a new session after the running one wrote its checkpoint. You can
+also start pi yourself (then `atf` must be on its PATH, see Install); it writes as
+`$ATF_ACTOR`, else your user name, and the adapter finds its pane by that name or by the
+pane its ATF commands come from, to nudge it when something needs it.
 
 ```sh
-# inside herdr, in your coordinator's pane / project dir
-pi                                           # coordinator (skill installed: `atf skill install`)
+# inside herdr, in the project dir
+atf-herdr coordinate                         # the plan's coordinator (resumes its session)
+# the coordinator then starts subagents:
 atf-herdr spawn T1 --name worker-1           # pane + pi + kickoff prompt for task T1
 atf-herdr spawn T2 --name backend            # T2 is a parent task: a whole work package
 atf-herdr spawn T3 --agent reviewer           # run it as a named pi agent definition
@@ -176,9 +194,10 @@ task or package and sends the kickoff prompt. With `atf skill install` agents di
 skill themselves; otherwise pi gets `--skill` and other kinds are told to read
 `skill/atf/SKILL.md`. `--agent NAME` (or `atf add … --agent NAME` on the task) runs it as one
 of your pi agent definitions (`~/.pi/agent/agents/*.md`, `.pi/agents/*.md`, `agents.json`;
-list them with `atf-herdr agents`). Agents launched this way are ephemeral by default: closed when idle
-with nothing to do, and relaunched (resuming their session when they come back to a task
-they already worked on) when work appears. Details: [adapters/herdr/README.md](adapters/herdr/README.md).
+list them with `atf-herdr agents`). Subagents start fresh by default (`--resume` resumes the
+session that worked on the task before) and their panes are closed once they finished.
+They are never relaunched: the coordinator starts a new agent when a task comes back.
+Details: [adapters/herdr/README.md](adapters/herdr/README.md).
 
 **herdr plugin** (`herdr plugin link <repo>/adapters/herdr`): a task board (`prefix+t`, a
 full-height side column; `prefix+alt+t`, a popup) with one scope for all tabs

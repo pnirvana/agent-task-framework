@@ -32,7 +32,9 @@ export function canTransition(from, to) {
 }
 
 const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume', 'agent', 'origin', 'reviewer', 'review'];
-const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume', 'coordinator'];
+const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume', 'coordinator', 'docs'];
+/** Who a question-block is for: the coordinator (default) or the human (an escalation). */
+export const BLOCK_FOR = ['coordinator', 'human'];
 
 function pick(obj, keys) {
   const out = {};
@@ -54,6 +56,7 @@ function newTask(id, ev) {
     status: 'todo',
     blocked_on: [],
     blocked_seq: null,
+    blocked_for: null, // question-blocks: who must answer, 'coordinator' or 'human'
     resume: null, // per-task resume policy (overrides the plan's)
     agent: null, // name of the agent definition to run this task with (opaque; launchers resolve it)
     origin: null, // task this one is a follow-up of (scope found while reviewing it)
@@ -99,6 +102,10 @@ export function fold(events) {
     order: [],
     actors: {},
     reviews: [], // submitted batch reviews: [{seq, ts, actor, summary, items}]
+    docs: [], // the plan's documents (design.md, plan.md, …): paths relative to the project
+    notes: [], // plan-level notes: [{seq, ts, actor, kind, message, for}]
+    checkpoint: null, // latest plan-level checkpoint: where the plan stands (coordinator handoff)
+    session: null, // the coordinator's session {kind, ref, actor, ts}: resume the plan
     last_seq: 0,
     warnings: [],
   };
@@ -124,6 +131,15 @@ export function fold(events) {
           break;
         case 'plan.updated':
           Object.assign(plan, pick(d, PLAN_FIELDS));
+          break;
+        case 'plan.note': {
+          const n = { seq: ev.seq, ts: ev.ts, actor: ev.actor?.id ?? null, kind: d.kind || 'info', message: d.message ?? '', for: d.for ?? null };
+          plan.notes.push(n);
+          if (n.kind === 'checkpoint') plan.checkpoint = n;
+          break;
+        }
+        case 'plan.session':
+          if (d.ref) plan.session = { kind: d.kind ?? null, ref: d.ref, actor: d.actor ?? ev.actor?.id ?? null, ts: ev.ts };
           break;
         case 'plan.review':
           // one submitted review (a batch of approvals / change requests / notes)
@@ -185,6 +201,7 @@ export function fold(events) {
         // `on`: tasks this one is blocked on (a dependency discovered mid-task)
         t.blocked_on = d.status === 'blocked' && Array.isArray(d.on) ? d.on : [];
         t.blocked_seq = d.status === 'blocked' ? ev.seq : null;
+        t.blocked_for = d.status === 'blocked' && !t.blocked_on.length ? (d.for === 'human' ? 'human' : 'coordinator') : null;
         t.history.push({ ...entry, type: 'status', from, to: d.status, message: d.message ?? null, ...(d.changes ? { changes: true } : {}) });
         // "request changes": back to the owner with feedback (status todo, data.changes)
         if (d.changes) {
@@ -283,10 +300,23 @@ export function derive(plan) {
   }
   for (const t of Object.values(tasks)) {
     t.can_resume = t.status === 'blocked' && t.blocked_on.length > 0 && t.blocked_on.every((d) => tasks[d] && eff(tasks[d]) === 'done');
-    // a question-block is "answered" once someone other than the owner adds a note after it
-    t.answered = t.status === 'blocked' && !t.blocked_on.length && t.notes.some((n) => n.seq > (t.blocked_seq ?? Infinity) && n.actor && n.actor !== t.owner);
-    t.resume_policy = t.resume ?? plan.resume ?? 'auto';
+    // a question-block is "answered" once someone other than the owner adds a note after
+    // it; a block for the human only by the human
+    t.answered =
+      t.status === 'blocked' &&
+      !t.blocked_on.length &&
+      t.notes.some((n) => n.seq > (t.blocked_seq ?? Infinity) && n.actor && n.actor !== t.owner && n.kind !== 'checkpoint' && (t.blocked_for !== 'human' || n.actor === HUMAN));
+    // the human's input not yet handled by the coordinator: notes by the human after the
+    // coordinator last wrote on the task (v2: the human talks to the coordinator)
+    const coordLast = Math.max(0, ...t.history.filter((h) => h.actor === plan.coordinator).map((h) => h.seq), ...t.notes.filter((n) => n.actor === plan.coordinator).map((n) => n.seq));
+    t.human_input = t.notes.filter((n) => n.actor === HUMAN && n.seq > coordLast && n.kind !== 'checkpoint');
+    // v2: a new agent instance starts fresh unless resuming is asked for
+    t.resume_policy = t.resume ?? plan.resume ?? 'fresh';
   }
+  // plan level: open questions for the human, and the human's input for the coordinator
+  const planCoordLast = Math.max(0, ...plan.notes.filter((n) => n.actor === plan.coordinator).map((n) => n.seq));
+  plan.human_input = plan.notes.filter((n) => n.actor === HUMAN && n.seq > planCoordLast && n.kind !== 'checkpoint');
+  plan.questions = plan.notes.filter((n, i) => n.kind === 'question' && n.for === 'human' && !plan.notes.slice(i + 1).some((m) => m.actor === HUMAN));
   plan.counts = counts;
   plan.total = plan.order.length;
   plan.progress = leaves ? doneLeaves / leaves : 0;
@@ -312,12 +342,18 @@ export function derive(plan) {
 /**
  * What needs this actor right now (level-triggered, so it can't be missed):
  *  - for the owner: ready leaves, and blocked tasks whose `blocked_on` tasks are now done
- *  - for coordinators: ready tasks nobody owns (to dispatch), tasks in review, and blocked tasks that need a decision
- *    (blocked without `on`, i.e. a question/problem rather than a dependency)
+ *  - for coordinators: ready tasks nobody owns (`dispatch`), tasks in review, blocked tasks
+ *    that need its decision (blocked without `on` and not for the human), work waiting
+ *    for an owner that has nothing in progress (`start`, `changes`, `unblocked`,
+ *    `answered`: start a new agent instance), and the human's input on a task or on the
+ *    plan (`human`; task null for the plan)
  * Returns [{task, reason}] in plan order.
  */
 export function attentionFor(plan, actorId, role) {
   const out = [];
+  // v2: subagents exit when they finish or block. An owner with nothing in progress has no
+  // running agent (as far as ATF can tell); its work waits for the coordinator to start one.
+  const busy = new Set(plan.order.filter((id) => plan.tasks[id].status === 'in_progress' && !plan.tasks[id].children.length).map((id) => plan.tasks[id].owner));
   for (const id of plan.order) {
     const t = plan.tasks[id];
     if (t.children.length) continue;
@@ -330,31 +366,51 @@ export function attentionFor(plan, actorId, role) {
       if (t.ready && !t.owner) out.push({ task: id, reason: 'dispatch' }); // ready, nobody to do it
       // tasks that ask a specific reviewer (e.g. the human) are not the coordinator's to approve
       if (t.status === 'review' && (!t.reviewer || t.reviewer === 'coordinator' || t.reviewer === actorId)) out.push({ task: id, reason: 'review' });
-      else if (t.status === 'blocked' && !t.blocked_on.length && !t.answered) out.push({ task: id, reason: 'blocked' });
+      else if (t.status === 'blocked' && !t.blocked_on.length && !t.answered && t.blocked_for !== 'human') out.push({ task: id, reason: 'blocked' });
+      // work for an owner that is not working: start a new agent instance for it
+      // (`changes`: sent back after review; `unblocked`: its dependencies are done;
+      // `answered`: its question was answered; `start`: ready, e.g. next in a package)
+      // (after the human's input on the task is handled: that comes first, as `human`)
+      else if (t.owner && t.owner !== actorId && !busy.has(t.owner) && !t.human_input.length) {
+        if (t.ready) out.push({ task: id, reason: t.changes_requested ? 'changes' : 'start' });
+        else if (t.can_resume) out.push({ task: id, reason: 'unblocked' });
+        else if (t.answered) out.push({ task: id, reason: 'answered' });
+      }
     }
+  }
+  if (role === 'coordinator') {
+    // the human's input (answers, change requests, remarks) on any task: the coordinator decides
+    for (const id of plan.order) if (plan.tasks[id].human_input?.length) out.push({ task: id, reason: 'human' });
+    if (plan.human_input?.length) out.push({ task: null, reason: 'human' });
   }
   return out;
 }
 
 /**
- * What in this plan needs the human driving the agents (as opposed to an agent):
- * tasks in review, question-blocks (blocked without `on`), failed tasks, and a plan
- * whose work is all finished but which is still open. Oldest first.
+ * What in this plan needs a decision (as opposed to an agent's own work): tasks in
+ * review, question-blocks (blocked without `on`), failed tasks, open plan questions for
+ * the human, and a plan whose work is all finished but which is still open. Each item
+ * says `for` whom: 'human' or 'coordinator' (or a named reviewer). Oldest first.
  * Harness-specific signals (e.g. stalled agents) are added by frontends.
  */
 export function driverInbox(plan) {
+  // `for`: who acts on the item. Frontends show the human's items as "needs you", and the
+  // coordinator's too when no coordinator is running (else they would wait unseen).
   const items = [];
   const since = (t, status) => [...t.history].reverse().find((h) => h.type === 'status' && h.to === status)?.ts ?? t.updated_at;
   for (const id of plan.order) {
     const t = plan.tasks[id];
     if (t.children.length) continue;
-    if (t.status === 'review') items.push({ kind: t.reviewer && t.reviewer !== 'coordinator' ? 'your-review' : 'review', task: id, ts: since(t, 'review'), actor: t.owner, message: t.last_message, reviewer: t.reviewer });
-    else if (t.status === 'blocked' && !t.blocked_on.length && !t.answered) items.push({ kind: 'question', task: id, ts: since(t, 'blocked'), actor: t.owner, message: t.last_message });
-    else if (t.status === 'failed') items.push({ kind: 'failed', task: id, ts: since(t, 'failed'), actor: t.owner, message: t.last_message });
+    if (t.status === 'review') {
+      const human = !!t.reviewer && t.reviewer !== 'coordinator';
+      items.push({ kind: human ? 'your-review' : 'review', for: t.reviewer === HUMAN ? 'human' : human ? t.reviewer : 'coordinator', task: id, ts: since(t, 'review'), actor: t.owner, message: t.last_message, reviewer: t.reviewer });
+    } else if (t.status === 'blocked' && !t.blocked_on.length && !t.answered) items.push({ kind: 'question', for: t.blocked_for ?? 'coordinator', task: id, ts: since(t, 'blocked'), actor: t.owner, message: t.last_message });
+    else if (t.status === 'failed') items.push({ kind: 'failed', for: 'coordinator', task: id, ts: since(t, 'failed'), actor: t.owner, message: t.last_message });
   }
+  for (const q of plan.questions ?? []) items.push({ kind: 'plan-question', for: 'human', task: null, ts: q.ts, actor: q.actor, message: q.message });
   const leaves = plan.order.filter((id) => !plan.tasks[id].children.length);
   if (plan.status === 'active' && leaves.length && leaves.every((id) => TERMINAL.has(plan.tasks[id].status)))
-    items.push({ kind: 'finished', task: null, ts: plan.updated_at, actor: null, message: 'all tasks finished; close the plan' });
+    items.push({ kind: 'finished', for: 'human', task: null, ts: plan.updated_at, actor: null, message: 'all tasks finished; close the plan' });
   return items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
 }
 
@@ -378,17 +434,16 @@ export function planSummary(plan) {
 
 /**
  * Should the next agent for this task resume an earlier session or start fresh?
- * Rule: context belongs to the task. A task that was already worked on (blocked,
- * answered, reopened after review) resumes the session that worked on it; a task
- * never started gets a fresh agent. Policies: 'auto' (that rule), 'resume'
- * (always resume if a session exists), 'fresh' (never). Without a session reference
- * the answer is always fresh; the checkpoint note then carries the state.
+ * Policies: 'fresh' (the default: a new instance with a focused prompt; the checkpoint,
+ * feedback and history carry the state), 'auto' (resume the session of a task that was
+ * already worked on, fresh for one never started), 'resume' (always resume if a session
+ * exists). Without a session reference the answer is always fresh.
  * Pure and harness-independent: launchers decide *how* to resume.
  */
 export function launchPlan(plan, taskId, actorId = null) {
   const t = plan.tasks[taskId];
   if (!t) return null;
-  const policy = t.fresh_next ? 'fresh' : t.resume_policy ?? t.resume ?? plan.resume ?? 'auto';
+  const policy = t.fresh_next ? 'fresh' : t.resume_policy ?? t.resume ?? plan.resume ?? 'fresh';
   const session = (actorId && t.sessions[actorId]) || t.session || null;
   const worked = !!t.started_at;
   let mode = 'fresh';

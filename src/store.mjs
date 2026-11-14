@@ -372,7 +372,8 @@ export function writeDrafts(root, planId, actorId, items) {
 /**
  * Turn drafts into one transaction's events. Per task: change requests (and notes)
  * on a task in review/done send it back with all points numbered; on other tasks they
- * become feedback notes. Approvals mark a task in review done. One plan.review event
+ * become feedback notes. The human's change requests never send a task back: they
+ * become one feedback note for the coordinator, which decides what to do (§12.5). Approvals mark a task in review done. One plan.review event
  * summarizes the batch, so a coordinator waiting on the plan wakes once.
  */
 export function reviewEvents(state, items, actorOrId, { force = false } = {}) {
@@ -382,8 +383,10 @@ export function reviewEvents(state, items, actorOrId, { force = false } = {}) {
   const refused = [];
   for (const it of items) {
     if (!state.tasks[it.task]) continue;
-    // approving or sending back is a review decision; notes anyone may leave
-    if (it.action !== 'note' && !force) {
+    // approving or sending back is a review decision; notes anyone may leave. The human's
+    // change requests are input for the coordinator (a note), so they need no permission.
+    const humanInput = actor.role === 'human' && it.action === 'change';
+    if (it.action !== 'note' && !humanInput && !force) {
       const why = reviewRefusal(state.tasks[it.task], actor);
       if (why) {
         refused.push({ task: it.task, action: it.action, why });
@@ -395,13 +398,19 @@ export function reviewEvents(state, items, actorOrId, { force = false } = {}) {
   }
   const loc = (it) => (it.file ? ` (${it.file}${it.line ? ':' + it.line : ''})` : '');
   const evs = [];
-  const summary = { approved: [], changes: [], notes: [] };
+  const summary = { approved: [], changes: [], notes: [], input: [] };
   for (const [id, its] of byTask) {
     const t = state.tasks[id];
     const changes = its.filter((i) => i.action === 'change');
     const notes = its.filter((i) => i.action === 'note');
     const approve = its.find((i) => i.action === 'approve');
-    if (changes.length && ['review', 'done'].includes(t.status)) {
+    if (changes.length && actor.role === 'human') {
+      // v2: the human does not send work back; the coordinator reads this and decides
+      // (send it back with its own instructions, a follow-up task, a plan change, …)
+      const points = [...changes.map((i, n) => `${n + 1}. ${i.message}${loc(i)}`), ...notes.map((i) => `(note) ${i.message}${loc(i)}`)].join('\n');
+      evs.push({ type: 'task.note', task: id, data: { kind: 'feedback', message: `change request: ${points}` } });
+      summary.input.push(id);
+    } else if (changes.length && ['review', 'done'].includes(t.status)) {
       // change requests are the numbered points to address; notes ride along unnumbered
       const points = [...changes.map((i, n) => `${n + 1}. ${i.message}${loc(i)}`), ...notes.map((i) => `(note) ${i.message}${loc(i)}`)].join('\n');
       evs.push({ type: 'task.status', task: id, data: { status: 'todo', changes: true, message: points } });
@@ -409,7 +418,7 @@ export function reviewEvents(state, items, actorOrId, { force = false } = {}) {
     } else {
       for (const i of [...changes, ...notes]) evs.push({ type: 'task.note', task: id, data: { kind: 'feedback', message: `${i.action === 'change' ? 'change: ' : ''}${i.message}${loc(i)}` } });
       if (changes.length || notes.length) summary.notes.push(id);
-      if (approve && !changes.length) {
+      if (approve && !changes.length && !summary.input.includes(id)) {
         if (t.status === 'review') {
           evs.push({ type: 'task.status', task: id, data: { status: 'done', message: `approved by ${actorId}${approve.message ? ': ' + approve.message : ''}` } });
           summary.approved.push(id);
@@ -418,9 +427,10 @@ export function reviewEvents(state, items, actorOrId, { force = false } = {}) {
     }
   }
   // sending work back in a finished plan reopens the plan (else nothing would pick it up)
-  if (summary.changes.length && state.status !== 'active')
-    evs.push({ type: 'plan.status', data: { status: 'active', message: `reopened: changes requested on ${summary.changes.join(',')}` } });
-  const parts = [summary.approved.length && `${summary.approved.length} approved (${summary.approved.join(',')})`, summary.changes.length && `${summary.changes.length} sent back with changes (${summary.changes.join(',')})`, summary.notes.length && `notes on ${summary.notes.join(',')}`].filter(Boolean);
+  const sentBack = [...summary.changes, ...summary.input];
+  if (sentBack.length && state.status !== 'active')
+    evs.push({ type: 'plan.status', data: { status: 'active', message: `reopened: changes requested on ${sentBack.join(',')}` } });
+  const parts = [summary.approved.length && `${summary.approved.length} approved (${summary.approved.join(',')})`, summary.changes.length && `${summary.changes.length} sent back with changes (${summary.changes.join(',')})`, summary.input.length && `change requests for the coordinator on ${summary.input.join(',')}`, summary.notes.length && `notes on ${summary.notes.join(',')}`].filter(Boolean);
   const text = `review by ${actorId}: ${parts.join('; ') || 'nothing applicable'}`;
   evs.push({ type: 'plan.review', data: { summary: text, items: items.map(({ task, action, message, file, line }) => ({ task, action, message, ...(file ? { file } : {}), ...(line ? { line } : {}) })) } });
   return { events: evs, summary: text, refused };

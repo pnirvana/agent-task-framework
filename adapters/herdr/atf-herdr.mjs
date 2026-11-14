@@ -11,7 +11,7 @@ import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isB
 import { sync, notifyForEvents } from './lib/sync.mjs';
 import { chooseBoardSplit, tabLayout, planRebuild, withPlacementLock } from './lib/layout.mjs';
 import { discoverAgents, resolveAgentDef, piArgsForAgent } from './lib/agents.mjs';
-import { agentKinds, launchAgent, lifecycle, lifecycleSweep, stateDir, recordSessionsForEvents } from './lib/launch.mjs';
+import { agentKinds, launchAgent, launchCoordinator, lifecycle, lifecycleSweep, stateDir, recordSessionsForEvents } from './lib/launch.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SELF = path.join(HERE, 'atf-herdr.mjs');
@@ -22,13 +22,20 @@ const HELP = `atf-herdr — run and watch ATF agents inside herdr
   atf-herdr spawn <task> [--name NAME] [--kind pi] [--direction right|down]
                   [--agent DEF] [--early] [--target-pane ID | --workspace WS] [--fresh|--resume]
                   [--dry-run] [-- <agent args>]
-      start an agent for a task or work package: place a pane (largest pane of the
-      tab, split along its long side; an "agents" tab when full), resume the task's
-      earlier session or start fresh (ATF decides; --fresh/--resume force), assign
-      it and send the kickoff prompt
-  atf-herdr sweep [--delay S]  one lifecycle pass: nudge idle agents that have work,
-                               close idle ATF agents with nothing to do (ephemeral),
-                               relaunch/resume agents when work appears for them
+      (the coordinator's tool) start an agent for a task or work package: place a pane
+      (largest pane of the tab, split along its long side; an "agents" tab when full),
+      assign it and send the kickoff prompt. A new agent starts fresh with the task,
+      its checkpoint and the coordinator's instructions; --resume resumes the session
+      that worked on the task before. Refused while an agent of that name still runs.
+  atf-herdr coordinate [--plan ID] [--fresh] [--kind pi] [--dry-run]
+      start the plan's coordinator in its own tab: resumes the plan's coordinator
+      session (if any), or --fresh starts a new one. A coordinator that is still
+      running is left alone, or with --fresh first asked for a plan checkpoint
+      (atf plan checkpoint) and then replaced.
+  atf-herdr sweep [--delay S]  one lifecycle pass: close agents ATF started once they
+                               finished (idle, nothing in progress), nudge an idle
+                               coordinator that has something to handle (incl. stalled
+                               agents), report plans without a coordinator
   atf-herdr board              open the task board (toggle) for this project
   atf-herdr overview           open the overview of all known projects (popup)
   atf-herdr agents             agent definitions spawn --agent can use (pi: ~/.pi/agent/agents/*.md,
@@ -53,6 +60,7 @@ const sep = argv.indexOf('--');
 const agentArgs = sep >= 0 ? argv.slice(sep + 1) : [];
 const main = sep >= 0 ? argv.slice(0, sep) : argv;
 const BOOL = new Set(['help', 'dry-run', 'fresh', 'resume', 'early']);
+
 const flags = {};
 const pos = [];
 for (let i = 0; i < main.length; i++) {
@@ -171,6 +179,34 @@ function workspacePane(ws) {
   const panes = herdr(['pane', 'list', '--workspace', ws])?.panes || [];
   if (!panes.length) fail(`no panes in workspace ${ws}`);
   return (panes.find((p) => p.focused) || panes[0]).pane_id;
+}
+
+// ---------- coordinator ----------
+function coordinateCmd() {
+  if (flags.help) {
+    const lines = HELP.split('\n');
+    const i = lines.findIndex((l) => l.includes('atf-herdr coordinate'));
+    const j = lines.findIndex((l, k) => k > i && /^  atf-herdr /.test(l));
+    process.stdout.write(lines.slice(i, j).join('\n') + '\n');
+    process.exit(0);
+  }
+  if (!inHerdr() && !flags['dry-run']) fail('not running inside herdr (HERDR_ENV != 1)');
+  const root = flags.root || resolveRoot();
+  const planId = flags.plan || pos[1] || getCurrentPlan(root);
+  if (!planId) fail('no plan selected (--plan or $ATF_PLAN)');
+  try {
+    const say = (m) => process.stdout.write(m + '\n');
+    const r = launchCoordinator({ root, planId, fresh: !!flags.fresh, kind: flags.kind, dryRun: !!flags['dry-run'], say, handoffMs: flags.timeout ? Number(flags.timeout) * 1000 : undefined });
+    if (r.mode === 'running') {
+      if (!flags['dry-run']) herdr(['agent', 'focus', r.pane]);
+      return say(`coordinator ${r.name} is already running in pane ${r.pane} (--fresh replaces it with a new session)`);
+    }
+    if (flags['dry-run']) return say(`coordinator ${r.name}: would start ${r.mode}${r.session ? ` (session ${r.session})` : ''}${r.pane ? `, replacing the one in pane ${r.pane}` : ''}`);
+    sync(root);
+    say(`coordinator ${r.name} started (${r.mode === 'resume' ? 'resumed its session' : 'new session'}) in pane ${r.pane}`);
+  } catch (e) {
+    fail(e.message);
+  }
 }
 
 // ---------- board ----------
@@ -452,6 +488,9 @@ switch (pos[0]) {
     break;
   case 'sweep':
     await sweepCmd();
+    break;
+  case 'coordinate':
+    coordinateCmd();
     break;
   case 'board':
   case 'action-board':

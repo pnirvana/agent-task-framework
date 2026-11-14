@@ -9,6 +9,13 @@ description: "Plan, delegate and track multi-agent work with the `atf` CLI (Agen
 `.atf/`. Humans and dashboards watch that log, so **your progress only exists if you
 report it.** Every command accepts `--json` for machine-readable output.
 
+**The model.** The **coordinator** is the brain of a plan: it plans, starts every
+subagent, reviews, answers questions and makes every decision; it runs as long as the
+plan is active. A **subagent** does one assignment (a task or a work package), reports,
+finishes and ends; if its task comes back (changes, an answer, a dependency done), the
+coordinator starts a new agent for it with fresh context and precise instructions. The
+**human** supervises: their questions, answers and feedback go through the coordinator.
+
 **Who you are matters** (what `atf wait` reports, who may change which task). Check it
 first with `atf whoami`: it shows your identity, your role and why, and the plan.
 - Identity: `$ATF_ACTOR` (or `--as NAME`), else your user name.
@@ -23,37 +30,31 @@ more than one plan may exist in the project.
 
 ## If you are a SUBAGENT (assigned a task)
 
-You are either given **one task** (e.g. T3) or a **work package**: a parent task (e.g. T2)
-whose whole subtree you own. `atf list --mine` shows everything you own.
+You are given **one task** (e.g. T3) or a **work package**: a parent task (e.g. T2) whose
+whole subtree you own (`atf list --mine` shows it). Your prompt holds the coordinator's
+instructions. **You do the work; you do not make decisions beyond your task, and you do
+not wait.** Anything that needs a decision goes back to the coordinator as a `block`.
 
 For a work package, loop: `atf next --package` → do the task → finish it (step 6) → repeat.
-Sending a task to `review` does not end your work: move on to the next ready task. If a
-task is too big, split it inside your package: `atf add "<title>" --parent T4 --accept "..."`
-(agents can add tasks only inside their own package; for anything else, note it for the
-coordinator). Reviewing, reopening or releasing other agents' tasks is not yours to do.
+Sending a task to `review` or blocking it does not end your work: continue with the next
+ready task of your package. **When nothing is ready for you any more, end your turn.**
+The coordinator starts a new agent when there is more (`atf wait` is the coordinator's;
+if you call it, it only tells you to finish). If a task is too big, split it inside your
+package: `atf add "<title>" --parent T4 --accept "..."` (only inside your own package).
+Reviewing, reopening or releasing other agents' tasks is not yours to do.
 
-**When nothing is ready for you**, run `atf wait --timeout 600000`. It returns at once if
-something already needs you, otherwise when something does (a dependency done, a review
-answered, a task reopened). What to do next depends on `$ATF_LIFECYCLE`:
-- `ephemeral` (agents launched by a harness that resumes them, e.g. herdr): `atf wait`
-  tells you to **end your turn**. Do so. Your pane may be closed; when work appears you
-  are resumed in this same session or a fresh agent continues from your checkpoint.
-- otherwise: keep looping on `atf wait` (re-run on timeout) until it says you own no
-  open tasks. Don't end your turn while you own open tasks.
-
-**If you were resumed** (your prompt starts with `[ATF] You are resumed`): you have your
-earlier context. Run `atf show <id>` for what changed, `atf start <id>`, continue.
-**If you start fresh on a task that was worked on before** (its `atf show` has a
-checkpoint, notes or an earlier result): continue from that state, don't start over.
+**Starting on a task that was worked on before** (its `atf show` has a checkpoint, notes,
+feedback or an earlier result): continue from that state, don't start over. The
+coordinator's latest instructions (in your prompt, and under "changes requested" in
+`atf show`) take precedence over earlier notes.
 
 **Discovered a dependency on someone else's work** (e.g. your tests need a file another
-package produces)? Don't wait silently inside an in-progress task and don't do their work.
-Write a checkpoint, then `atf block T4 --on T8 -m "needs web/index.html from T8"`, and
-continue with other ready tasks. `atf wait` reports T4 as `unblocked` when T8 is done;
-then `atf start T4`.
+package produces)? Don't wait inside an in-progress task and don't do their work. Write a
+checkpoint, then `atf block T4 --on T8 -m "needs web/index.html from T8"`, and continue
+with other ready tasks, or end. When T8 is done the coordinator starts an agent for T4.
 
-**Checkpoint before you block or stop mid-task.** It is what a fresh agent (or you, after
-a restart) continues from, so make it concrete:
+**Checkpoint before you block or stop mid-task.** It is all the next agent on the task
+knows, so make it concrete:
 `atf note T4 --kind checkpoint "done: 8 tests in test_server.py, API ones pass. left: 2 page tests fail until web/index.html exists. verify: python3 -m unittest -v test_server"`
 
 For each task:
@@ -63,7 +64,8 @@ For each task:
 3. Report at real milestones, not on every step, roughly every few minutes of work:
    `atf progress T3 "migrations written, wiring handlers" --pct 40`
 4. Record outputs as you produce them:
-   `atf artifact T3 src/auth/callback.ts` · `atf artifact T3 abc1234 --kind commit`
+   `atf artifact T3 src/auth/callback.ts` · `atf artifact T3 abc1234 --kind commit` ·
+   `atf artifact T3 feature/login --kind branch` (reviewers open these directly)
 5. Record decisions others need to know: `atf note T3 "chose cookie sessions (no redis)" --kind decision`
 6. Finish with exactly one of:
    - `atf done T3 -m "<what was done, where, how verified>"`: all acceptance criteria met
@@ -73,55 +75,57 @@ For each task:
      else has to look before it counts as done. **Required** when `atf show T3` says
      `review: required` or names a reviewer (`atf done` refuses then). Otherwise use it
      only when one of these holds, and say which in the message:
-     - a criterion is one you cannot verify yourself (needs judgement, another system, a person);
+     - a criterion is one you cannot verify yourself (needs judgement, another system,
+       a person: say exactly what to test and how; the coordinator decides whether the
+       human looks at it);
      - you deviated from the task or its criteria, or made a decision the coordinator should confirm;
      - the change is risky for others: shared interfaces, data migrations, deletions;
      - the result is a proposal or options for the coordinator to choose from.
      Not "to be safe": every review costs the coordinator a round, so when the criteria
-     are met and checked, finish with done. Needs the human? See step 9.
-   - `atf block T3 -m "<precise question or missing input>"`: cannot continue without help
-   - `atf fail T3 -m "<what was tried, why it failed>"`: cannot be done as specified
-7. If blocked on a question (no `--on`): write a checkpoint first, then block, and stop
-   working on that task. When the coordinator answers with a note, `atf wait` reports
-   the task as `answered`. Meanwhile continue with other ready tasks.
-8. **Started early?** If your task depends on unfinished tasks and you were told to start
+     are met and checked, finish with done.
+   - `atf block T3 -m "<precise question or missing input>"`: you cannot continue without
+     a decision. Write a checkpoint first. The question goes to the coordinator (it
+     answers or asks the human); you continue with other ready tasks or end. Questions
+     belong in a block, not in a note: a note wakes nobody.
+   - `atf fail T3 -m "<what was tried, why it failed>"`: cannot be done as specified.
+7. **Started early?** If your task depends on unfinished tasks and you were told to start
    early (`atf start <id> --early`), do only what does not need them. Then write a
-   checkpoint and `atf block <id> --on <deps> -m "<what you need>"`; you will be woken
-   (or resumed) when they are done.
-9. **Needs the human?** If finishing your task requires the human to test or check
-   something (try the UI, run it on their machine, judge a result), send it to review
-   for them, with exact steps: `atf review T3 -m "please test: 1. … 2. … expected: …" --by human`.
-   The coordinator will not approve it; the human's verdict comes back as approval or
-   change requests.
-10. **Changes requested**: when `atf wait` reports a task as `changes` (or your prompt says
-   changes were requested), the coordinator sent it back from review. Run `atf show <id>`:
-   the feedback is listed under "changes requested". `atf start <id>`, address **every**
-   point, record how in a note (`atf note <id> "1. … 2. …"`), and send it to review again
-   with a summary of what changed. If you disagree with a point, do not silently skip it:
-   ask with `atf note <id> "…" --kind question` (or block on the question). Keep the change
-   to what was asked; extra scope belongs in a follow-up task, not in this one.
+   checkpoint and `atf block <id> --on <deps> -m "<what you need>"`.
+8. **Changes requested**: your prompt (and `atf show <id>`, under "changes requested")
+   holds the coordinator's instructions. `atf start <id>`, address **every** point,
+   record how in a note (`atf note <id> "1. … 2. …"`), and send it to review again with a
+   summary of what changed. If you disagree with a point or it needs more than the task
+   allows, do not silently skip or stretch it: block with the question.
 
 Rules: stay within your task's scope; if you discover extra work, add a note with
-`--kind warning` rather than silently expanding scope. Never mark `done` with failing
-tests or unmet acceptance criteria. The `-m` summary is what the coordinator reads
-instead of your transcript, so make it self-contained.
+`--kind warning` (the coordinator reads it at review) rather than expanding scope. Never
+mark `done` with failing tests or unmet acceptance criteria. The `-m` summary is what the
+coordinator reads instead of your transcript, so make it self-contained.
 
 ## If you are the COORDINATOR
 
-0. Set up the project, once. Run `atf whoami`: if it fails with "no .atf directory found",
-   this project has never used ATF. Run `atf init` in the directory you coordinate the
-   work from; that directory is the project (it may contain several repositories, or
-   none), and every agent working below it shares its plans. If you run inside herdr
-   (`$HERDR_ENV` is `1`), also run `atf-herdr enable-sync` once: it hooks the project up
-   to herdr's pane labels, notifications and the agent lifecycle (closing idle agents,
-   resuming them when work appears). Both are safe to run again.
-1. Create the plan: `atf plan new "Add OAuth login" --goal "Users can sign in with GitHub"`.
-   It prints the plan id, and **you become its coordinator** (recorded on the plan, so it
-   holds without any environment variables). Use `--plan <id>` on your following commands
-   and confirm with `atf whoami --plan <id>` that your role is `coordinator`. If the plan
-   was created by someone else (e.g. the human), ask for it to be handed to you
-   (`atf plan update --coordinator <your name>`) or pass `--role coordinator`.
-2. Decompose into a hierarchy that mirrors the plan: top-level tasks are the plan's
+You are the only decision maker of the plan and the only one who starts subagents. Keep
+running while the plan is active: loop on `atf wait`; never end your turn to ask the
+human something (ask through ATF, step 6, and keep waiting).
+
+0. **Set up the project, once.** Run `atf whoami`: if it fails with "no .atf directory
+   found", run `atf init` in the directory you coordinate the work from; that directory
+   is the project (it may contain several repositories, or none). If you run inside herdr
+   (`$HERDR_ENV` is `1`), also run `atf-herdr enable-sync` once (pane labels,
+   notifications, closing finished agents). Both are safe to run again.
+1. **Documents first.** Larger work starts with a design discussion with the human (a
+   "grill me" phase: ask until requirements, constraints and the approach are settled).
+   Write the result into human-readable files in the project, typically `design.md` (the
+   why: requirements, decisions and rejected alternatives, architecture, constraints) and
+   `plan.md` (approach and phases, and why; **no status or checkboxes**: ATF holds the
+   status). They outlive the plan and carry the knowledge across coordinator sessions.
+2. **Create the plan** and link the documents:
+   `atf plan new "Add OAuth login" --goal "Users can sign in with GitHub" --doc design.md --doc plan.md`.
+   It prints the plan id, and **you become its coordinator** (recorded on the plan). Use
+   `--plan <id>` on your following commands and confirm with `atf whoami --plan <id>` that
+   your role is `coordinator`. If the plan was created by someone else, ask for it to be
+   handed to you (`atf plan update --coordinator <your name>`).
+3. **Decompose** into a hierarchy that mirrors the plan: top-level tasks are the plan's
    branches (e.g. Backend, Frontend), leaves are units one agent finishes in one session,
    with verifiable acceptance criteria and explicit dependencies:
    ```
@@ -130,109 +134,102 @@ instead of your transcript, so make it self-contained.
    atf add "Token endpoint" --parent T2 --dep T1 --accept "POST /auth/callback returns session" --accept "tests pass"
    atf add "Login button" --dep T3 --label frontend
    atf add "Migrate user table" --accept "…" --review    # must come back to you for review
+   atf add "Checkout flow" --accept "…" --reviewer human # the human tests it
    ```
-   Use `--review` (not a line in the description) for tasks you want to check before they
-   count as done: the subagent then has to finish with `atf review`, `atf done` refuses.
-   Parents are containers; their status rolls up from subtasks. Only leaves get worked on.
-   Declare every dependency that crosses packages (e.g. backend tests that check a page the
-   frontend builds depend on that frontend task). Undeclared cross-package dependencies are
-   the main cause of agents waiting on each other.
-3. Dispatch. **Every task of a plan is delegated through ATF**, never through another
-   subagent mechanism (e.g. pi's `subagent` tool or agent handoffs): work started that way
-   is invisible to ATF (no status, no board, no review flow, no lifecycle). In herdr the
-   launcher is `atf-herdr spawn <task>`; it can run a task as a **named agent
-   definition**: `atf-herdr agents` lists them (pi agent definitions such as `reviewer`,
-   `scout`, `worker`), and `atf-herdr spawn T7 --agent reviewer` runs T7 with that
-   definition's model, tools and prompt. Record the choice on the task when you create it
-   (`atf add "Review auth" --agent reviewer`): spawning, the board and relaunches then use
-   it automatically. Other subagent tools are fine only for quick work **outside** the
-   plan, such as a one-off exploration question whose answer you need right now and
-   that is not a task.
-   **Starting a dependent task early**: a task waiting on unfinished dependencies is not
-   ready, and `spawn`/`start` refuse it. If a meaningful part of it can be done without
-   them (e.g. tests or scaffolding against an agreed interface), start it early:
-   `atf-herdr spawn T5 --early` (or `atf start T5 --early`). The agent does what it can,
-   then blocks `--on` the dependency with a checkpoint and is resumed when it is done.
-   If the dependency is not real, remove it instead: `atf edit T5 --dep T2` keeps only T2,
-   `atf edit T5 --dep ''` removes all.
-   Delegate **work packages, not loose lists**: when one agent should do several
-   related tasks, put them under a parent task and assign the parent
-   (`atf assign T2 backend`). The subtree is then visibly that agent's package, other agents
-   cannot start its tasks, and progress rolls up per package. Assign single leaves only for
-   one-off tasks. `atf list --ready` shows what can start now.
-   Outside herdr, launch subagents with `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR=<name>`,
+   Use `--review` for tasks you want to check before they count as done (the subagent
+   must finish with `atf review`). Parents are containers; their status rolls up from
+   subtasks. Declare every dependency that crosses packages: undeclared cross-package
+   dependencies are the main cause of agents waiting on each other.
+4. **Dispatch: you start every subagent.** **Every task of a plan is delegated through
+   ATF**, never through another subagent mechanism (e.g. pi's `subagent` tool): work
+   started that way is invisible to ATF. In herdr: `atf-herdr spawn <task>`; it assigns
+   the task, starts a fresh agent and gives it the task. `atf-herdr agents` lists named
+   agent definitions (e.g. `reviewer`, `worker`); `atf-herdr spawn T7 --agent reviewer`
+   (or `atf add … --agent reviewer`) runs a task with one, e.g. a cheaper model for a
+   mechanical task. Delegate **work packages, not loose lists**: put related tasks under
+   a parent and spawn the parent (`atf-herdr spawn T2 --name backend`); the agent works
+   through it. `atf list --ready` shows what can start now.
+   **Starting a dependent task early**: if a meaningful part of a waiting task can be done
+   already (tests against an agreed interface), `atf-herdr spawn T5 --early`; the agent
+   does what it can and blocks `--on` the dependency. If the dependency is not real,
+   remove it: `atf edit T5 --dep T2` keeps only T2, `--dep ''` removes all.
+   Outside herdr, start subagents with `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR=<name>`,
    `ATF_ROLE=subagent` in their environment and a prompt like *"You are backend. You own
-   ATF work package T2. Follow the atf skill."* (in herdr, `atf-herdr spawn T2 --name
-   backend` does all of it, for a package or a single task).
-4. Monitor without polling agents directly:
-   - `atf wait --timeout 600000` returns as soon as something needs you: a task to
-     **dispatch** (ready, nobody owns it, e.g. its dependency just finished), a task in
-     review, a blocker without `--on`, or your own ready work; plus every task that
-     finished or failed **since your previous wait** (ATF keeps a per-agent cursor). So
-     nothing is lost if a task finishes before you call wait again.
-     Keep looping on it until the plan is done; don't end your turn while agents work.
-   - `atf status` shows the tree with owners; `atf plan show` gives the plan overview
-     (structure, ownership, decisions, open questions, artifacts)
-   - `atf log -n 20` shows recent events
-5. React: answer blockers with a note on the task (`atf note T4 "use cookies" --kind decision`);
-   the owner sees it as `answered` (and in herdr is resumed automatically); dispatch
-   newly ready tasks; retry failures (`atf reopen T4`).
-   **Review** every task in `review` against its acceptance criteria (read the change, run
-   its checks), then decide exactly one of:
-   - **Meets the criteria** → approve: `atf done T4 -m "approved: <what you checked>"`.
-   - **Does not meet them** (bug, missing case, criteria not satisfied) → request changes:
-     `atf changes T4 -m "1. <concrete change> 2. <…>"`. Be specific and number the points;
-     the owner gets it back with your feedback and continues with its own context. If
-     the *approach* is wrong rather than the details, add `--fresh` so the next attempt
-     (only that one) starts from a clean agent (it still sees the feedback and history).
-     Sending back a task of a completed plan reopens the plan.
-   - **Meets them, but the review found more work** (extra edge cases, a refactor, a
-     related feature) → approve it, then add the extra work as follow-up tasks:
-     `atf add "<follow-up>" --from T4 --accept "…"`. A follow-up is placed under T4's
-     parent, so if T4 sits in an assigned work package it goes to that package's owner.
-     It does **not** take over T4's own assignee: if T4 was assigned directly (or has no
-     parent), the follow-up starts unassigned. Dispatch it like any new task, or pass
-     `--assign <agent>` (e.g. T4's owner, to reuse its context) or `--parent` to place it
-     elsewhere. Nothing else is copied from T4 either: not its agent definition
-     (`--agent`; only a work package's agent applies to everything in it), reviewer or
-     `--review`, labels, priority or dependencies. Pass what the follow-up needs.
-     Do not reopen or stretch a task beyond its acceptance criteria.
-   - **The criteria themselves were wrong** → fix them first
-     (`atf edit T4 --accept "…"`, which replaces the list), then request changes.
-   - **Cannot be done as specified** → `atf cancel T4 -m why` and re-plan.
+   ATF work package T2. Follow the atf skill."*
+   Other subagent tools are fine only for quick work **outside** the plan (a one-off
+   exploration question whose answer you need now).
+5. **Monitor**: `atf wait --timeout 600000` in a loop. It returns as soon as something
+   needs you, with the reason per task, plus every task that finished or failed since
+   your previous wait (nothing is lost between waits):
+   - `dispatch`: ready, nobody owns it → spawn an agent.
+   - `start`, `changes`, `unblocked`, `answered`: work for an owner that is not working
+     (it was assigned, sent back, its dependency is done, its question answered) → spawn a
+     new agent for it (`atf-herdr spawn <task>`); it starts fresh with the task, its
+     checkpoint and your instructions.
+   - `review`: review it (step 6).
+   - `blocked`: a subagent's question → answer or escalate (step 6).
+   - `human`: the human wrote on a task (or on the plan, task `null`) → step 7.
+   `atf status` shows the tree with owners; `atf plan show` the plan overview; `atf log -n 20`
+   recent events.
+6. **Decide.**
+   - **Questions from subagents.** Answer them when you can: record the answer on the
+     task (`atf note T4 "use cookies" --kind decision`), then spawn a new agent for it,
+     with the answer in its instructions. When the human must decide, **escalate it on
+     the task**, never only in your terminal: `atf block T4 --for human -m "<the
+     question, the context needed to answer it, and your recommendation>"`. The human
+     sees it on that task with its context; their answer comes back to you as `human`.
+     A question about the whole plan: `atf plan ask "<question + context + your view>"`.
+     A failure you cannot resolve: escalate it the same way (`atf block T4 --for human`).
+   - **Review** every task in `review` against its acceptance criteria (read the change,
+     run its checks), then decide exactly one of:
+     - **Meets the criteria** → approve: `atf done T4 -m "approved: <what you checked>"`.
+     - **Does not meet them** → `atf changes T4 -m "1. <concrete change> 2. <…>"`, then
+       spawn a new agent for it. Be specific and number the points: they are the new
+       agent's instructions. If the *approach* is wrong, say so and describe the right
+       one (`--fresh` additionally makes sure no earlier session is resumed).
+     - **Meets them, but the review found more work** → approve it, then add follow-ups:
+       `atf add "<follow-up>" --from T4 --accept "…"`. A follow-up is placed under T4's
+       parent (so inside an assigned package it belongs to that package's owner); nothing
+       else is copied from T4 (not its assignee, `--agent`, reviewer, labels,
+       dependencies): pass what it needs. Do not stretch a task beyond its criteria.
+     - **The criteria themselves were wrong** → `atf edit T4 --accept "…"` (replaces the
+       list), then request changes.
+     - **Cannot be done as specified** → `atf cancel T4 -m why` and re-plan.
+     If a subagent says the human must test something, decide whether that is needed;
+     if so, hand the review to them: `atf edit T4 --reviewer human`.
+   - **Reviews by the human.** Tasks whose reviewer is the human are not yours to approve
+     (`atf done` refuses; `atf wait` does not report them). Their approval marks the task
+     done; anything else they write comes to you as `human` (step 7).
+7. **The human's input** (`human` in `atf wait`; `atf show <task>` lists it under "human
+   input", `atf plan show` for the plan). It is addressed to you, not to the subagent:
+   **interpret it and decide**. You may combine, correct, extend or narrow it, and turn it
+   into whatever the plan needs: send the task back with your own instructions (`atf
+   changes`, then spawn), a follow-up task, changed criteria, a re-plan, or an answer or
+   question back (`atf note <task> "…"`). Whatever you do on the task marks the input as
+   handled; if nothing else is needed, acknowledge it with a note. The human's own words
+   stay in the task history; the next agent sees your instructions.
+   **Review comments sent to you directly** (e.g. from the human's editor): map each to
+   the task whose change it concerns (file, line, the tasks' results and artifacts); ask
+   the human if you cannot tell; comments that fit no task become follow-ups.
+8. **Hand over.** Keep a plan-level checkpoint current, after important decisions and
+   before you stop: `atf plan checkpoint "<where the plan stands, what you are waiting
+   for, what comes next, decisions not yet in the documents>"`. A new coordinator
+   session (after a restart, or a deliberate fresh start when your context grew large)
+   starts from it: read the documents (`atf plan show` lists them), the checkpoint, `atf
+   status`, then handle `atf wait`.
+9. **Close.** Before closing, fold the decisions made during execution (`atf plan show`
+   lists them) into `design.md` where they matter beyond this plan. Then
+   `atf plan status completed -m "<summary>"`.
 
-   **Reviews by the human.** Tasks with a reviewer other than you (`--reviewer human` at
-   creation, or a subagent's `atf review … --by human`) are not yours to approve (`atf
-   done` refuses, and `atf wait` does not report them): they show up in the human's
-   inbox, and you wait for their verdict. The human writes as the actor `human`; never
-   use `--as human` yourself. Mark tasks that need
-   manual testing up front: `atf add "…" --reviewer human`. When the human submits a
-   review (on the board or with `atf feedback submit`), your `atf wait` reports
-   `review submitted by …`: approved tasks are done, tasks with change requests went
-   back to their owners with all points. Treat the human's points as binding: when such
-   a task is resubmitted, check every point before you approve it.
-
-   **Review comments sent to you directly** (e.g. from the human's editor): map each
-   comment to the task whose change it concerns, using the file, line and context of the
-   comment and the tasks' descriptions, results and artifacts (`atf show`). Several tasks
-   may have changed the same file, so judge by what the comment is about. If you cannot
-   tell which task a comment belongs to, ask the human instead of guessing. Comments
-   that fit no task become follow-ups. Then apply them in **one batch**, not one by one:
-   draft them with `atf feedback change <task> "<point>" [--file F --line N]` /
-   `atf feedback note <task> "…"` and send everything with `atf feedback submit`; each
-   owner gets one message with all of its points. Do not fix things yourself, and tell
-   the human which comment went to which task.
-6. Close: `atf plan status completed -m "<summary>"`.
-
-**Agent context.** Context belongs to the task: an agent that comes back to a task it
-already worked on (unblocked, answered, reopened) resumes its earlier session if the
-harness supports it; a new task gets a fresh agent. Override per plan or task with
-`--resume fresh` (e.g. the earlier attempt went wrong and you want clean eyes) or
-`--resume resume`: `atf plan update --resume fresh`, `atf edit T4 --resume fresh`.
-`atf resume-info T4` shows what will happen.
+**Agent context.** Every agent you spawn starts **fresh**: a focused prompt, the task, its
+checkpoint, feedback and history. That keeps subagent contexts small. Resuming the
+session that worked on a task before is possible when it is worth it:
+`atf-herdr spawn T4 --resume`, or as a policy `atf edit T4 --resume auto` (resume tasks
+already worked on). `atf resume-info T4` shows what will happen.
 
 ## Status reference
 
 `todo → in_progress → (review →) done`; also `blocked`, `failed`, `cancelled`.
-`blocked` = needs a human/coordinator. Waiting on dependencies is NOT blocked: such
-tasks stay `todo` and are just not `ready`. Use `--force` only when you are sure.
+`blocked` = needs a decision (by the coordinator, or `--for human`) or waits on other
+tasks (`--on`). Waiting on dependencies declared up front is NOT blocked: such tasks stay
+`todo` and are just not `ready`. Use `--force` only when you are sure.

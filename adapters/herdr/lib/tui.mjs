@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
 import { TERMINAL, driverInbox, planSummary, HUMAN } from '../../../src/core.mjs';
-import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, readDrafts, writeDrafts, reviewEvents } from '../../../src/store.mjs';
+import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, reviewEvents } from '../../../src/store.mjs';
 import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject } from './herdr.mjs';
 import { progressText } from './sync.mjs';
 
@@ -303,8 +303,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
           })();
     const nav = s.level === 'plan' ? '   esc: project' : s.level === 'project' ? '   esc: all projects' : '';
     // no "ATF" badge: herdr already titles both the pane and the popup "ATF board"
-    const nd = draftCount(plans);
-    return [[[' ', ''], ...crumbs, [nav, 'dim'], [nd ? `   ✎ ${nd} draft${nd === 1 ? '' : 's'} · S submit` : '', 'yellow bold']], line2, tabBar()];
+    return [[[' ', ''], ...crumbs, [nav, 'dim']], line2, tabBar()];
   }
 
   /** A selected-row aware line: highlight marker + base style. */
@@ -346,7 +345,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     } else {
       if (t.status === 'todo' && t.waiting_on.length) right.push([`⧗ ${t.waiting_on.join(',')}`, 'dim']);
       if (t.status === 'blocked' && t.blocked_on.length) right.push([t.can_resume ? 'can resume' : `⧗ on ${t.blocked_on.join(',')}`, t.can_resume ? 'green' : 'dim']);
-      if (taskDrafts(row).length) right.push([`✎${taskDrafts(row).length}`, 'yellow bold']);
+      if (t.human_input?.length) right.push(['✎ with coordinator', 'magenta']);
+      if (t.status === 'blocked' && t.blocked_for === 'human' && !t.answered) right.push(['for you', 'red bold']);
       if (t.changes_requested) right.push([`↺ changes`, 'magenta']);
       else if (t.ready && !t.owner) right.push(['ready', 'green']);
       if (t.status === 'in_progress' && t.percent != null) right.push([`${t.percent}%`, 'yellow']);
@@ -464,10 +464,9 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (!t) return [];
     const L = [];
     const sel = ui.rows.tasks[ui.sel.tasks];
-    const mine = sel?.task === id ? taskDrafts(sel) : [];
-    if (mine.length) {
-      L.push([[`✎ your drafts (${mine.length}, not sent yet: S submits)`, 'yellow bold']]);
-      for (const d of mine) L.push([[`  ${d.action.padEnd(8)}`, d.action === 'change' ? 'magenta' : d.action === 'approve' ? 'green' : ''], [d.message || '', '']]);
+    if (t.human_input?.length) {
+      L.push([['✎ your input, waiting for the coordinator to act on it', 'magenta bold']]);
+      for (const n of t.human_input) for (const l of wrap(n.message, W - 4)) L.push([['  ' + l, '']]);
       L.push([]);
     }
     // which plan this is, always: a header band like the plan rows in the Tasks list
@@ -626,6 +625,17 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       L.push([], [[` ${label}`, 'bold']]);
       for (const l of wrap(text, W - 3)) L.push([['  ' + l, color]]);
     }
+    if (s.docs?.length) L.push([], [[' documents', 'bold'], ['  o opens the first', 'dim']], ...s.docs.map((d) => [['  ' + d, 'cyan']]));
+    if (s.questions?.length) {
+      L.push([], [[' questions for you', 'bold red'], ['  r answers', 'dim']]);
+      for (const q of s.questions) for (const l of wrap(q.message, W - 3)) L.push([['  ' + l, 'yellow']]);
+    }
+    if (s.checkpoint) {
+      L.push([], [[' plan checkpoint', 'bold'], [`  ${s.checkpoint.actor ?? ''} ${ago(s.checkpoint.ts)} ago`, 'dim']]);
+      for (const l of wrap(s.checkpoint.message, W - 3)) L.push([['  ' + l, '']]);
+    }
+    const coord = coordinatorOf(s);
+    L.push([], [[' coordinator  ', 'bold'], [coord.id ?? '?', 'cyan'], [coord.live ? `  ${coord.live.agent_status} in ${coord.live.pane_id}` : coord.away ? '  in another herdr session' : '  not running', coord.live ? 'dim' : 'red'], [s.session ? `  · session ${path.basename(s.session.ref)}` : '', 'dim'], ['   s resume · S fresh', 'dim']]);
     const roots = s.order.filter((id) => !s.tasks[id].parent || !s.tasks[s.tasks[id].parent]);
     if (roots.length) {
       L.push([], [[' breakdown', 'bold'], ['  (top-level branches)', 'dim']]);
@@ -885,13 +895,15 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
    *      progress message. The rest of the plan stays out of the way (⏎ opens it).
    * A context panel below shows what is needed to act on the selected row; the actions
    * (approve, request changes, reply, open the review artifact, jump to the agent)
-   * work right there, without drafts.
+   * work right there and take effect at once.
    */
   const NEED = {
     prompt: ['! prompt', 'red bold'],
+    'no-coordinator': ['⚠ no coord', 'red bold'],
     coordinator: ['? input', 'yellow bold'],
     'your-review': ['◎ review', 'magenta bold'],
     question: ['⊘ question', 'red bold'],
+    'plan-question': ['? plan', 'red bold'],
     failed: ['✗ failed', 'red'],
     review: ['◎ review', 'magenta'],
     stale: ['◌ stalled', 'red'],
@@ -930,11 +942,16 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       mine.push(at({ kind: 'prompt', actor: a.id, pane: la.pane_id, task: t?.id ?? null, ts: new Date(la.since).toISOString() }));
     }
     const handles = (!!coord.live && coord.live.agent_status !== 'blocked') || coord.away;
+    // nobody decides or starts anything for this plan: the human must start a coordinator
+    const openWork = st.order.some((id) => !st.tasks[id].children.length && !TERMINAL.has(st.tasks[id].status));
+    if (inHerdr() && st.status === 'active' && openWork && !coord.live && !coord.away)
+      mine.push(at({ kind: 'no-coordinator', actor: null, task: null, ts: st.updated_at }));
     const finished = st.order.some((id) => !st.tasks[id].children.length) && st.order.every((id) => st.tasks[id].children.length || TERMINAL.has(st.tasks[id].status));
     if (st.status === 'active' && !finished && coord.live && ['idle', 'done'].includes(coord.live.agent_status) && Date.now() - coord.live.since > WAITING_MS)
       mine.push(at({ kind: 'coordinator', actor: coord.id, pane: coord.live.pane_id, task: null, ts: new Date(coord.live.since).toISOString() }));
     for (const it of inboxOf(p)) {
-      const human = it.kind === 'finished' || (it.kind === 'your-review' && it.reviewer === HUMAN) || !handles;
+      // items for the human, and the coordinator's own when no coordinator handles them
+      const human = it.for === HUMAN || !handles;
       (human ? mine : queued).push(at(it));
     }
     return { mine, queued, coord };
@@ -998,6 +1015,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       return last ? last.trim() : it.kind === 'prompt' ? 'waits at a prompt in its terminal' : 'finished its turn and waits for your input';
     }
     if (it.kind === 'finished') return it.st.status_message || 'all tasks are finished: close the plan (c)';
+    if (it.kind === 'plan-question') return it.message;
+    if (it.kind === 'no-coordinator') return `nothing gets decided or started: s resumes the coordinator${it.st.session ? ' (its last session)' : ''}, S starts a fresh one`;
     if (it.kind === 'stale') return it.message;
     return t?.last_message || it.message || '';
   }
@@ -1012,8 +1031,12 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
           ? `${it.actor} waits at a prompt${t ? ` (${t.id} ${t.title})` : ''}`
           : it.kind === 'finished'
             ? 'all tasks finished'
-            : `${t.id} ${t.title}`;
-    const who = it.kind === 'review' ? 'for the coordinator' : it.kind === 'your-review' ? 'for you' : it.actor && !['coordinator', 'prompt'].includes(it.kind) ? it.actor : '';
+            : it.kind === 'no-coordinator'
+              ? 'no coordinator is running'
+            : it.kind === 'plan-question'
+              ? `${it.actor ?? 'the coordinator'} asks about the plan`
+              : `${t.id} ${t.title}`;
+    const who = it.kind === 'review' ? 'for the coordinator' : it.kind === 'your-review' || (it.kind === 'question' && it.for === HUMAN) ? 'for you' : it.actor && !['coordinator', 'prompt'].includes(it.kind) ? it.actor : '';
     return row(
       [mark(sel), [label.padEnd(11), sel ? `inverse ${color}` : color], [' ' + subject, sel ? 'bold' : 'bold']],
       [[multi() ? planLabel(it, W) + '  ' : '', 'dim'], [who ? who + '  ' : '', 'cyan'], [ago(it.ts).padStart(3), 'dim']],
@@ -1038,6 +1061,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const sum = planSummary(p.st);
     const q = a.queued.reduce((m, it) => m.set(it.kind, (m.get(it.kind) || 0) + 1), new Map());
     const qn = a.queued.length;
+    // the human's input the coordinator has not acted on yet
+    const inputs = p.st.order.filter((id) => p.st.tasks[id].human_input?.length).length + (p.st.human_input?.length ? 1 : 0);
     const qtext = W >= 100 ? [...q].map(([k, n]) => `${n} ${{ review: 'review', question: 'question', failed: 'failed', stale: 'stalled', 'your-review': 'review' }[k] ?? k}${n > 1 && k !== 'failed' ? 's' : ''}`).join(', ') : qn ? String(qn) : '';
     const finished = p.st.order.every((id) => p.st.tasks[id].children.length || TERMINAL.has(p.st.tasks[id].status));
     const [cs, cc] = finished ? ['', ''] : coordState(a);
@@ -1060,7 +1085,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       : [];
     return row(
       [mark(sel), [planLabel(p, W) + '  ', sel ? 'inverse bold' : 'bold'], ...bar(sum.progress, 8), [` ${p.st.counts.done ?? 0}/${sum.total}`, 'dim'], ...agents, [p.st.status === 'paused' ? '  paused' : '', 'yellow']],
-      [[cs, cc], [qtext ? `  · ${qtext} queued` : '', 'dim'], [`  ${ago(p.st.updated_at).padStart(3)}`, 'dim']],
+      [[cs, cc], [qtext ? `  · ${qtext} queued` : '', 'dim'], [inputs ? `  ✎${inputs}` : '', 'magenta'], [`  ${ago(p.st.updated_at).padStart(3)}`, 'dim']],
       W,
     );
   }
@@ -1178,6 +1203,17 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (r.type === 'plan' || (r.type === 'need' && !r.task)) {
       L.push([[` ${st.title}`, 'bold'], [`  ${st.status}  ·  ${projectName(r.root)}  ·  ${progressText(st)}`, 'dim']]);
       if (st.goal) para(st.goal, '', 3);
+      if (st.questions?.length) {
+        L.push([]);
+        label('question for you');
+        for (const q of st.questions) para(q.message, 'yellow', 6, '   ');
+      }
+      if (st.docs?.length) L.push([[' documents  ', 'dim'], [st.docs.join('  '), 'cyan'], ['  (o opens the first)', 'dim']]);
+      if (st.checkpoint) {
+        L.push([]);
+        label('plan checkpoint', `${st.checkpoint.actor ?? ''} ${ago(st.checkpoint.ts)} ago`);
+        para(st.checkpoint.message, '', 4, '   ');
+      }
       if (r.kind === 'finished' && st.status_message) para(st.status_message, 'green', 3);
       const roots = st.order.filter((id) => !st.tasks[id].parent || !st.tasks[st.tasks[id].parent]);
       if (roots.length) {
@@ -1209,8 +1245,16 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     // the lead: what this row asks of you, or where the work stands
     if (t.status === 'blocked' && !t.blocked_on.length) {
       L.push([]);
-      label(t.answered ? 'question (answered)' : 'question');
+      const blocks = t.history.filter((h) => h.type === 'status' && h.to === 'blocked' && h.message);
+      const last = blocks[blocks.length - 1];
+      label(t.answered ? 'question (answered)' : t.blocked_for === HUMAN ? 'question for you' : 'question', last ? `${last.actor ?? ''} ${ago(last.ts)} ago` : '');
       para(t.last_message || '(no message)', t.answered ? '' : 'yellow', 8, '   ');
+      // escalated by the coordinator: the subagent's own question, for context
+      const orig = [...blocks].reverse().find((h) => h.actor && h.actor === t.owner);
+      if (t.blocked_for === HUMAN && orig && orig !== last) {
+        L.push([[`   originally asked by ${orig.actor}:`, 'dim']]);
+        para(orig.message, 'dim', 4, '   ');
+      }
     } else if (t.status === 'review' || t.status === 'failed') {
       L.push([]);
       label(t.status === 'review' ? 'submitted for review' : 'failed');
@@ -1267,7 +1311,12 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       k.push('g go to its terminal');
       if (r.kind === 'coordinator') k.push('r reply');
     } else if (r.type === 'plan' || !t) {
-      k.push('⏎ open plan', 'g coordinator');
+      if (r.kind === 'no-coordinator') k.push('s resume coordinator', 'S fresh coordinator', '⏎ open plan');
+      else {
+        k.push('⏎ open plan', 'g coordinator', r.kind === 'plan-question' ? 'r answer' : 'r note');
+        if (r.st.docs?.length) k.push('o docs');
+        k.push('s/S coordinator');
+      }
       if (r.kind === 'finished' || r.type === 'plan') k.push('c close plan');
     } else {
       if (t.status === 'review') k.push('a approve', 'x changes');
@@ -1320,18 +1369,18 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       H('0 Overview: what needs you, and what is being worked on'),
       T('NEEDS YOU, most urgent first:'),
       lab('! prompt', 'red bold', 'an agent waits at a dialog in its terminal (g opens it)'),
-      lab('? input', 'yellow bold', 'a coordinator finished its turn and waits for you (r replies)'),
-      lab('◎ review', 'magenta bold', 'a task asks you to review it (a approve, x request changes)'),
+      lab('⚠ no coord', 'red bold', 'no coordinator runs for an active plan (s resumes it, S fresh)'),
+      lab('⊘ question', 'red bold', 'the coordinator asks you, on that task (r answers)'),
+      lab('? plan', 'red bold', 'the coordinator asks you about the whole plan (r answers)'),
+      lab('◎ review', 'magenta bold', 'a task asks you to review it (a approve, x change request)'),
+      lab('? input', 'yellow bold', 'a coordinator waits in its prompt (it should ask through ATF)'),
       lab('● finished', 'green', 'all tasks of a plan are finished (c closes the plan)'),
       T('Questions, failed or stalled tasks and the coordinator’s reviews are listed here only'),
       T('when no coordinator is running for the plan; otherwise the plan row says "N queued".'),
       T('IN FLIGHT: one row per plan (progress, coordinator state), then the tasks being worked'),
       T('on (in progress, being reworked after review, answered) with their latest progress.'),
       T('Below the list: the context of the selected row, enough to act on it.'),
-      K('a', 'approve the task in review (sent at once)'),
-      K('x', 'request changes: one-line input, sent at once (several points: Tasks view drafts)'),
-      K('r', 'reply: answers a question (its agent continues), messages a task’s owner, or'),
-      T('                types into the prompt of the coordinator that waits for you'),
+      K('a  x  r  o  s  S', 'act on the selected row (see "Acting" and "The coordinator")'),
       K('o', 'open the task’s artifact: PR / URL in the browser; branch diff, commit or file'),
       T('                in a new herdr tab "review T<n>" in the project'),
       K('g', 'go to the terminal: the task’s agent, the waiting agent, the plan’s coordinator'),
@@ -1347,9 +1396,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       T('                v again: the task tree'),
       K('⏎', 'task details (breadcrumb, feedback, checkpoint, notes, activity)'),
       K('g', 'go to the owning agent’s herdr pane (on an agent heading: that agent)'),
-      K('s', 'spawn an agent for a ready task or a work package (parent task). A task'),
-      T('                waiting on others is refused; start it early from the CLI:'),
-      T('                atf-herdr spawn <task> --early'),
+      T('Agents are started by the coordinator, not from the board (see "The coordinator").'),
       [],
       H('2 Plan · 3 Log'),
       T('Plan: at plan scope the full plan (goal, outcome, branches, decisions, questions,'),
@@ -1357,14 +1404,21 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       T('g jump, c close. Log: events of all plans in scope, newest first; / searches'),
       T('(every word must match; matches highlighted), p picks a plan to filter by, esc clears.'),
       [],
-      H('Review drafts (Tasks view and task details): collect, then send together'),
-      K('a', 'draft an approval (task in review)'),
-      K('x', 'draft a change request (one-line input; ⏎ adds it, esc cancels)'),
-      K('n', 'draft a note'),
-      K('d', 'drop the selected task’s drafts'),
-      K('S', 'submit all drafts (press twice): one write per plan. Approved tasks are done,'),
-      T('                tasks with change requests go back to their owner with all points'),
-      T('                numbered, notes are attached; the coordinator is woken once.'),
+      H('Acting (Overview, Tasks, details): takes effect at once'),
+      T('The coordinator makes the decisions: what you write goes to it, and it decides what'),
+      T('happens (starts an agent with its instructions, a follow-up task, a plan change, …).'),
+      K('a', 'approve a task in review (done at once; the coordinator sees it)'),
+      K('x', 'change request on a task, for the coordinator'),
+      K('r / n', 'answer a question, or a message on the task (on a plan: a plan note), for'),
+      T('                the coordinator; to a coordinator waiting for input: into its prompt'),
+      K('o', 'open the task’s artifact (PR/URL, branch diff, commit, file) or the plan’s documents'),
+      [],
+      H('The coordinator (one per plan, always running)'),
+      K('s', 'start the coordinator of the selected plan, resuming its last session (if one'),
+      T('                runs already: go to it)'),
+      K('S', 'start a fresh coordinator session (press twice): a running coordinator first'),
+      T('                writes its plan checkpoint, then is replaced'),
+      T('A plan without a running coordinator shows "⚠ no coord" under NEEDS YOU.', 'dim'),
       [],
       H('Task status: the symbol before a task'),
       sym(STATUS.todo[0], STATUS.todo[1], 'todo', 'not started'),
@@ -1385,7 +1439,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       lab('⧗ on T8', 'dim', 'blocked on another task; "can resume" once that is done'),
       lab('answered', 'green', 'its question was answered; the agent can continue'),
       lab('↺ changes', 'magenta', 'sent back from review with requested changes (feedback in details)'),
-      lab('✎2', 'yellow bold', 'your unsent review drafts on it'),
+      lab('✎ with coordinator', 'magenta', 'you wrote on it; the coordinator has not acted on it yet'),
+      lab('for you', 'red bold', 'a question the coordinator escalated to you'),
       lab('40%', 'yellow', 'progress last reported by the agent'),
       lab('2/3', 'dim', 'finished / total subtasks of a parent'),
       T('Details also show its agent definition, reviewer, follow-up links and checkpoint.', 'dim'),
@@ -1397,29 +1452,29 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       sym(AGENT_GLYPH.blocked[0], AGENT_GLYPH.blocked[1], 'prompt', 'stuck at an approval/question prompt in its terminal'),
       sym('↗', 'gray', 'elsewhere', 'runs in another herdr session (read-only here)'),
       lab('stale?', 'red bold', 'task in progress but its agent idle > 90 s: probably stopped without reporting'),
-      T('Agents launched by ATF are closed when idle with nothing to do, and relaunched', 'dim'),
-      T('(resuming their session) when work appears for them.', 'dim'),
+      T('Agents end when their assignment is finished; ATF closes their panes. When there is', 'dim'),
+      T('more for a task, the coordinator starts a new agent (fresh, with its instructions).', 'dim'),
       [],
       H('Overview rows'),
       lab('◌ coordinator idle', 'yellow', 'coordinator state: ⚙ working  ! at a prompt  ↗ in another herdr session'),
       lab('⚙1 !1 ◌1 ·1', 'dim', 'agents with open tasks: working, at a prompt, idle, not running'),
       lab('1 question queued', 'dim', 'items waiting for the running coordinator'),
       lab('↺ T4', 'magenta', 'being reworked after changes were requested'),
-      lab('✎ 3 drafts', 'yellow bold', 'header: unsent review drafts (S submits)'),
+      lab('✎2', 'magenta', 'plan row: tasks with your input the coordinator has not acted on yet'),
     ];
   }
 
   function footer() {
     if (ui.picker) return []; // its keys are in the box
-    if (ui.input) return [[' ' + ui.input.label, 'bold yellow'], [ui.input.value + '█', ''], [`   ${ui.input.hint ?? '⏎ add draft'} · esc cancel`, 'dim']];
+    if (ui.input) return [[' ' + ui.input.label, 'bold yellow'], [ui.input.value + '█', ''], [`   ${ui.input.hint ?? '⏎ send'} · esc cancel`, 'dim']];
     if (ui.flash && ui.flash.until > Date.now()) return [[' ' + ui.flash.msg, ui.flash.style]];
     const esc = ui.scope.level === 'all' ? 'esc quit' : 'esc widen';
     const keys = {
       overview: overviewKeys(ui.rows.overview[ui.sel.overview]),
-      tasks: `↑↓ move  ←→ fold  v ${ui.byAgent ? 'tree' : 'by agent'}  ⏎ details  p plan  g agent  s spawn  review: a approve x change n note d drop S submit  ${esc}`,
-      plan: multi() ? `↑↓ select  ←→ fold  z all  ⏎ open plan  g jump  c close plan  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}  ? help` : `↑↓ scroll  ${esc}  tab views  ? help  q quit`,
+      tasks: `↑↓ move  ←→ fold  v ${ui.byAgent ? 'tree' : 'by agent'}  ⏎ details  a approve  x changes  r message  o open  g agent  s/S coordinator  p plan  ${esc}`,
+      plan: multi() ? `↑↓ select  ←→ fold  ⏎ open plan  o docs  r note  s/S coordinator  g jump  c close  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}` : `↑↓ scroll  o docs  r note  s/S coordinator  ${esc}  ? help`,
       log: `↑↓ scroll  / search  ${multi() ? 'p plan  ' : ''}${ui.log.plan || ui.log.query ? 'esc clear filter  ' : esc + '  '}tab views  ? help`,
-      detail: '↑↓ scroll  ⏎/esc back  g agent  s spawn  review: a approve  x change  n note  d drop  S submit',
+      detail: '↑↓ scroll  ⏎/esc back  a approve  x changes  r message  o open  g agent  s/S coordinator',
       help: '↑↓ scroll  any other key: back',
     }[view()];
     return [[' ' + keys, 'dim']];
@@ -1550,7 +1605,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     }
   }
 
-  // ---------- direct actions (Overview): sent at once, no drafts ----------
+  // ---------- acting: sent at once; the human's words go to the coordinator ----------
   function writeAsHuman(r, events, ok) {
     try {
       transact(r.root, r.plan, me, () => events);
@@ -1573,7 +1628,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
         return res.events;
       });
       if (res.refused.length) return flash(`not sent: ${res.refused[0].why}`, 'red');
-      flash(action === 'approve' ? `approved ${t.id}: done` : `sent ${t.id} back to ${t.owner ?? 'its owner'} with your change request`, 'green');
+      flash(action === 'approve' ? `approved ${t.id}: done` : `change request for ${t.id} sent to the coordinator (it decides what happens)`, 'green');
     } catch (e) {
       flash(e.message, 'red');
     }
@@ -1599,31 +1654,46 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     }
     if (r?.type === 'need' && r.kind === 'prompt') return flash('it waits at a dialog in its terminal: g opens it');
     const tr = selectedTask();
-    if (!tr) return flash('select a task');
+    if (!tr) {
+      // a plan row: a plan-level note (answers the plan's question), for the coordinator
+      const pr = r?.root && r?.plan ? r : ui.scope.level === 'plan' ? { root: ui.scope.root, plan: ui.scope.plan, st: cachedPlan(ui.scope.root, ui.scope.plan) } : null;
+      if (!pr) return flash('select a task or a plan');
+      const q = pr.st.questions?.length;
+      ui.input = {
+        label: `${q ? 'answer' : 'note'} on the plan, for the coordinator: `,
+        value: '',
+        hint: '⏎ send',
+        onSubmit: (text) => text.trim() && writeAsHuman(pr, [{ type: 'plan.note', data: { message: text.trim(), kind: 'info' } }], `sent to the coordinator of "${pr.st.title}"`),
+      };
+      return;
+    }
     const t = tr.st.tasks[tr.task];
     const question = t.status === 'blocked' && !t.blocked_on.length;
     ui.input = {
-      label: `${question ? 'answer' : 'message'} to ${t.owner ?? 'the owner'} on ${t.id}: `,
+      label: `${question ? 'answer' : 'message'} on ${t.id}, for the coordinator: `,
       value: '',
       hint: '⏎ send',
-      onSubmit: (text) => text.trim() && writeAsHuman(tr, [{ type: 'task.note', task: t.id, data: { message: text.trim(), kind: 'info' } }], question ? `answered ${t.id}: ${t.owner ?? 'its agent'} continues` : `message added to ${t.id}`),
+      // v2: the coordinator reads it and decides (starts an agent with its instructions, …)
+      onSubmit: (text) => text.trim() && writeAsHuman(tr, [{ type: 'task.note', task: t.id, data: { message: text.trim(), kind: 'info' } }], `${question ? 'answer' : 'message'} on ${t.id} sent to the coordinator`),
     };
   }
 
-  /** x on the Overview: one change request, sent at once. */
+  /** x: a change request on a task, sent at once to the coordinator (it decides). */
   function changeNow() {
     const r = selectedTask();
     if (!r) return flash('select a task');
-    if (r.st.tasks[r.task].status !== 'review') return flash(`${r.task} is not in review (r sends a message)`);
-    ui.input = { label: `change request for ${r.task}: `, value: '', hint: '⏎ send', onSubmit: (text) => text.trim() && reviewNow('change', text.trim()) };
+    ui.input = { label: `change request for ${r.task}, for the coordinator: `, value: '', hint: '⏎ send', onSubmit: (text) => text.trim() && reviewNow('change', text.trim()) };
   }
 
   /** o: open the task's best review artifact: PR/URL in the browser, branch/commit diff or file in a herdr tab. */
   async function openArtifact() {
-    const r = selectedRow();
+    const sel = selectedRow();
+    const r = sel?.st ? sel : ui.scope.level === 'plan' ? { root: ui.scope.root, plan: ui.scope.plan, st: cachedPlan(ui.scope.root, ui.scope.plan) } : null;
     if (!r?.st) return;
-    const arts = reviewArtifacts(r);
-    if (!arts.length) return flash(`no artifacts${r.task ? ' on ' + r.task : ''} (agents add them with atf artifact)`);
+    // a plan: its documents (design.md, plan.md, …)
+    const docs = !r.task ? r.st.docs || [] : [];
+    const arts = docs.length ? docs.map((d) => ({ kind: 'file', ref: d })) : reviewArtifacts(r);
+    if (!arts.length) return flash(r.task ? `no artifacts on ${r.task} (agents add them with atf artifact)` : 'the plan has no documents (atf plan update --doc design.md)');
     const x = arts[0];
     const proj = path.dirname(r.root);
     const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -1659,121 +1729,52 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (!inHerdr()) return flash(`run in ${proj}: ${cmd}`);
     const coord = coordinatorOf(r.st);
     const ws = (coord.id && !coord.away && r.st.actors[coord.id]?.ctx?.herdr_workspace) || process.env.HERDR_WORKSPACE_ID;
-    const tab = await herdrAsync(['tab', 'create', ...(ws ? ['--workspace', ws] : []), '--cwd', proj, '--label', `review ${r.task ?? ''}`.trim(), '--focus']);
+    const label = r.task ? `review ${r.task}` : path.basename(x.ref);
+    const tab = await herdrAsync(['tab', 'create', ...(ws ? ['--workspace', ws] : []), '--cwd', proj, '--label', label, '--focus']);
     const pane = tab?.root_pane?.pane_id;
     if (!pane) return flash('could not open a herdr tab', 'red');
     if (ws) await herdrAsync(['workspace', 'focus', ws]);
     await herdrText(['pane', 'run', pane, cmd]);
     if (popup) quit();
-    else flash(`opened ${x.kind} ${x.ref} in tab "review ${r.task ?? ''}"`, 'green');
+    else flash(`opened ${x.ref} in tab "${label}"${docs.length > 1 ? ` (also: ${docs.slice(1).join(', ')})` : ''}`, 'green');
   }
 
-  function spawnAgent() {
+  /**
+   * s / S: start the coordinator of the selected plan (any row of it, or the plan in
+   * scope): `s` resumes its session (or reports the one running), `S` starts a fresh
+   * session, replacing a running coordinator after it wrote its checkpoint (press twice).
+   */
+  function startCoordinator(fresh) {
     const r = selectedRow();
-    if (r?.type !== 'task') return flash('select a task');
-    const t = r.st.tasks[r.task];
-    const isPackage = t.children.length > 0;
-    if (isPackage && TERMINAL.has(effStatus(t))) return flash(`${t.id} is already ${effStatus(t)}`);
-    if (!isPackage && !t.ready) return flash(`${t.id} is not ready (${t.status}${t.waiting_on.length ? `, waits on ${t.waiting_on.join(',')}; to start it early: atf-herdr spawn ${t.id} --early` : ''})`);
-    if (!spawnCmd) return flash('spawn unavailable');
-    flash(`spawning agent for ${isPackage ? 'package ' : ''}${t.id}…`, 'blue');
-    const args = [...spawnCmd, 'spawn', t.id, '--plan', r.plan];
-    if (targetPane) args.push('--target-pane', targetPane);
-    const p = spawn(args[0], args.slice(1), { env: { ...process.env, ATF_DIR: r.root }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const target = r?.root && r?.plan ? r : ui.scope.level === 'plan' ? { root: ui.scope.root, plan: ui.scope.plan, st: cachedPlan(ui.scope.root, ui.scope.plan) } : null;
+    if (!target) return flash('select a plan (or a task of it)');
+    if (!isOpenStatus(target.st)) return flash(`"${target.st.title}" is ${target.st.status}`);
+    if (!spawnCmd || !inHerdr()) return flash('starting a coordinator needs herdr');
+    const key = keyOf(target.root, target.plan);
+    const running = !!coordinatorOf(target.st).live;
+    if (fresh && !(ui.confirm?.action === 'fresh' && ui.confirm.key === key && ui.confirm.until > Date.now())) {
+      ui.confirm = { action: 'fresh', key, until: Date.now() + 3000 };
+      return flash(running ? `replace the running coordinator of "${target.st.title}" with a fresh session (it writes a checkpoint first)? press S again` : `start a fresh coordinator session for "${target.st.title}"? press S again`, 'yellow');
+    }
+    ui.confirm = null;
+    flash(fresh ? (running ? 'asking the coordinator for a checkpoint, then starting a fresh one…' : 'starting a fresh coordinator…') : 'starting the coordinator…', 'blue');
+    const args = [...spawnCmd, 'coordinate', '--plan', target.plan, '--root', target.root, ...(fresh ? ['--fresh'] : [])];
+    const p = spawn(args[0], args.slice(1), { env: { ...process.env, ATF_DIR: target.root }, stdio: ['ignore', 'pipe', 'pipe'] });
     let buf = '';
     p.stdout.on('data', (d) => (buf += d));
     p.stderr.on('data', (d) => (buf += d));
-    p.on('error', (e) => flash(`spawn failed: ${e.message}`, 'red'));
-    p.on('close', (code) => flash(code === 0 ? buf.trim().split('\n').pop() : `spawn failed: ${buf.trim().split('\n').pop()}`, code === 0 ? 'green' : 'red'));
+    p.on('error', (e) => flash(`could not start the coordinator: ${e.message}`, 'red'));
+    p.on('close', (code) => {
+      flash(buf.trim().split('\n').pop() || (code ? 'failed' : 'done'), code === 0 ? 'green' : 'red');
+      if (code === 0 && popup) quit();
+    });
   }
 
-  // ---------- review drafts (sent together with S) ----------
-  const me = humanActor();
-  const draftsOf = (root, plan) => {
-    try {
-      return readDrafts(root, plan, me.id);
-    } catch {
-      return [];
-    }
-  };
-  const taskDrafts = (r) => (r?.root && r?.plan && r?.task ? draftsOf(r.root, r.plan).filter((d) => d.task === r.task) : []);
-  function draftCount(plans) {
-    return plans.reduce((n, p) => n + draftsOf(p.root, p.id).length, 0);
-  }
+  const me = humanActor(); // the board writes as the human
 
   function selectedTask() {
     const r = selectedRow();
     return r && (r.type === 'task' || (r.type === 'need' && r.task)) ? r : null;
-  }
-
-  function addDraft(action, message = '') {
-    const r = selectedTask();
-    if (!r) return flash('select a task');
-    const items = draftsOf(r.root, r.plan);
-    items.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), task: r.task, action, message, ts: new Date().toISOString() });
-    writeDrafts(r.root, r.plan, me.id, items);
-    flash(`draft ${action} on ${r.task} (${items.length} in this plan) · S sends all`, 'blue');
-  }
-
-  /** a: draft an approval */
-  function approve() {
-    const r = selectedTask();
-    if (!r) return flash('select a task');
-    if (r.st.tasks[r.task].status !== 'review') return flash(`${r.task} is not in review; use n for a note or x to request changes`);
-    addDraft('approve');
-  }
-
-  /** x / n: draft a change request or a note, via the input line */
-  function promptDraft(action) {
-    const r = selectedTask();
-    if (!r) return flash('select a task');
-    ui.input = {
-      label: action === 'change' ? `change request for ${r.task}: ` : `note on ${r.task}: `,
-      value: '',
-      onSubmit: (text) => text.trim() && addDraft(action, text.trim()),
-    };
-  }
-
-  /** d: drop the selected task's drafts */
-  function dropDrafts() {
-    const r = selectedTask();
-    if (!r) return flash('select a task');
-    const items = draftsOf(r.root, r.plan);
-    const keep = items.filter((d) => d.task !== r.task);
-    writeDrafts(r.root, r.plan, me.id, keep);
-    flash(`dropped ${items.length - keep.length} draft(s) on ${r.task}`);
-  }
-
-  /** S: submit all drafts in scope, one write per plan (press twice) */
-  function submitDrafts() {
-    const plans = scopePlans().filter((p) => draftsOf(p.root, p.id).length);
-    const n = plans.reduce((a, p) => a + draftsOf(p.root, p.id).length, 0);
-    if (!n) return flash('no drafts to submit');
-    if (!(ui.confirm?.action === 'submit' && ui.confirm.until > Date.now())) {
-      ui.confirm = { action: 'submit', until: Date.now() + 3000 };
-      return flash(`submit ${n} draft(s) in ${plans.length} plan(s)? press S again`);
-    }
-    ui.confirm = null;
-    const done = [];
-    for (const p of plans) {
-      const items = draftsOf(p.root, p.id);
-      try {
-        let summary = '';
-        let refused = [];
-        transact(p.root, p.id, me, (st) => {
-          const r = reviewEvents(st, items, me);
-          summary = r.summary;
-          refused = r.refused;
-          return r.events;
-        });
-        // refused drafts (tasks someone else reviews) stay as drafts
-        writeDrafts(p.root, p.id, me.id, items.filter((i) => refused.some((x) => x.task === i.task && x.action === i.action)));
-        done.push(summary.replace(/^review by \S+: /, '') + (refused.length ? ` · not yours: ${refused.map((x) => x.task).join(',')}` : ''));
-      } catch (e) {
-        return flash(`submit failed: ${e.message}`, 'red');
-      }
-    }
-    flash(`review submitted: ${done.join(' | ')}`, 'green');
   }
 
   /** ⏎ */
@@ -1924,18 +1925,14 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
         return draw();
       }
     }
-    if (v === 'overview') {
-      // the Overview acts at once; Tasks and details collect review drafts
-      if (k === 'a') return reviewNow('approve');
-      if (k === 'x') return changeNow(), draw();
+    if (['overview', 'tasks', 'detail', 'plan'].includes(v)) {
+      // acting takes effect at once; the human's words go to the coordinator (§12.5)
+      if (v !== 'plan' && k === 'a') return reviewNow('approve');
+      if (v !== 'plan' && k === 'x') return changeNow(), draw();
       if (k === 'r' || k === 'n') return reply(), draw();
       if (k === 'o') return openArtifact();
-    }
-    if (['overview', 'tasks', 'detail'].includes(v)) {
-      if (k === 'x') return promptDraft('change'), draw();
-      if (k === 'n') return promptDraft('note'), draw();
-      if (k === 'd') return dropDrafts();
-      if (k === 'S') return submitDrafts();
+      if (k === 's') return startCoordinator(false);
+      if (k === 'S') return startCoordinator(true);
     }
     if (k === 'q') {
       if (ui.back) back();
@@ -1985,8 +1982,6 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       else if (k === 'G' || k === '\x1b[F') ui.sel[key] = n - 1;
       else if (k === '\r') open();
       else if (k === 'g') return goTo();
-      else if (k === 's') return spawnAgent();
-      else if (k === 'a') return approve();
       else if (v === 'plan' && r?.type === 'plan' && ['\x1b[C', 'l', '\x1b[D', 'h', ' '].includes(k)) {
         const fold = k === ' ' ? !ui.cardFolded.has(r.key) : k === '\x1b[D' || k === 'h';
         if (fold) ui.cardFolded.add(r.key);
@@ -2028,8 +2023,6 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       else if (k === '\x1b[6~') ui.scrolls[key] = (ui.scrolls[key] ?? 0) + page;
       else if (k === '\r' && v === 'detail') ui.back ? back() : (ui.overlay = null);
       else if (v === 'detail' && k === 'g') return goTo();
-      else if (v === 'detail' && k === 's') return spawnAgent();
-      else if (v === 'detail' && k === 'a') return approve();
       else if (k === 'A') setScope({ level: 'all' });
     }
     draw();

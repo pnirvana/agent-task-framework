@@ -80,10 +80,12 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 ### Plan events
 | type | data |
 |------|------|
-| `plan.created` | `{title, goal?, description?, labels?, coordinator?, meta?}` (`coordinator` defaults to the creating actor) |
+| `plan.created` | `{title, goal?, description?, labels?, coordinator?, docs?, meta?}` (`coordinator` defaults to the creating actor; `docs`: the plan's documents, §12.7) |
 | `plan.updated` | any subset of the above (shallow replace) |
 | `plan.status`  | `{status: active\|paused\|completed\|failed\|cancelled, message?}` |
 | `plan.review`  | `{summary, items: [{task, action: approve\|change\|note, message, file?, line?}]}`: one submitted review batch |
+| `plan.note`    | `{kind: info\|question\|decision\|warning\|checkpoint, message, for?: human}`: plan-level note; `checkpoint` = the coordinator's handoff, `question` + `for: human` = a question for the human (§12) |
+| `plan.session` | `{ref, kind?, actor?}`: the coordinator's session, for resuming the plan (§12.6) |
 
 ### Task events
 | type | data | notes |
@@ -91,7 +93,7 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 | `task.created`  | `{title, description?, acceptance?: string[], deps?: id[], parent?: id, labels?: string[], priority?: number, assignee?: string, agent?: string, origin?: id, reviewer?: string, review?: boolean, meta?: object}` | `agent`: name of the agent definition to run the task with (opaque; resolved by the launcher, e.g. a pi agent named `reviewer`) |
 | `task.updated`  | any subset of the definition fields | lists are replaced, not merged |
 | `task.assigned` | `{assignee: string\|null}` | `null` = unassign |
-| `task.status`   | `{status, message?, on?: id[], changes?: true}` | `message` on `done` is the task's **result summary**; `on` with `blocked`: tasks it is blocked on; `changes` with `todo`: **changes requested** from review (`message` is the feedback) |
+| `task.status`   | `{status, message?, on?: id[], for?: coordinator\|human, changes?: true}` | `message` on `done` is the task's **result summary**; `on` with `blocked`: tasks it is blocked on; `for` with `blocked` (no `on`): who must answer the question (default the coordinator; `human`: escalated, §12.4); `changes` with `todo`: **changes requested** from review (`message` is the coordinator's instructions) |
 | `task.progress` | `{message?, percent?: 0..100}` | heartbeat / milestone |
 | `task.note`     | `{message, kind?: info\|question\|decision\|warning\|checkpoint}` | `checkpoint`: where the work stands (done / left / how to verify) |
 | `task.artifact` | `{kind: file\|commit\|branch\|pr\|url\|other, ref, description?}` | pointer to an output |
@@ -234,19 +236,23 @@ idle agent and start another later. Three harness-independent pieces make that s
 - **Session references** (`task.session`): an opaque `{kind, ref}` naming the agent
   session that worked on the task (a session file, a session id). ATF stores and returns
   it but never interprets it. Derived: `sessions` (per actor), `session` (latest).
-- **Resume policy** (`resume` on the plan or a task: `auto` | `resume` | `fresh`). Derived:
-  `resume_policy`.
+- **Resume policy** (`resume` on the plan or a task: `fresh` (default since v2, §12) |
+  `auto` | `resume`). Derived: `resume_policy`.
 
 `launchPlan(plan, task, actor)` (CLI: `atf resume-info <task>`) answers "should the next
-agent on this task resume or start fresh?". Rule for `auto`: **context belongs to the
-task.** A task that was already worked on (blocked then unblocked, question answered,
+agent on this task resume or start fresh?". By default (`fresh`) a new agent starts with a
+focused prompt; the checkpoint, feedback and history carry the state. Rule for `auto`:
+**context belongs to the task.** A task that was already worked on (blocked then unblocked, question answered,
 reopened after review) resumes its session; a task never started gets a fresh agent.
 Without a session reference the answer is `fresh`, and the checkpoint carries the state.
 
 Attention reasons (§`attentionFor`) for an owner: `ready`, `unblocked` (all `blocked on`
 tasks done), `answered` (someone else added a note after a question-block). For a
 coordinator additionally: `dispatch` (a ready task nobody owns), `review`, `blocked`
-(question-blocks).
+(question-blocks for the coordinator), `start` / `changes` / `unblocked` / `answered`
+(work waiting for an owner that has nothing in progress: start a new agent; reported
+after any `human` input on the task is handled), and `human` (the human's input on a task,
+or on the plan with task null). Since v2 only the coordinator waits (§12.3).
 
 **Review outcomes.** A task in `review` (or `done`) can be sent back with requested
 changes: `task.status {status: todo, changes: true, message}`. Derived: `feedback` (all
@@ -296,17 +302,18 @@ to blocked only without `on` (a dependency block is the owner's business), and
 `plan.review`; for any actor, status, note, assignment and update events on tasks it owns,
 except a status change to done (an approval leaves the owner nothing to act on).
 Attention items are level-triggered and repeat until resolved.
+Since v2 also, for a coordinator: `task.note` and `plan.note` by the human; blocks `for: human` are not reported (the coordinator wrote them).
 
 **Launcher contract.** A launcher (e.g. the herdr adapter) that starts agents:
-1. sets `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR`, `ATF_ROLE`, and `ATF_LIFECYCLE`
-   (`ephemeral` if it closes idle agents and relaunches them, else `persistent`);
-2. records a `task.session` for each task an agent worked on, if the harness exposes one;
-3. when an agent's owner has attention but no live agent, starts one, resuming
-   `launchPlan(...).session` when the mode is `resume` and the agent kind can resume,
-   else fresh with a prompt pointing at the checkpoint and task history.
+1. sets `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR`, `ATF_ROLE`;
+2. records a `task.session` for each task an agent worked on, and a `plan.session` for
+   the coordinator, if the harness exposes one;
+3. starts subagents only when the coordinator asks (§12): fresh by default, resuming
+   `launchPlan(...).session` when asked and the agent kind can resume; it may close
+   subagents that finished, nudge an idle coordinator, and start or resume the
+   coordinator (§12.6).
 
-With `ATF_LIFECYCLE=ephemeral`, `atf wait` returns immediately when nothing needs the
-agent, telling it to end its turn.
+A subagent's `atf wait` returns at once, telling it to finish and end (§12.2).
 
 ### Roles without configuration
 
@@ -326,10 +333,12 @@ interfere. To see plans across projects, a **user-level registry** lists known r
 directories). Readers prune roots that no longer exist. The registry is a convenience:
 failing to update it never fails a write.
 
-`driverInbox(plan)` lists what needs the *human* driving the agents (as opposed to
-`attentionFor`, which is per agent): tasks in `review`, question-blocks (blocked without
-`on` and not yet answered), `failed` tasks, and an active plan whose tasks are all
-finished. Oldest first. Frontends may add harness signals (e.g. stalled agents).
+`driverInbox(plan)` lists what needs a decision (as opposed to `attentionFor`, which is per
+agent): tasks in `review`, question-blocks (blocked without `on` and not yet answered),
+`failed` tasks, open plan questions for the human (`plan-question`), and an active plan
+whose tasks are all finished. Each item says `for` whom (`human`, `coordinator`, or a
+named reviewer); frontends show the human's, and the coordinator's too while no
+coordinator runs. Oldest first. Frontends may add harness signals (e.g. stalled agents).
 `planSummary(plan)` gives the per-plan row for overviews. CLI: `atf plans [--all]`,
 `atf inbox [--all]`, `atf projects`.
 
@@ -343,11 +352,11 @@ harness server. Writers record a server identity in `actor.ctx` (herdr:
 `v` is bumped only for incompatible envelope or semantics changes. New event types,
 new optional `data` fields and new `ctx` keys are minor, non-breaking additions.
 
-## 12. Interaction model v2: the coordinator decides (proposed)
+## 12. Interaction model v2: the coordinator decides
 
-**Status: agreed design, not implemented yet.** Once implemented, it replaces the parts of
-§9 that let subagents wait, get relaunched with their old session, or receive review
-feedback directly. Until then §1–§11 describe the current behaviour.
+**Status: implemented** (reference CLI, skill, herdr adapter and board). It replaces the
+parts of §9 that let subagents wait, get relaunched with their old session, or receive
+review feedback directly; where §9/§10 and this section differ, this section applies.
 
 ### 12.1 Why
 

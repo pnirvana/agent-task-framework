@@ -18,6 +18,7 @@ import {
   planSummary,
   reviewRefusal,
   HUMAN,
+  BLOCK_FOR,
 } from '../src/core.mjs';
 import {
   findRoot,
@@ -47,17 +48,24 @@ const HELP = `atf — Agent Task Framework
 
 Setup / plans
   atf init                              create .atf/ in the current directory (the project root)
-  atf plan new <title> [--goal G] [--desc D]   create plan, make it current
+  atf plan new <title> [--goal G] [--desc D] [--doc design.md]...   create plan, make it current
+                                        (--doc: the plan's documents, read by every new coordinator)
   atf plan list | use <id>
   atf plan show [id]                    plan overview: structure, ownership, decisions, artifacts
   atf plan new <title> ... [--coordinator NAME]   (default: you become its coordinator)
-  atf plan update [--title T] [--goal G] [--desc D] [--resume auto|resume|fresh] [--coordinator NAME]
+  atf plan update [--title T] [--goal G] [--desc D] [--doc PATH]... [--resume fresh|auto|resume]
+                  [--coordinator NAME]    (--doc replaces the list; --doc - clears it)
+  atf plan checkpoint "<where the plan stands, what you wait for, what is next>"
+                                        (coordinator) handoff to the next coordinator session
+  atf plan ask "<question>"             (coordinator) a question for the human about the whole plan
+  atf plan note "<text>" [--kind K] [--for human]   a plan-level note
+  atf plan session <ref> [--kind K]     record the coordinator's session (launchers)
   atf whoami                            who ATF thinks you are: identity, role and why, plan
   atf plan status <${PLAN_STATUSES.join('|')}> [-m msg]
 
 Tasks (coordinator)
   atf add <title> [--desc D] [--accept A]... [--dep T1]... [--parent T1]
-                  [--label L]... [--priority N] [--assign WHO] [--resume auto|resume|fresh]
+                  [--label L]... [--priority N] [--assign WHO] [--resume fresh|auto|resume]
                   [--agent NAME]   agent definition to run the task with (e.g. reviewer)
                   [--from T3]      follow-up of T3 (scope found in review); placed under T3's
                                    parent; copies nothing else from T3 (not its assignee,
@@ -83,8 +91,12 @@ Tasks (worker)
                                         record an agent session reference (for resuming)
   atf resume-info <task> [--for WHO]    resume or fresh? (used by launchers)
   atf block <task> -m <reason> [--on T8,T9]
-                                        needs help / input. --on: blocked on other tasks;
-                                        becomes resumable automatically when they are done
+                                        needs a decision: a question for the coordinator (write
+                                        a checkpoint first, then end). --on: blocked on other
+                                        tasks; the coordinator restarts it when they are done
+  atf block <task> --for human -m "<question + your view>"
+                                        (coordinator) escalate a question (or a failed task) to
+                                        the human; their answer comes back to you
   atf done <task> -m <summary>          criteria met and verified by you (the normal ending)
   atf review <task> -m <summary>        someone must check it first: required for --review
                                         tasks; else for unverifiable criteria, deviations,
@@ -99,9 +111,9 @@ Tasks (worker)
                                         ask a specific reviewer (e.g. the human) instead
                                         of the coordinator
   atf changes <task> -m "1. … 2. …" [--fresh]
-                                        (coordinator) send a task in review/done back to its
-                                        owner with requested changes; --fresh: next attempt
-                                        starts with a clean agent (wrong approach)
+                                        (coordinator) send a task in review/done back with
+                                        requested changes, then start an agent for it.
+                                        As the human: a change request for the coordinator
   atf cancel | reopen | release <task> [-m msg]
 
 Viewing
@@ -110,14 +122,15 @@ Viewing
   atf show <task>
   atf log [-n N] [--follow]
   atf plans [--all] [--closed]          active plans in this project / all known projects
-  atf inbox [--all]                     what needs you: reviews, questions, failures, finished plans
+  atf inbox [--all]                     what needs a decision, and for whom (human / coordinator)
   atf projects [add [dir]]              known projects (registered on init / plan creation)
   atf skill [status|install|uninstall]  link the agent skill into ~/.agents/skills (and
                                         ~/.claude/skills) so agents discover it automatically
-  atf wait [--timeout MS] [--since SEQ] block until something needs YOU: ready/unblocked work in
-                                        your packages, or (coordinator) tasks to dispatch, reviews,
-                                        blockers, finished tasks. Reports everything since your last
+  atf wait [--timeout MS] [--since SEQ] (coordinator) block until something needs you: tasks to
+                                        dispatch or restart, reviews, questions, finished or failed
+                                        tasks, the human's input. Reports everything since your last
                                         wait (per-actor cursor), so nothing between waits is missed.
+                                        Subagents do not wait: they finish and end.
   atf wait --task T1,T2 [--status S,..] wait for specific tasks to reach a status
   atf validate
 
@@ -131,7 +144,7 @@ Global flags
 
 // ---------- args ----------
 const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early', 'review']);
-const MULTI = new Set(['accept', 'dep', 'label']);
+const MULTI = new Set(['accept', 'dep', 'label', 'doc']);
 const SHORT = { m: 'message', n: 'limit', h: 'help', j: 'json' };
 
 function parseArgs(argv) {
@@ -376,12 +389,19 @@ function renderStatus(state) {
   ].filter((l) => l !== null);
   const attention = state.order
     .map((id) => state.tasks[id])
-    // a task blocked --on other tasks just waits for them (its owner is woken): not a matter for anyone
-    .filter((t) => (t.status === 'blocked' && !t.blocked_on.length && !t.answered) || t.status === 'review');
-  if (attention.length) {
+    // a task blocked --on other tasks just waits for them: not a matter for anyone
+    .filter((t) => (t.status === 'blocked' && !t.blocked_on.length && !t.answered) || t.status === 'review' || t.human_input?.length);
+  if (attention.length || state.questions?.length || state.human_input?.length) {
     lines.push('', bold('needs attention:'));
-    for (const t of attention)
-      lines.push(`  ${t.id} ${badge(t.status)}${t.status === 'review' && t.reviewer && t.reviewer !== 'coordinator' ? magenta(` for ${t.reviewer}`) : ''} ${t.last_message || ''}`);
+    for (const q of state.questions ?? []) lines.push(`  ${bold('plan')} ${red('question')}${magenta(' for human')} ${q.message}`);
+    for (const n of state.human_input ?? []) lines.push(`  ${bold('plan')} ${magenta('human input')}${dim(' for coordinator')} ${n.message}`);
+    for (const t of attention) {
+      if (t.status === 'review' || (t.status === 'blocked' && !t.blocked_on.length && !t.answered)) {
+        const who = t.status === 'review' ? (t.reviewer && t.reviewer !== 'coordinator' ? t.reviewer : 'coordinator') : t.blocked_for ?? 'coordinator';
+        lines.push(`  ${t.id} ${badge(t.status)}${who === 'coordinator' ? dim(' for coordinator') : magenta(` for ${who}`)} ${t.last_message || ''}`);
+      }
+      if (t.human_input?.length) lines.push(`  ${t.id} ${magenta('human input')}${dim(' for coordinator')} ${t.human_input.map((n) => n.message).join(' | ')}`);
+    }
   }
   const actors = Object.values(state.actors).filter((a) => a.owned.some((id) => !TERMINAL.has(state.tasks[id].status)));
   if (actors.length) {
@@ -402,6 +422,12 @@ function renderPlan(state) {
   L.push(dim(`created ${state.created_at?.slice(0, 16).replace('T', ' ')} by ${state.created_by ?? '?'} · updated ${ago(state.updated_at)}`));
   if (state.status_message) L.push('', bold('status: ') + state.status_message);
   if (state.description) L.push('', state.description);
+  if (state.docs?.length) L.push('', bold('documents:') + dim(' (read these first: the plan\'s design and approach)'), ...state.docs.map((d) => `  ${d}`));
+  if (state.checkpoint) L.push('', bold('plan checkpoint') + dim(` (${state.checkpoint.actor ?? '?'}, ${ago(state.checkpoint.ts)}):`), state.checkpoint.message);
+  if (state.questions?.length) L.push('', bold('open questions for the human:'), ...state.questions.map((q) => `  ${q.message}`));
+  const pnotes = state.notes.filter((n) => n.kind !== 'checkpoint' && !(state.questions ?? []).includes(n));
+  if (pnotes.length) L.push('', bold('plan notes:'), ...pnotes.slice(-10).map((n) => `  ${n.kind !== 'info' ? yellow(`[${n.kind}] `) : ''}${cyan(n.actor ?? '?')}: ${n.message}`));
+  if (state.session) L.push('', `${bold('coordinator session:')} ${cyan(state.session.actor ?? '?')} ${state.session.kind ?? ''} ${dim(state.session.ref)}`);
   L.push('', bold('structure:'), ...treeRows(state).map((r) => '  ' + renderTaskLine(state.tasks[r.id], state, r.prefix)));
   const actors = Object.values(state.actors).filter((a) => a.owned.length || a.packages.length);
   if (actors.length) L.push('', bold('ownership:'), ...actors.map((a) => renderActorLine(a, state)));
@@ -427,6 +453,8 @@ function renderTask(t, state) {
   if (t.followups?.length) L.push(`follow-ups:   ${t.followups.map((id) => `${id}(${state.tasks[id].status})`).join(', ')}`);
   if (t.children.length)
     L.push(`subtasks: ${t.children.map((id) => `${id}(${state.tasks[id].rollup_status ?? state.tasks[id].status}${state.tasks[id].owner && state.tasks[id].owner !== t.owner ? ' @' + state.tasks[id].owner : ''})`).join(', ')}`);
+  if (t.status === 'blocked' && !t.blocked_on.length) L.push(`question for: ${t.blocked_for === 'human' ? magenta('the human') : 'the coordinator'}${t.answered ? green('  (answered)') : ''}`);
+  if (t.human_input?.length) L.push(`human input: ${magenta(t.human_input.map((n) => n.message).join(' | '))} ${dim('(for the coordinator, not handled yet)')}`);
   if (t.blocked_on.length) L.push(`blocked on: ${t.blocked_on.map((d) => `${d}(${state.tasks[d]?.rollup_status ?? state.tasks[d]?.status ?? '?'})`).join(', ')}${t.can_resume ? green('  → can resume') : ''}`);
   if (t.deps.length) L.push(`deps:     ${t.deps.map((d) => `${d}(${state.tasks[d]?.rollup_status ?? state.tasks[d]?.status ?? '?'})`).join(', ')}`);
   if (t.labels.length) L.push(`labels:   ${t.labels.join(', ')}`);
@@ -463,6 +491,7 @@ function renderEvent(e) {
   const bits = [
     d.status,
     d.on?.length ? `on ${d.on.join(',')}` : null,
+    d.for ? `for ${d.for}` : null,
     d.changes ? 'changes requested' : null,
     d.fresh ? 'fresh' : null,
     d.early?.length ? `early (${d.early.join(',')} not done)` : null,
@@ -486,8 +515,16 @@ function statusCmd(target, msgRequired) {
     if (msgRequired && !msg) die(`-m <message> is required for ${target}`);
     const { state } = transact(root, planId, actor, (st) => {
       const t = requireTask(st, pos[0]);
+      if (FLAGS.for !== undefined && target !== 'blocked') die('--for only applies to block');
+      if (FLAGS.for !== undefined && !BLOCK_FOR.includes(FLAGS.for)) die(`--for must be one of ${BLOCK_FOR.join(', ')}`);
+      if (FLAGS.for && FLAGS.on) die('--for is for questions; a block --on other tasks waits for them');
+      // re-addressing a question or escalating a failure to the human: the coordinator
+      // turns a task already blocked (or failed) into a question for the human
+      const readdress = target === 'blocked' && FLAGS.for && ['blocked', 'failed'].includes(t.status);
       if (!FLAGS.force) {
-        if (!canTransition(t.status, target)) die(`cannot move ${t.id} from ${t.status} to ${target} (use --force)`);
+        if (!readdress && !canTransition(t.status, target)) die(`cannot move ${t.id} from ${t.status} to ${target} (use --force)`);
+        if (FLAGS.for === 'human' && actor.role !== 'coordinator' && actor.role !== 'human')
+          die('only the coordinator asks the human (block without --for: your question goes to the coordinator, who escalates if needed)');
         if (target === 'in_progress' && t.waiting_on.length && !FLAGS.early)
           die(`${t.id} waits on ${t.waiting_on.join(', ')} (--early starts it anyway, for work that does not need them yet)`);
         if (target === 'in_progress' && t.children.length) die(`${t.id} has subtasks; start those instead (use --force)`);
@@ -522,6 +559,7 @@ function statusCmd(target, msgRequired) {
       }
       const early = target === 'in_progress' && FLAGS.early && t.waiting_on.length;
       const data = { status: target, ...(msg || early ? { message: msg || `started early: ${t.waiting_on.join(', ')} not done yet` } : {}), ...(early ? { early: t.waiting_on } : {}) };
+      if (FLAGS.for) data.for = FLAGS.for;
       if (FLAGS.on) {
         if (target !== 'blocked') die('--on only applies to block');
         data.on = FLAGS.on.split(',').map((x) => x.trim()).filter(Boolean);
@@ -531,7 +569,7 @@ function statusCmd(target, msgRequired) {
       return evs;
     });
     const t = requireTask(state, pos[0]);
-    out({ ok: true, task: t }, `${t.id} ${badge(t.status)}${t.assignee ? ' ' + cyan('@' + t.assignee) : ''}`);
+    out({ ok: true, task: t }, `${t.id} ${badge(t.status)}${t.blocked_for === 'human' ? magenta(' for the human') : ''}${t.assignee ? ' ' + cyan('@' + t.assignee) : ''}`);
   };
 }
 
@@ -561,6 +599,7 @@ const commands = {
       if (FLAGS.goal) data.goal = FLAGS.goal;
       if (FLAGS.desc) data.description = FLAGS.desc;
       if (FLAGS.coordinator) data.coordinator = FLAGS.coordinator;
+      if (FLAGS.doc) data.docs = FLAGS.doc;
       transact(root, id, actor, () => [{ type: 'plan.created', data }]);
       setCurrentPlan(root, id);
       return out({ ok: true, plan: id }, `created plan ${bold(id)} (now current)\n${dim(`export ATF_PLAN=${id}`)}`);
@@ -594,6 +633,7 @@ const commands = {
       if (FLAGS.goal) data.goal = FLAGS.goal;
       if (FLAGS.desc) data.description = FLAGS.desc;
       if (FLAGS.coordinator) data.coordinator = FLAGS.coordinator;
+      if (FLAGS.doc) data.docs = FLAGS.doc[0] === '-' ? [] : FLAGS.doc; // replaces the list; --doc - clears it
       if (FLAGS.resume) {
         if (!RESUME_POLICIES.includes(FLAGS.resume)) die(`--resume must be one of ${RESUME_POLICIES.join(', ')}`);
         data.resume = FLAGS.resume;
@@ -601,6 +641,26 @@ const commands = {
       if (!Object.keys(data).length) die('nothing to update');
       transact(root, planId, actor, () => [{ type: 'plan.updated', data }]);
       return out({ ok: true }, 'plan updated');
+    }
+    if (sub === 'note' || sub === 'ask' || sub === 'checkpoint') {
+      // plan-level notes: `ask` = a question for the human about the whole plan;
+      // `checkpoint` = where the plan stands (the coordinator's handoff to its next session)
+      const { root, planId, actor } = ctx();
+      const message = pos.join(' ') || FLAGS.message;
+      if (!message) die(`usage: atf plan ${sub} "<text>"${sub === 'note' ? ' [--kind info|question|decision|warning|checkpoint] [--for human]' : ''}`);
+      const kind = sub === 'ask' ? 'question' : sub === 'checkpoint' ? 'checkpoint' : FLAGS.kind || 'info';
+      if (!NOTE_KINDS.includes(kind)) die(`--kind must be one of ${NOTE_KINDS.join(', ')}`);
+      const forWho = sub === 'ask' ? 'human' : FLAGS.for;
+      if (forWho && !BLOCK_FOR.includes(forWho)) die(`--for must be one of ${BLOCK_FOR.join(', ')}`);
+      transact(root, planId, actor, () => [{ type: 'plan.note', data: { kind, message, ...(forWho ? { for: forWho } : {}) } }]);
+      return out({ ok: true }, sub === 'ask' ? `asked the human ${dim('(shown under "needs you"; their answer wakes the coordinator)')}` : dim('ok'));
+    }
+    if (sub === 'session') {
+      // the coordinator's session, so the plan can be resumed with it (launchers record it)
+      const { root, planId, actor } = ctx();
+      if (!pos[0]) die('usage: atf plan session <ref> [--kind K] [--for ACTOR]');
+      transact(root, planId, actor, () => [{ type: 'plan.session', data: { ref: pos[0], ...(FLAGS.kind ? { kind: FLAGS.kind } : {}), ...(FLAGS.for ? { actor: FLAGS.for } : {}) } }]);
+      return out({ ok: true }, dim('ok'));
     }
     if (sub === 'status') {
       const { root, planId, actor } = ctx();
@@ -678,7 +738,7 @@ const commands = {
     });
     if (!picked) {
       const active = state.order.filter((id) => !TERMINAL.has(state.tasks[id].status));
-      return out({ ok: true, task: null, remaining: active.length }, active.length ? 'no ready task for you right now; run `atf wait` to block until something needs you' : 'all tasks finished');
+      return out({ ok: true, task: null, remaining: active.length }, active.length ? 'no ready task for you right now' : 'all tasks finished');
     }
     const t = state.tasks[picked.id];
     out({ ok: true, task: t }, renderTask(t, state));
@@ -733,10 +793,22 @@ const commands = {
     const { root, planId, actor } = ctx();
     const msg = FLAGS.message;
     if (!msg) die('-m "<what to change>" is required (be concrete; number the points)');
+    if (actor.role === 'human' && !FLAGS.force) {
+      // v2: the human's change request goes to the coordinator, which decides what happens
+      transact(root, planId, actor, (st) => {
+        const t = requireTask(st, pos[0]);
+        const evs = [{ type: 'task.note', task: t.id, data: { kind: 'feedback', message: `change request: ${msg}` } }];
+        if (st.status !== 'active') evs.push({ type: 'plan.status', data: { status: 'active', message: `reopened: changes requested on ${t.id}` } });
+        return evs;
+      });
+      return out({ ok: true, for: 'coordinator' }, `${pos[0]} change request sent to the coordinator ${dim('(it decides: send it back, a follow-up task, or a plan change)')}`);
+    }
     const { state } = transact(root, planId, actor, (st) => {
       const t = requireTask(st, pos[0]);
       if (!['review', 'done'].includes(t.status) && !FLAGS.force) die(`${t.id} is ${t.status}; request changes on a task in review or done (use --force)`);
-      const why = reviewRefusal(t, actor);
+      // v2: the coordinator sends work back, also on behalf of another reviewer (the human
+      // tells the coordinator what to change); approving stays the reviewer's
+      const why = actor.role === 'coordinator' ? null : reviewRefusal(t, actor);
       if (why && !FLAGS.force) die(`${why} (use --force)`);
       // --fresh: the next attempt (only) starts from a clean agent
       const evs = [{ type: 'task.status', task: t.id, data: { status: 'todo', message: msg, changes: true, ...(FLAGS.fresh ? { fresh: true } : {}) } }];
@@ -843,8 +915,8 @@ const commands = {
         for (const it of driverInbox(st)) items.push({ project: projectName(root), root, plan: id, plan_title: st.title, title: it.task ? st.tasks[it.task].title : null, ...it });
       }
     items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
-    const color = { review: magenta, question: red, failed: red, finished: green };
-    out(items, items.map((i) => `${(color[i.kind] || String)(i.kind.padEnd(9))} ${dim(i.project + ' / ' + i.plan_title)}  ${i.task ? bold(i.task) + ' ' + i.title : ''}${i.message ? dim(' — ' + i.message) : ''} ${dim(ago(i.ts))}`).join('\n') || 'inbox empty');
+    const color = { review: magenta, 'your-review': magenta, question: red, 'plan-question': red, failed: red, finished: green };
+    out(items, items.map((i) => `${(color[i.kind] || String)(i.kind.padEnd(13))} ${(i.for === 'coordinator' ? dim : magenta)(('for ' + i.for).padEnd(16))} ${dim(i.project + ' / ' + i.plan_title)}  ${i.task ? bold(i.task) + ' ' + i.title : ''}${i.message ? dim(' — ' + i.message) : ''} ${dim(ago(i.ts))}`).join('\n') || 'inbox empty');
   },
 
   whoami() {
@@ -972,7 +1044,11 @@ const commands = {
       if (!explicit) writeCursor(root, planId, actor.id, st.last_seq); // seen up to here
       const human = [
         note,
-        ...attention.map((a) => `${bold(a.task)} ${['ready', 'unblocked', 'dispatch'].includes(a.reason) ? green(a.reason) : magenta(a.reason)}${a.reason === 'changes' ? dim(' (see atf show: feedback)') : ''}${''}  ${st.tasks[a.task]?.title ?? ''}${a.reason === 'unblocked' ? dim(` (was blocked on ${st.tasks[a.task].blocked_on.join(',')})`) : ''}`),
+        ...attention.map((a) =>
+          a.reason === 'human' && !a.task
+            ? `${bold('plan')} ${magenta('human')}  ${st.human_input.map((n) => n.message).join(' | ')} ${dim('(the human wrote on the plan)')}`
+            : `${bold(a.task)} ${['ready', 'unblocked', 'dispatch'].includes(a.reason) ? green(a.reason) : magenta(a.reason)}${a.reason === 'changes' ? dim(' (see atf show: feedback)') : ''}  ${st.tasks[a.task]?.title ?? ''}${a.reason === 'unblocked' ? dim(` (was blocked on ${st.tasks[a.task].blocked_on.join(',')}: start a new agent for it)`) : ''}${a.reason === 'human' ? dim(` (the human wrote: ${st.tasks[a.task].human_input.map((n) => n.message).join(' | ').slice(0, 200)}; decide and act, then reply or note on the task)`) : ''}`,
+        ),
         ...events.map(renderEvent),
       ].filter(Boolean);
       out({ ok: true, attention, events, cursor: st.last_seq, ...(note ? { note } : {}) }, human.join('\n'));
@@ -990,8 +1066,12 @@ const commands = {
         return;
       }
       // Default: level-triggered on what needs *this* actor, so a wakeup can never be missed.
-      const attention = attentionFor(st, actor.id, actor.role);
       const isCoord = actor.role === 'coordinator';
+      // v2: only the coordinator waits; a subagent finishes and exits, and the coordinator
+      // starts a new instance when there is more for its task
+      if (!isCoord)
+        return finish(st, [], [], 'subagents do not wait: finish your task with `atf done`, `atf review` or `atf block` (write a checkpoint note first if work is left), then end. The coordinator starts a new agent when there is more to do.');
+      const attention = attentionFor(st, actor.id, actor.role);
       // An event about a task counts as handled once this actor wrote anything about that
       // task afterwards (e.g. it was woken by a message and acted): do not repeat it.
       const ownLastOnTask = {};
@@ -1003,8 +1083,10 @@ const commands = {
           ((isCoord && e.type === 'task.status' && ['done', 'failed'].includes(e.data?.status)) ||
             // reviews for someone else (e.g. the human) are not the coordinator's to handle
             (isCoord && e.type === 'task.status' && e.data?.status === 'review' && !reviewRefusal(st.tasks[e.task] ?? { id: e.task }, actor)) ||
-            (isCoord && e.type === 'task.status' && e.data?.status === 'blocked' && !e.data?.on?.length) ||
+            (isCoord && e.type === 'task.status' && e.data?.status === 'blocked' && !e.data?.on?.length && e.data?.for !== 'human') ||
             (isCoord && e.type === 'plan.review') ||
+            // the human talks to the coordinator: answers, change requests, remarks (§12.5)
+            (isCoord && e.actor?.id === HUMAN && ['task.note', 'plan.note'].includes(e.type)) ||
             // events on tasks this actor owns; an approval (done by someone else) leaves it
             // nothing to do, so it is not reported (cancel/fail by others are: stop working)
             (e.task && st.tasks[e.task]?.owner === actor.id && ['task.status', 'task.note', 'task.assigned', 'task.updated'].includes(e.type) && !(e.type === 'task.status' && e.data?.status === 'done'))),
@@ -1015,10 +1097,6 @@ const commands = {
       const news = hits.filter((e) => e.type !== 'task.status' || lastStatus[e.task] === e.seq);
       if (attention.length || news.length) return finish(st, attention, news);
       if (isCoord && leaves(st).length && leaves(st).every((t) => TERMINAL.has(t.status))) return finish(st, [], [], 'all tasks are finished');
-      if (!isCoord && !leaves(st).some((t) => t.owner === actor.id && !TERMINAL.has(t.status))) return finish(st, [], [], 'you own no open tasks');
-      // Ephemeral agents don't idle: the launcher resumes or replaces them when work is available.
-      if (!isCoord && process.env.ATF_LIFECYCLE === 'ephemeral')
-        return finish(st, [], [], 'nothing needs you right now. Lifecycle is ephemeral: make sure blocked tasks have a checkpoint note, then end your turn; you will be resumed when work is available.');
     };
 
     evaluate(); // return at once if something already needs you
