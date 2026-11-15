@@ -1040,3 +1040,71 @@ test('wait with a waking harness: does not block, arms it; --new wakes once per 
   const cursors = fs.readdirSync(path.join(dir, '.atf', 'plans', a.plan, 'cursors'));
   assert.ok(!cursors.some((f) => f.endsWith('.waiter')), cursors.join(','));
 });
+
+test('§13: relayed human decisions, --recommend, brief, inbox --for', () => {
+  const { dir, run, runFail } = sandbox();
+  const w1 = { ATF_ACTOR: 'w1', ATF_ROLE: 'subagent' };
+  run(['add', 'Order storage', '--accept', 'schema documented']); // T1
+  run(['assign', 'T1', 'w1']);
+  run(['start', 'T1'], w1);
+  run(['block', 'T1', '-m', 'SQLite or Postgres?'], w1);
+  // the coordinator escalates with its view
+  run(['block', 'T1', '--for', 'human', '-m', 'Approve SQLite for orders?', '--recommend', 'yes: local demo, no server needed']);
+  let b = run(['brief', 'T1']);
+  assert.equal(b.kind, 'question');
+  assert.equal(b.for, 'human');
+  assert.equal(b.question.message, 'Approve SQLite for orders?');
+  assert.equal(b.question.recommend, 'yes: local demo, no server needed');
+  assert.deepEqual([b.question.original.actor, b.question.original.message], ['w1', 'SQLite or Postgres?']);
+  assert.deepEqual(b.task.acceptance, ['schema documented']);
+  assert.deepEqual(run(['inbox', '--for', 'human']).map((i) => i.task), ['T1']);
+  assert.deepEqual(run(['inbox', '--for', 'coordinator']), []);
+  // only the coordinator relays
+  assert.match(runFail(['note', 'T1', '--relay', 'yes'], w1).error, /only the coordinator relays/);
+  // the human answered in the coordinator's chat: recorded as the human's decision
+  const r = run(['note', 'T1', '--relay', 'yes, go with SQLite']);
+  assert.equal(r.answered, true);
+  const t1 = run(['show', 'T1']);
+  assert.equal(t1.answered, true);
+  const n = t1.notes.at(-1);
+  assert.deepEqual([n.actor, n.kind, n.relayed.from, n.relayed.quote, n.relayed.via], ['lead', 'decision', 'human', 'yes, go with SQLite', 'chat']);
+  assert.deepEqual(run(['inbox', '--for', 'human']), [], 'answered: no longer waits for the human');
+  assert.equal(t1.human_input.length, 0, 'relayed input does not wake the coordinator');
+
+  // a review that waits for the human: the coordinator may approve it only as relayed
+  run(['add', 'Cart API']); // T2
+  run(['assign', 'T2', 'w1']);
+  run(['start', 'T2'], w1);
+  fs.writeFileSync(path.join(dir, 'cart.py'), 'a\nb\nc\n');
+  run(['artifact', 'T2', 'cart.py'], w1);
+  run(['review', 'T2', '--by', 'human', '-m', 'PATCH sets quantity; 18 tests'], w1);
+  b = run(['brief', 'T2']);
+  assert.equal(b.kind, 'your-review');
+  assert.equal(b.review.submitted.message, 'PATCH sets quantity; 18 tests');
+  assert.deepEqual(b.files.map((f) => [f.path, f.added]), [['cart.py', 3]]);
+  assert.match(runFail(['done', 'T2', '-m', 'ok']).error, /reviewed by human/);
+  run(['done', 'T2', '--relay', 'looks good, approve']);
+  const t2 = run(['show', 'T2']);
+  assert.equal(t2.status, 'done');
+  const h = t2.history.at(-1);
+  assert.deepEqual([h.to, h.actor, h.relayed.quote], ['done', 'lead', 'looks good, approve']);
+  assert.match(runFail(['start', 'T1', '--relay', 'x']).error, /--relay applies to done/);
+
+  // a relayed change request: the human's words plus the coordinator's instructions
+  run(['add', 'Docs']); // T3
+  run(['assign', 'T3', 'w1']);
+  run(['start', 'T3'], w1);
+  run(['review', 'T3', '-m', 'written'], w1);
+  run(['changes', 'T3', '--relay', 'too long, cut it down', '-m', '1. keep it under one page']);
+  const t3 = run(['show', 'T3']);
+  assert.equal(t3.changes_requested, true);
+  assert.equal(t3.history.at(-1).relayed.quote, 'too long, cut it down');
+  assert.equal(t3.feedback.at(-1).message, '1. keep it under one page');
+
+  // a plan question answered in the chat
+  run(['plan', 'ask', 'Local demo or production?']);
+  assert.equal(run(['brief', 'plan']).questions.length, 1);
+  run(['plan', 'note', '--relay', 'local demo for now']);
+  assert.equal(run(['brief', 'plan']).questions.length, 0);
+  assert.deepEqual(run(['inbox', '--for', 'human']).filter((i) => i.kind === 'plan-question'), []);
+});

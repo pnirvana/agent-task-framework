@@ -619,7 +619,7 @@ frontend shows the same content:
 
 ```sh
 atf brief T1 [--json]       # a task waiting for the human
-atf brief --plan [--json]   # the plan's open questions
+atf brief plan [--json]    # the plan's open questions
 atf inbox --for human --json
 ```
 
@@ -684,7 +684,7 @@ to blocked. New CLI: `--relay`, `--recommend`, `atf brief`, `atf inbox --for`.
 ### 13.9 Implementation order
 
 1. Protocol and CLI: `--relay` (fold, permissions, rendering), `--recommend`,
-   `atf brief`, `inbox --for`; tests.
+   `atf brief`, `inbox --for`; tests. **Done.**
 2. Skill: relay rule, asking in the chat, the end-of-turn list.
 3. pi extension: widget, peek, peek-on-type (on top of the existing wake).
 4. Copilot adapter: extension (wake, end-of-turn line, `/atf`), herdr kind `copilot`,

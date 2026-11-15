@@ -9,6 +9,15 @@ export const PROTOCOL_VERSION = 1;
  * started by hand defaults to the user's name too, and a wait skips the actor's own events.
  */
 export const HUMAN = 'human';
+
+/**
+ * Relayed decisions (§13.3): the human said it in the coordinator's chat and the
+ * coordinator recorded it. `data.relayed = {from, quote, via}`; the event's actor stays
+ * the coordinator. Folded entries carry `relayed`, and count as the human's decision.
+ */
+const relayOf = (d) => (d?.relayed?.from ? { relayed: { from: d.relayed.from, quote: d.relayed.quote ?? '', via: d.relayed.via ?? 'chat' } } : {});
+/** Did the human make this note / decision (directly, or relayed by the coordinator)? */
+export const byHuman = (n) => n?.actor === HUMAN || n?.relayed?.from === HUMAN;
 export const PLAN_STATUSES = ['active', 'paused', 'completed', 'failed', 'cancelled'];
 export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'review', 'done', 'failed', 'cancelled'];
 export const TERMINAL = new Set(['done', 'failed', 'cancelled']);
@@ -57,6 +66,7 @@ function newTask(id, ev) {
     blocked_on: [],
     blocked_seq: null,
     blocked_for: null, // question-blocks: who must answer, 'coordinator' or 'human'
+    recommend: null, // the coordinator's recommendation on a question for the human
     resume: null, // per-task resume policy (overrides the plan's)
     agent: null, // name of the agent definition to run this task with (opaque; launchers resolve it)
     origin: null, // task this one is a follow-up of (scope found while reviewing it)
@@ -133,7 +143,7 @@ export function fold(events) {
           Object.assign(plan, pick(d, PLAN_FIELDS));
           break;
         case 'plan.note': {
-          const n = { seq: ev.seq, ts: ev.ts, actor: ev.actor?.id ?? null, kind: d.kind || 'info', message: d.message ?? '', for: d.for ?? null };
+          const n = { seq: ev.seq, ts: ev.ts, actor: ev.actor?.id ?? null, kind: d.kind || 'info', message: d.message ?? '', for: d.for ?? null, ...relayOf(d) };
           plan.notes.push(n);
           if (n.kind === 'checkpoint') plan.checkpoint = n;
           break;
@@ -173,7 +183,7 @@ export function fold(events) {
       continue;
     }
     t.updated_at = ev.ts;
-    const entry = { seq: ev.seq, ts: ev.ts, actor: ev.actor?.id ?? null };
+    const entry = { seq: ev.seq, ts: ev.ts, actor: ev.actor?.id ?? null, ...relayOf(d) };
 
     switch (ev.type) {
       case 'task.updated':
@@ -202,6 +212,8 @@ export function fold(events) {
         t.blocked_on = d.status === 'blocked' && Array.isArray(d.on) ? d.on : [];
         t.blocked_seq = d.status === 'blocked' ? ev.seq : null;
         t.blocked_for = d.status === 'blocked' && !t.blocked_on.length ? (d.for === 'human' ? 'human' : 'coordinator') : null;
+        // the coordinator's view on a question it escalates to the human (§13.4)
+        t.recommend = d.status === 'blocked' && d.recommend ? d.recommend : null;
         t.history.push({ ...entry, type: 'status', from, to: d.status, message: d.message ?? null, ...(d.changes ? { changes: true } : {}) });
         // "request changes": back to the owner with feedback (status todo, data.changes)
         if (d.changes) {
@@ -305,7 +317,7 @@ export function derive(plan) {
     t.answered =
       t.status === 'blocked' &&
       !t.blocked_on.length &&
-      t.notes.some((n) => n.seq > (t.blocked_seq ?? Infinity) && n.actor && n.actor !== t.owner && n.kind !== 'checkpoint' && (t.blocked_for !== 'human' || n.actor === HUMAN));
+      t.notes.some((n) => n.seq > (t.blocked_seq ?? Infinity) && n.actor && n.actor !== t.owner && n.kind !== 'checkpoint' && (t.blocked_for !== 'human' || byHuman(n)));
     // the human's input not yet handled by the coordinator: notes by the human after the
     // coordinator last wrote on the task (v2: the human talks to the coordinator)
     const coordLast = Math.max(0, ...t.history.filter((h) => h.actor === plan.coordinator).map((h) => h.seq), ...t.notes.filter((n) => n.actor === plan.coordinator).map((n) => n.seq));
@@ -316,7 +328,7 @@ export function derive(plan) {
   // plan level: open questions for the human, and the human's input for the coordinator
   const planCoordLast = Math.max(0, ...plan.notes.filter((n) => n.actor === plan.coordinator).map((n) => n.seq));
   plan.human_input = plan.notes.filter((n) => n.actor === HUMAN && n.seq > planCoordLast && n.kind !== 'checkpoint');
-  plan.questions = plan.notes.filter((n, i) => n.kind === 'question' && n.for === 'human' && !plan.notes.slice(i + 1).some((m) => m.actor === HUMAN));
+  plan.questions = plan.notes.filter((n, i) => n.kind === 'question' && n.for === 'human' && !plan.notes.slice(i + 1).some(byHuman));
   plan.counts = counts;
   plan.total = plan.order.length;
   plan.progress = leaves ? doneLeaves / leaves : 0;
@@ -525,4 +537,44 @@ export function findCycles(plan) {
   };
   for (const id of plan.order) if (!state[id]) visit(id);
   return cycles;
+}
+
+/**
+ * Everything a human needs to act on one request (§13.5), from the plan alone: the
+ * question with who originally asked and the coordinator's recommendation, or the
+ * submitted review with its acceptance criteria, notes and artifacts. `taskId` null: the
+ * plan's open questions. Frontends add harness data (e.g. changed lines from git).
+ */
+export function brief(plan, taskId = null) {
+  if (!taskId)
+    return { kind: 'plan', plan: plan.id, title: plan.title, goal: plan.goal ?? null, docs: plan.docs ?? [], questions: (plan.questions ?? []).map((q) => ({ ts: q.ts, actor: q.actor, message: q.message })), checkpoint: plan.checkpoint?.message ?? null };
+  const t = plan.tasks[taskId];
+  if (!t) return null;
+  const item = driverInbox(plan).find((i) => i.task === taskId) ?? null;
+  const lastTo = (status) => [...t.history].reverse().find((h) => h.type === 'status' && h.to === status) ?? null;
+  const out = {
+    kind: item?.kind ?? 'task',
+    for: item?.for ?? null,
+    plan: plan.id,
+    task: { id: t.id, title: t.title, status: t.status, owner: t.owner ?? null, reviewer: t.reviewer ?? null, path: t.path.map((id) => plan.tasks[id]?.title ?? id), description: t.description ?? null, acceptance: t.acceptance ?? [] },
+    artifacts: t.artifacts ?? [],
+  };
+  if (t.status === 'blocked' && !t.blocked_on.length) {
+    const b = lastTo('blocked');
+    // escalated by the coordinator: the question as the agent first asked it
+    const orig = b?.actor === plan.coordinator ? [...t.history].reverse().find((h) => h.type === 'status' && h.to === 'blocked' && h.seq < b.seq && h.actor !== plan.coordinator) : null;
+    out.question = { for: t.blocked_for, message: b?.message ?? t.last_message ?? null, asked_by: b?.actor ?? null, ts: b?.ts ?? null, recommend: t.recommend ?? null, original: orig ? { actor: orig.actor, message: orig.message, ts: orig.ts } : null };
+  }
+  if (t.status === 'review') {
+    const r = lastTo('review');
+    const started = lastTo('in_progress')?.seq ?? 0;
+    out.review = {
+      submitted: r ? { actor: r.actor, message: r.message, ts: r.ts } : null,
+      notes: t.notes.filter((n) => n.seq > started && n.actor === r?.actor && n.kind !== 'checkpoint').slice(-3).map((n) => ({ kind: n.kind, message: n.message })),
+      assessment: [...t.notes].reverse().find((n) => n.seq > (r?.seq ?? 0) && n.actor === plan.coordinator)?.message ?? null,
+      round: t.feedback.length + 1,
+    };
+  }
+  if (t.status === 'failed') out.failure = { message: lastTo('failed')?.message ?? t.last_message ?? null, actor: lastTo('failed')?.actor ?? null };
+  return out;
 }

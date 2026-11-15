@@ -19,7 +19,9 @@ import {
   reviewRefusal,
   HUMAN,
   BLOCK_FOR,
+  brief,
 } from '../src/core.mjs';
+import { execFileSync } from 'node:child_process';
 import {
   findRoot,
   initRoot,
@@ -97,7 +99,7 @@ Tasks (worker)
                                         needs a decision: a question for the coordinator (write
                                         a checkpoint first, then end). --on: blocked on other
                                         tasks; the coordinator restarts it when they are done
-  atf block <task> --for human -m "<question + your view>"
+  atf block <task> --for human -m "<question>" [--recommend "<your view>"]
                                         (coordinator) escalate a question (or a failed task) to
                                         the human; their answer comes back to you
   atf done <task> -m <summary>          criteria met and verified by you (the normal ending)
@@ -119,13 +121,22 @@ Tasks (worker)
                                         As the human: a change request for the coordinator
   atf cancel | reopen | release <task> [-m msg]
 
+Relaying the human's decisions (coordinator; the human said it in your chat)
+  atf note <task> --relay "<their words>"        an answer / decision, verbatim
+  atf done <task> --relay "<their words>"        their approval (also of a review for the human)
+  atf changes <task> --relay "<their words>" -m "1. …"   their change request, your instructions
+  atf plan note --relay "<their words>"           on the plan (answers a plan question)
+
 Viewing
   atf status [--watch]                  board summary (--watch: live-updating)
   atf list [--status S] [--ready] [--mine] [--assignee WHO]   (--mine includes your packages)
   atf show <task>
   atf log [-n N] [--follow]
   atf plans [--all] [--closed]          active plans in this project / all known projects
-  atf inbox [--all]                     what needs a decision, and for whom (human / coordinator)
+  atf inbox [--all] [--for human]       what needs a decision, and for whom (human / coordinator)
+  atf brief <task>|plan                 what the human needs to act on a request: the question
+                                        (who asked, the recommendation) or the review (submission,
+                                        acceptance, changed files)
   atf projects [add [dir]]              known projects (registered on init / plan creation)
   atf skill [status|install|uninstall]  link the agent skill into ~/.agents/skills (and
                                         ~/.claude/skills) so agents discover it automatically
@@ -462,6 +473,7 @@ function renderTask(t, state) {
   if (t.children.length)
     L.push(`subtasks: ${t.children.map((id) => `${id}(${state.tasks[id].rollup_status ?? state.tasks[id].status}${state.tasks[id].owner && state.tasks[id].owner !== t.owner ? ' @' + state.tasks[id].owner : ''})`).join(', ')}`);
   if (t.status === 'blocked' && !t.blocked_on.length) L.push(`question for: ${t.blocked_for === 'human' ? magenta('the human') : 'the coordinator'}${t.answered ? green('  (answered)') : ''}`);
+  if (t.recommend) L.push(`recommended: ${t.recommend} ${dim('(the coordinator)')}`);
   if (t.human_input?.length) L.push(`human input: ${magenta(t.human_input.map((n) => n.message).join(' | '))} ${dim('(for the coordinator, not handled yet)')}`);
   if (t.blocked_on.length) L.push(`blocked on: ${t.blocked_on.map((d) => `${d}(${state.tasks[d]?.rollup_status ?? state.tasks[d]?.status ?? '?'})`).join(', ')}${t.can_resume ? green('  → can resume') : ''}`);
   if (t.deps.length) L.push(`deps:     ${t.deps.map((d) => `${d}(${state.tasks[d]?.rollup_status ?? state.tasks[d]?.status ?? '?'})`).join(', ')}`);
@@ -480,14 +492,14 @@ function renderTask(t, state) {
   const sess = Object.values(t.sessions || {});
   if (sess.length || t.resume) L.push('', bold('agent context:') + dim(` resume policy ${t.resume_policy}`), ...sess.map((x) => `  ${cyan(x.actor ?? '?')} ${x.kind ?? ''} session ${dim(x.ref)}`));
   if (t.artifacts.length) L.push('', bold('artifacts:'), ...t.artifacts.map((a) => `  ${a.kind}: ${a.ref}${a.description ? dim(' — ' + a.description) : ''}`));
-  if (t.notes.length) L.push('', bold('notes:'), ...t.notes.map((n) => `  ${dim(n.ts.slice(11, 19))} ${n.kind !== 'info' ? yellow(`[${n.kind}] `) : ''}${n.actor ? cyan(n.actor) + ': ' : ''}${n.message}`));
+  if (t.notes.length) L.push('', bold('notes:'), ...t.notes.map((n) => `  ${dim(n.ts.slice(11, 19))} ${n.kind !== 'info' ? yellow(`[${n.kind}] `) : ''}${n.relayed ? quoteOf(n.relayed) + (n.message !== n.relayed.quote ? dim(' → ') + n.message : '') : (n.actor ? cyan(n.actor) + ': ' : '') + n.message}`));
   const hist = t.history.slice(-8);
   if (hist.length) {
     L.push('', bold('recent activity:'));
     for (const h of hist) {
       const what =
         h.type === 'status' ? `${h.from} → ${h.to}` : h.type === 'assigned' ? `assigned ${h.assignee ?? '(none)'}` : `progress${h.percent != null ? ` ${h.percent}%` : ''}`;
-      L.push(`  ${dim(h.ts.slice(11, 19))} ${h.actor ? cyan(h.actor) + ' ' : ''}${what}${h.message ? dim(' — ' + h.message) : ''}`);
+      L.push(`  ${dim(h.ts.slice(11, 19))} ${h.relayed ? magenta('human') + dim(' via ') + cyan(h.actor) + ' ' : h.actor ? cyan(h.actor) + ' ' : ''}${what}${h.relayed ? dim(` — “${h.relayed.quote}”`) : ''}${h.message && h.message !== h.relayed?.quote ? dim(' — ' + h.message) : ''}`);
     }
   }
   return L.join('\n');
@@ -500,6 +512,8 @@ function renderEvent(e) {
     d.status,
     d.on?.length ? `on ${d.on.join(',')}` : null,
     d.for ? `for ${d.for}` : null,
+    d.relayed ? `decided by the human: “${d.relayed.quote}”` : null,
+    d.recommend ? `recommends: ${d.recommend}` : null,
     d.changes ? 'changes requested' : null,
     d.fresh ? 'fresh' : null,
     d.early?.length ? `early (${d.early.join(',')} not done)` : null,
@@ -515,12 +529,98 @@ function renderEvent(e) {
   return `${dim(`#${e.seq} ${e.ts.slice(11, 19)}`)} ${cyan(e.actor?.id ?? '?')} ${bold(e.type)}${e.task ? ' ' + e.task : ''} ${bits.join(' · ')}`;
 }
 
+// ---------- briefs (§13.5) ----------
+/** Changed lines per file artifact: from git when the file is in a repo, else its length. */
+function fileStats(dir, artifacts) {
+  const git = (cwd, args) => {
+    try {
+      return execFileSync('git', ['-C', cwd, ...args], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).toString();
+    } catch {
+      return null;
+    }
+  };
+  const stats = [];
+  const seen = new Set();
+  for (const a of artifacts.filter((x) => x.kind === 'file' && !seen.has(x.ref) && seen.add(x.ref))) {
+    const abs = path.resolve(dir, a.ref);
+    if (!fs.existsSync(abs) || fs.statSync(abs).isDirectory()) {
+      stats.push({ path: a.ref, state: fs.existsSync(abs) ? 'dir' : 'missing' });
+      continue;
+    }
+    const cwd = path.dirname(abs);
+    const tracked = git(cwd, ['ls-files', '--error-unmatch', abs]) !== null;
+    const lines = () => {
+      const txt = fs.readFileSync(abs, 'utf8');
+      return txt ? txt.split('\n').length - (txt.endsWith('\n') ? 1 : 0) : 0;
+    };
+    if (!tracked) {
+      stats.push({ path: a.ref, state: git(cwd, ['rev-parse', '--git-dir']) !== null ? 'new' : 'file', added: lines(), removed: 0 });
+      continue;
+    }
+    const [add, del] = (git(cwd, ['diff', '--numstat', 'HEAD', '--', abs]) || '').trim().split(/\s+/);
+    stats.push({ path: a.ref, state: add ? 'modified' : 'committed', added: Number(add) || 0, removed: Number(del) || 0 });
+  }
+  return stats;
+}
+
+function renderBrief(b) {
+  const L = [];
+  const ind = (s) => String(s ?? '').split('\n').map((x) => '  ' + x).join('\n');
+  if (b.kind === 'plan') {
+    L.push(`${bold('plan')} ${bold(b.title)}`);
+    if (b.goal) L.push(dim('goal: ') + b.goal);
+    if (b.docs.length) L.push(dim('documents: ') + b.docs.join(', '));
+    if (!b.questions.length) L.push(dim('no open questions for the human'));
+    for (const q of b.questions) L.push('', magenta('question for you') + dim(` (${q.actor ?? '?'}, ${ago(q.ts)})`), ind(q.message));
+    return L.join('\n');
+  }
+  const t = b.task;
+  const label = { question: 'question', review: 'review', 'your-review': 'review for you', failed: 'failed', 'plan-question': 'plan question', finished: 'finished', task: t.status }[b.kind] ?? b.kind;
+  L.push(`${t.path.length ? dim(t.path.join(' › ') + ' › ') : ''}${bold(t.id)} ${bold(t.title)}  ${magenta(label)}${b.for ? dim(' for ' + b.for) : ''}`);
+  if (b.question) {
+    const q = b.question;
+    L.push('', ind(q.message), dim(`  asked by ${q.asked_by ?? '?'}${q.ts ? ', ' + ago(q.ts) : ''}`));
+    if (q.original) L.push(dim(`  originally asked by ${q.original.actor}: `) + q.original.message);
+    if (q.recommend) L.push(green('  recommended: ') + q.recommend);
+  }
+  if (b.review) {
+    const r = b.review;
+    if (r.submitted) L.push('', dim(`  submitted by ${r.submitted.actor ?? '?'}${r.round > 1 ? ` (round ${r.round})` : ''}: `) + r.submitted.message);
+    for (const n of r.notes) L.push(dim(`  ${n.kind}: `) + n.message);
+    if (r.assessment) L.push(green('  coordinator: ') + r.assessment);
+  }
+  if (b.failure) L.push('', red('  failed: ') + (b.failure.message ?? ''));
+  if (t.acceptance.length) L.push('', dim('  acceptance:'), ...t.acceptance.map((a) => `    - ${a}`));
+  else if (t.description) L.push('', dim('  goal: ') + t.description);
+  if (b.files?.length) L.push('', dim('  files: ') + b.files.map((f) => `${f.path}${f.added != null ? ` (+${f.added}${f.removed ? ` -${f.removed}` : ''}${f.state === 'new' ? ', new' : ''})` : ` (${f.state})`}`).join('  '));
+  const other = b.artifacts.filter((a) => a.kind !== 'file');
+  if (other.length) L.push(dim('  artifacts: ') + other.map((a) => `${a.kind}: ${a.ref}`).join('  '));
+  return L.join('\n');
+}
+
+// ---------- relayed decisions (§13.3) ----------
+// `--relay "<the human's words>"`: the coordinator records what the human decided in its
+// chat. The event stays the coordinator's; data.relayed marks it as the human's decision.
+function relayed(actor) {
+  if (FLAGS.relay === undefined) return null;
+  const quote = String(FLAGS.relay).trim();
+  if (!quote) die('--relay needs the human\'s words, verbatim');
+  if (actor.role !== 'coordinator' && !FLAGS.force) die('only the coordinator relays the human\'s decisions (the human writes directly as `human`)');
+  return { from: HUMAN, quote, via: FLAGS.via || 'chat' };
+}
+const quoteOf = (r) => (r ? `${magenta('human')} ${dim('(via coordinator)')}: “${r.quote}”` : '');
+
 // ---------- status transitions ----------
 function statusCmd(target, msgRequired) {
   return (pos) => {
     const { root, planId, actor } = ctx();
-    const msg = FLAGS.message;
+    const relay = relayed(actor);
+    if (relay && !['done', 'cancelled', 'todo'].includes(target)) die('--relay applies to done, cancel and reopen (the human\'s decisions), and to note and changes');
+    const msg = FLAGS.message || (relay ? relay.quote : undefined);
     if (msgRequired && !msg) die(`-m <message> is required for ${target}`);
+    if (FLAGS.recommend !== undefined && target !== 'blocked') die('--recommend only applies to block');
+    // a relayed decision is checked as the human's (e.g. approving a review that waits for the human)
+    const decider = relay ? { ...actor, id: HUMAN, role: 'human' } : actor;
     const { state } = transact(root, planId, actor, (st) => {
       const t = requireTask(st, pos[0]);
       if (FLAGS.for !== undefined && target !== 'blocked') die('--for only applies to block');
@@ -539,18 +639,18 @@ function statusCmd(target, msgRequired) {
         // decisions on a task in review (approve = done, reopen) belong to its reviewer
         const reviewing = t.status === 'review' && ['done', 'todo'].includes(target);
         if (reviewing) {
-          const why = reviewRefusal(t, actor);
+          const why = reviewRefusal(t, decider);
           if (why) die(`${why}${target === 'done' && actor.id === t.owner ? ' (you submitted it; wait for the verdict)' : ''} (use --force)`);
         } else {
           const boss = actor.role === 'coordinator' || actor.role === 'human';
           if (t.owner && t.owner !== actor.id && !boss)
             die(`${t.id} is ${t.assignee ? 'assigned to' : 'in a work package owned by'} ${t.owner} (use --force)`);
           // a task marked for review is approved by its reviewer, not finished by its worker
-          if (target === 'done' && needsReview(t) && reviewRefusal(t, actor))
+          if (target === 'done' && needsReview(t) && reviewRefusal(t, decider))
             die(
               actor.id === t.owner || !boss
                 ? `${t.id} needs review: finish it with \`atf review ${t.id} -m "what to check"\` instead of done`
-                : `${reviewRefusal(t, actor)} (use --force)`,
+                : `${reviewRefusal(t, decider)} (use --force)`,
             );
         }
         if (target === 'blocked' && FLAGS.on)
@@ -568,6 +668,8 @@ function statusCmd(target, msgRequired) {
       const early = target === 'in_progress' && FLAGS.early && t.waiting_on.length;
       const data = { status: target, ...(msg || early ? { message: msg || `started early: ${t.waiting_on.join(', ')} not done yet` } : {}), ...(early ? { early: t.waiting_on } : {}) };
       if (FLAGS.for) data.for = FLAGS.for;
+      if (FLAGS.recommend) data.recommend = String(FLAGS.recommend);
+      if (relay) data.relayed = relay;
       if (FLAGS.on) {
         if (target !== 'blocked') die('--on only applies to block');
         data.on = FLAGS.on.split(',').map((x) => x.trim()).filter(Boolean);
@@ -577,7 +679,7 @@ function statusCmd(target, msgRequired) {
       return evs;
     });
     const t = requireTask(state, pos[0]);
-    out({ ok: true, task: t }, `${t.id} ${badge(t.status)}${t.blocked_for === 'human' ? magenta(' for the human') : ''}${t.assignee ? ' ' + cyan('@' + t.assignee) : ''}`);
+    out({ ok: true, task: t }, `${t.id} ${badge(t.status)}${t.blocked_for === 'human' ? magenta(' for the human') : ''}${t.assignee ? ' ' + cyan('@' + t.assignee) : ''}${relay ? dim(' · decided by the human (relayed)') : ''}`);
   };
 }
 
@@ -654,13 +756,14 @@ const commands = {
       // plan-level notes: `ask` = a question for the human about the whole plan;
       // `checkpoint` = where the plan stands (the coordinator's handoff to its next session)
       const { root, planId, actor } = ctx();
-      const message = pos.join(' ') || FLAGS.message;
-      if (!message) die(`usage: atf plan ${sub} "<text>"${sub === 'note' ? ' [--kind info|question|decision|warning|checkpoint] [--for human]' : ''}`);
-      const kind = sub === 'ask' ? 'question' : sub === 'checkpoint' ? 'checkpoint' : FLAGS.kind || 'info';
+      const relay = sub === 'note' ? relayed(actor) : FLAGS.relay !== undefined ? die('--relay applies to plan note') : null;
+      const message = pos.join(' ') || FLAGS.message || relay?.quote;
+      if (!message) die(`usage: atf plan ${sub} "<text>"${sub === 'note' ? ' [--kind info|question|decision|warning|checkpoint] [--for human] [--relay "<the human\'s words>"]' : ''}`);
+      const kind = sub === 'ask' ? 'question' : sub === 'checkpoint' ? 'checkpoint' : FLAGS.kind || (relay ? 'decision' : 'info');
       if (!NOTE_KINDS.includes(kind)) die(`--kind must be one of ${NOTE_KINDS.join(', ')}`);
       const forWho = sub === 'ask' ? 'human' : FLAGS.for;
       if (forWho && !BLOCK_FOR.includes(forWho)) die(`--for must be one of ${BLOCK_FOR.join(', ')}`);
-      transact(root, planId, actor, () => [{ type: 'plan.note', data: { kind, message, ...(forWho ? { for: forWho } : {}) } }]);
+      transact(root, planId, actor, () => [{ type: 'plan.note', data: { kind, message, ...(forWho ? { for: forWho } : {}), ...(relay ? { relayed: relay } : {}) } }]);
       return out({ ok: true }, sub === 'ask' ? `asked the human ${dim('(shown under "needs you"; their answer wakes the coordinator)')}` : dim('ok'));
     }
     if (sub === 'session') {
@@ -799,8 +902,9 @@ const commands = {
   changes(pos) {
     // Request changes: send a task in review (or done) back to its owner with feedback.
     const { root, planId, actor } = ctx();
+    const relay = relayed(actor);
     const msg = FLAGS.message;
-    if (!msg) die('-m "<what to change>" is required (be concrete; number the points)');
+    if (!msg) die(`-m "<what to change>" is required (be concrete; number the points)${relay ? ': your instructions to the next agent; the human\'s words go in --relay' : ''}`);
     if (actor.role === 'human' && !FLAGS.force) {
       // v2: the human's change request goes to the coordinator, which decides what happens
       transact(root, planId, actor, (st) => {
@@ -819,7 +923,7 @@ const commands = {
       const why = actor.role === 'coordinator' ? null : reviewRefusal(t, actor);
       if (why && !FLAGS.force) die(`${why} (use --force)`);
       // --fresh: the next attempt (only) starts from a clean agent
-      const evs = [{ type: 'task.status', task: t.id, data: { status: 'todo', message: msg, changes: true, ...(FLAGS.fresh ? { fresh: true } : {}) } }];
+      const evs = [{ type: 'task.status', task: t.id, data: { status: 'todo', message: msg, changes: true, ...(FLAGS.fresh ? { fresh: true } : {}), ...(relay ? { relayed: relay } : {}) } }];
       if (st.status !== 'active') evs.push({ type: 'plan.status', data: { status: 'active', message: `reopened: changes requested on ${t.id}` } });
       return evs;
     });
@@ -857,12 +961,14 @@ const commands = {
 
   note(pos) {
     const { root, planId, actor } = ctx();
-    const message = pos.slice(1).join(' ') || FLAGS.message;
+    const relay = relayed(actor);
+    const message = pos.slice(1).join(' ') || FLAGS.message || relay?.quote;
     if (!message) die('note message required');
-    const kind = FLAGS.kind || 'info';
+    const kind = FLAGS.kind || (relay ? 'decision' : 'info');
     if (!NOTE_KINDS.includes(kind)) die(`--kind must be one of ${NOTE_KINDS.join(', ')}`);
-    transact(root, planId, actor, (st) => [{ type: 'task.note', task: requireTask(st, pos[0]).id, data: { message, kind } }]);
-    out({ ok: true }, dim('ok'));
+    const { state } = transact(root, planId, actor, (st) => [{ type: 'task.note', task: requireTask(st, pos[0]).id, data: { message, kind, ...(relay ? { relayed: relay } : {}) } }]);
+    const t = state.tasks[pos[0]];
+    out({ ok: true, ...(relay ? { answered: !!t?.answered } : {}) }, relay ? `${pos[0]} ${dim('decision recorded as the human\'s (relayed)')}${t?.answered ? green(' · question answered') : ''}` : dim('ok'));
   },
 
   artifact(pos) {
@@ -920,11 +1026,22 @@ const commands = {
       for (const id of listPlanIds(root)) {
         const st = loadPlan(root, id);
         if (st.status !== 'active') continue;
-        for (const it of driverInbox(st)) items.push({ project: projectName(root), root, plan: id, plan_title: st.title, title: it.task ? st.tasks[it.task].title : null, ...it });
+        for (const it of driverInbox(st)) if (!FLAGS.for || it.for === FLAGS.for) items.push({ project: projectName(root), root, plan: id, plan_title: st.title, title: it.task ? st.tasks[it.task].title : null, ...it });
       }
     items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
     const color = { review: magenta, 'your-review': magenta, question: red, 'plan-question': red, failed: red, finished: green };
     out(items, items.map((i) => `${(color[i.kind] || String)(i.kind.padEnd(13))} ${(i.for === 'coordinator' ? dim : magenta)(('for ' + i.for).padEnd(16))} ${dim(i.project + ' / ' + i.plan_title)}  ${i.task ? bold(i.task) + ' ' + i.title : ''}${i.message ? dim(' — ' + i.message) : ''} ${dim(ago(i.ts))}`).join('\n') || 'inbox empty');
+  },
+
+  brief(pos) {
+    // §13.5: what a human needs to act on one request (a task, or `plan` for the plan's
+    // open questions): the same content for every frontend (pi peek, Copilot /atf, …)
+    const { root, planId } = ctx();
+    const state = loadPlan(root, planId);
+    const which = pos[0] && pos[0] !== 'plan' ? requireTask(state, pos[0]).id : null;
+    const b = brief(state, which);
+    if (b.artifacts) b.files = fileStats(path.dirname(root), b.artifacts);
+    out(b, renderBrief(b));
   },
 
   whoami() {
