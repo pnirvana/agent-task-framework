@@ -18,7 +18,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ATF_BIN = path.resolve(HERE, '../../../bin');
 export const SKILL_DIR = path.resolve(HERE, '../../../skill/atf');
 const SKILL_FILE = path.join(SKILL_DIR, 'SKILL.md');
-const WAKE_EXT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../pi/atf-wake.ts');
+const WAKE_EXT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../pi/atf.ts');
 
 /**
  * Per agent kind: extra args to start fresh, args to resume a session, and whether the

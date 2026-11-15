@@ -177,11 +177,17 @@ also start pi yourself (then `atf` must be on its PATH, see Install); it writes 
 `$ATF_ACTOR`, else your user name, and the adapter finds its pane by that name or by the
 pane its ATF commands come from, to nudge it when something needs it.
 
-**pi extension** (`adapters/pi/atf-wake.ts`): the coordinator does not block in `atf wait`.
+**pi extension** (`adapters/pi/atf.ts`): the coordinator does not block in `atf wait`.
 It ends its turn, so pi is idle (and shown as idle in herdr) and you can prompt it any
 time; the extension waits for the plan in the background and wakes it with the report as
-soon as something new needs it. `atf-herdr coordinate` loads it; for a pi you start
-yourself use `pi -e <repo>/adapters/pi/atf-wake.ts`, or install the repo as a pi package
+soon as something new needs it. You work with the coordinator in its chat (SPEC §13):
+what you decide there it records as yours (`--relay`). Above the input, a widget lists
+what waits for you in the plan (questions, reviews), one line each; type a request's id
+at the start of the input (`T5`) to expand it in place, press `alt+1…9` (or `/atf T5`)
+for a read-only peek with its full brief, the diff (`d`) and the files (`o`); `r` there
+puts `T5: ` into the input to answer. Nothing of this goes into the chat or the model's
+context. `atf-herdr coordinate` loads the extension; for a pi you start yourself use
+`pi -e <repo>/adapters/pi/atf.ts`, or install the repo as a pi package
 (`pi install git:github.com/pnirvana/agent-task-framework`).
 
 ```sh

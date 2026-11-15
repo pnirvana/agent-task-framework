@@ -326,7 +326,7 @@ items not reported before; the reported keys are kept in `cursors/<actor>.seen`)
 item the coordinator leaves open does not wake it again and again. Its report still lists
 everything that needs the actor. While it blocks, `--new` registers itself
 (`cursors/<actor>.waiter`, with its pid); launchers do not nudge an actor with a live
-waiter. The pi implementation is `adapters/pi/atf-wake.ts`: it waits on `agent_settled`,
+waiter. The pi implementation is `adapters/pi/atf.ts`: it waits on `agent_settled`,
 stops on `agent_start` (a prompt by the human, or the wake itself) and wakes the agent
 with `pi.sendMessage(..., { triggerTurn: true })`.
 
@@ -686,7 +686,8 @@ to blocked. New CLI: `--relay`, `--recommend`, `atf brief`, `atf inbox --for`.
 1. Protocol and CLI: `--relay` (fold, permissions, rendering), `--recommend`,
    `atf brief`, `inbox --for`; tests. **Done.**
 2. Skill: relay rule, asking in the chat, the end-of-turn list. **Done.**
-3. pi extension: widget, peek, peek-on-type (on top of the existing wake).
+3. pi extension: widget, peek, peek-on-type (on top of the existing wake). **Done**
+   (`adapters/pi/atf.ts`).
 4. Copilot adapter: extension (wake, end-of-turn line, `/atf`), herdr kind `copilot`,
    session ids, packaging.
 5. Later (the board is not changed now): show relayed decisions as "human (via

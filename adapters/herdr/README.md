@@ -213,7 +213,8 @@ Elsewhere in the board use `j` / `k` or the arrow keys.
   coordinator session if one is recorded; `--fresh` (`S`) starts a new session, and a
   running coordinator is first asked for a plan checkpoint (`atf plan checkpoint`), then
   replaced. Its session is recorded on the plan (`plan.session`) at start and on its
-  first write. A pi coordinator gets the wake extension (`adapters/pi/atf-wake.ts`):
+  first write. A pi coordinator gets the ATF pi extension (`adapters/pi/atf.ts`; also the
+  widget, peek and peek-on-type of SPEC §13.6):
   between decisions it ends its turn instead of blocking in `atf wait`, so herdr shows it
   idle and you can prompt it; the extension wakes it when something new needs it.
 - **Subagents** are started only by the coordinator (`atf-herdr spawn`), fresh by
