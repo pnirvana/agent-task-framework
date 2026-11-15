@@ -1021,7 +1021,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     return t?.last_message || it.message || '';
   }
 
-  function needLine(it, W, sel) {
+  function needLine(it, W, sel, headed = false) {
     const [label, color] = NEED[it.kind] || [it.kind, ''];
     const t = it.task ? it.st.tasks[it.task] : null;
     const subject =
@@ -1039,7 +1039,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const who = it.kind === 'review' ? 'for the coordinator' : it.kind === 'your-review' || (it.kind === 'question' && it.for === HUMAN) ? 'for you' : it.actor && !['coordinator', 'prompt'].includes(it.kind) ? it.actor : '';
     return row(
       [mark(sel), [label.padEnd(11), sel ? `inverse ${color}` : color], [' ' + subject, sel ? 'bold' : 'bold']],
-      [[multi() ? planLabel(it, W) + '  ' : '', 'dim'], [who ? who + '  ' : '', 'cyan'], [ago(it.ts).padStart(3), 'dim']],
+      [[multi() && !headed ? planLabel(it, W) + '  ' : '', 'dim'], [who ? who + '  ' : '', 'cyan'], [ago(it.ts).padStart(3), 'dim']],
       W,
     );
   }
@@ -1141,10 +1141,18 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const att = open.map((p) => ({ p, ...attentionOf(p) }));
     const needs = att.flatMap((a) => a.mine).sort((x, y) => NEED_RANK[x.kind] - NEED_RANK[y.kind] || (x.ts || '').localeCompare(y.ts || ''));
     L.push(needs.length ? [[' NEEDS YOU ', 'bold red'], [String(needs.length), 'bold red']] : [[' NEEDS YOU ', 'bold'], ['nothing: every plan is moving on its own', 'dim']]);
-    for (const it of needs) {
-      add({ type: 'need', ...it, k: `need#${it.key}#${it.kind}#${it.task ?? it.actor ?? ''}` }, (sel) => needLine(it, W, sel));
-      const sub = needSub(it, W);
-      if (sub) L.push(sub);
+    // grouped by plan, the plan with the most urgent item first (order kept within a plan);
+    // a heading per plan unless the scope is one plan
+    const groups = new Map();
+    for (const it of needs) groups.set(it.key, [...(groups.get(it.key) || []), it]);
+    const headed = multi() || groups.size > 1;
+    for (const items of groups.values()) {
+      if (headed) L.push([[' ' + planLabel({ ...items[0], st: items[0].st }, Infinity), 'bold magenta']]);
+      for (const it of items) {
+        add({ type: 'need', ...it, k: `need#${it.key}#${it.kind}#${it.task ?? it.actor ?? ''}` }, (sel) => needLine(it, W, sel, headed));
+        const sub = needSub(it, W);
+        if (sub) L.push(sub);
+      }
     }
     L.push([], [[' IN FLIGHT', 'bold']]);
     if (!open.length) L.push([[ui.showClosed ? '   No plans in scope.' : '   No active plans. A coordinator starts one with `atf plan new <title>`.', 'dim']]);

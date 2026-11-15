@@ -4,6 +4,7 @@
 // starts fresh (launchPlan). This module decides *how*: which pane, which agent kind,
 // which arguments. Everything agent-specific is in the AGENT_KINDS table, which users
 // can extend or override via the plugin config ("agents": {...}).
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,11 +14,11 @@ import { listPlanIds, loadPlan, transact, skillInstalled, resolveActor, hasLiveW
 import { herdr, notify, pluginConfig, sameServer, currentSocket, liveAgents, inProject, boardPaneIds, pluginStateDir } from './herdr.mjs';
 import { chooseSplit, tabLayout, withPlacementLock } from './layout.mjs';
 import { resolveAgentDef, piArgsForAgent } from './agents.mjs';
+import { SKILL_DIR, buildPrompt, coordinatorPrompt } from '../../../src/prompts.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ATF_BIN = path.resolve(HERE, '../../../bin');
-export const SKILL_DIR = path.resolve(HERE, '../../../skill/atf');
-const SKILL_FILE = path.join(SKILL_DIR, 'SKILL.md');
+export { SKILL_DIR, buildPrompt, coordinatorPrompt };
 const WAKE_EXT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../pi/atf.ts');
 
 /**
@@ -30,6 +31,10 @@ export const AGENT_KINDS = {
   // for the plan in the background, so pi is idle and promptable while nothing needs it)
   pi: { start: ['--skill', '{skill}'], resume: ['--session', '{session}', '--skill', '{skill}'], coordinator: ['-e', '{wake}'], nativeSkill: true },
   claude: { start: [], resume: ['--resume', '{session}'] },
+  // GitHub Copilot CLI: ATF picks the session id ({newsession}) and records it. The
+  // coordinator is woken by the ATF Copilot extension (atf-copilot install), which reads
+  // ATF_WAKE from the environment (wakeEnv): an extension cannot set the agent's env.
+  copilot: { start: ['--experimental', '--session-id', '{newsession}'], resume: ['--experimental', '--resume', '{session}'], wakeEnv: true, nativeSkill: true },
   codex: { start: [], resume: ['resume', '{session}'] },
 };
 
@@ -116,74 +121,15 @@ export function placeAgentPane({ cwd, env, refPane, direction, workspace }) {
 
 const paneWorkspace = (pane) => herdr(['pane', 'get', pane])?.pane?.workspace_id ?? (String(pane).includes(':') ? String(pane).split(':')[0] : null);
 
-// ---------- prompts ----------
-function lastNoteFromOthers(t) {
-  return [...t.notes].reverse().find((n) => n.actor && n.actor !== t.owner && n.kind !== 'checkpoint');
-}
-
-function wasReopened(t) {
-  return t.status === 'todo' && t.history.some((h) => h.type === 'status' && h.to === 'todo' && ['review', 'done', 'failed', 'blocked'].includes(h.from));
-}
-
-/** Why the agent is (re)started, in words, for the prompt. */
-function situation(s, t) {
-  if (t.changes_requested) {
-    const fb = t.feedback[t.feedback.length - 1];
-    return `it came back from review (round ${fb.round}) with these instructions from ${fb.actor ?? 'the coordinator'}: "${fb.message}". Address every point, say in an atf note how, then send it to review again.`;
-  }
-  if (t.can_resume) return `it was blocked on ${t.blocked_on.join(', ')}, which ${t.blocked_on.length > 1 ? 'are' : 'is'} done now.`;
-  if (t.answered) {
-    const n = lastNoteFromOthers(t);
-    return `its question was answered${n ? ` by ${n.actor}: "${n.message}"` : ''}.`;
-  }
-  if (wasReopened(t)) {
-    const h = [...t.history].reverse().find((x) => x.type === 'status' && x.to === 'todo');
-    return `it was reopened by ${h?.actor ?? 'the coordinator'}${h?.message ? `: "${h.message}"` : ''}.`;
-  }
-  return null;
-}
-
-export function buildPrompt({ s, t, name, mode, pkg, kindCfg, early = false }) {
-  const skill = kindCfg.nativeSkill || skillInstalled() ? 'Follow the atf skill (load it if it is not loaded yet).' : `First read ${SKILL_FILE} and follow its subagent section.`;
-  // v2: a subagent does its assignment and ends; it never waits
-  const end = 'When your assignment is finished (or blocked and nothing else is ready for you), end your turn: do not wait; the coordinator starts a new agent when there is more.';
-  const why = situation(s, t);
-  if (mode === 'resume')
-    return (
-      `[ATF] You are resumed in your earlier session for ${t.id} (${t.title})${why ? `: ${why}` : '.'} ` +
-      `Run \`atf show ${t.id}\` to see what changed, then \`atf start ${t.id}\` and continue where you left off. ${end} ${skill}`
-    );
-  if (early && t.waiting_on?.length)
-    return (
-      `You are subagent "${name}". Your ATF task is ${t.id}: ${t.title}. It is started EARLY: it depends on ${t.waiting_on.join(', ')}, which ${t.waiting_on.length > 1 ? 'are' : 'is'} not done yet. ` +
-      `Run \`atf show ${t.id}\`, then \`atf start ${t.id} --early\` and do everything that does not need ${t.waiting_on.join(', ')}. ` +
-      `When you reach what does, write a checkpoint (\`atf note ${t.id} --kind checkpoint "done: … left: …"\`) and run \`atf block ${t.id} --on ${t.waiting_on.join(',')} -m "<what you need>"\`. ${end} ${skill}`
-    );
-  const history = t.started_at
-    ? ` This task was worked on before: ${why ? why + ' ' : ''}\`atf show ${t.id}\` has its checkpoint, notes and history. Continue from there instead of starting over.`
-    : '';
-  if (pkg)
-    return (
-      `You are subagent "${name}". You own ATF work package ${pkg.id}: ${pkg.title} (the whole subtree); your next task is ${t.id}: ${t.title}.${history} ` +
-      `Run \`atf show ${pkg.id}\` and \`atf list --mine\` to see the package. Then loop: \`atf next --package\`, do the task, finish it ` +
-      `(done/review/block/fail). You may split a task with \`atf add <title> --parent <id>\`. Questions and decisions go to the coordinator as a block. ${end} ${skill}`
-    );
-  return (
-    `You are subagent "${name}". Your ATF task is ${t.id}: ${t.title}.${history} ` +
-    `Run \`atf show ${t.id}\` for details and acceptance criteria, then \`atf start ${t.id}\` and do the work. ${skill} ` +
-    (t.review || (t.reviewer && t.reviewer !== 'coordinator')
-      ? `Report progress with atf. This task needs review: finish with \`atf review ${t.id} -m "<summary + what to check>"\` (not done), or block/fail. `
-      : `Report progress with atf and finish with atf done/review/block/fail. `) +
-    `Questions and decisions go to the coordinator: \`atf block ${t.id} -m "<question>"\` after a checkpoint. ${end}`
-  );
-}
+// ---------- prompts: src/prompts.mjs ----------
 
 // ---------- launching ----------
-export function recordSession(root, planId, taskIds, name, kind, pane = null) {
+export function recordSession(root, planId, taskIds, name, kind, pane = null, known = null) {
   // by pane when known: names repeat across projects; never another project's agent
   const a = herdr(['agent', 'get', pane || name])?.agent;
   if (a && !inProject(a, root)) return null;
-  const ref = a?.agent_session?.value;
+  // herdr's session reference, else the one ATF chose at launch ({newsession})
+  const ref = a?.agent_session?.value || known;
   if (!ref || !taskIds.length) return null;
   const state = loadPlan(root, planId);
   const fresh = taskIds.filter((id) => state.tasks[id] && state.tasks[id].sessions[name]?.ref !== ref);
@@ -242,10 +188,13 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
   };
   const pane = withPlacementLock(() => placeAgentPane({ cwd: path.dirname(root), env, refPane, direction, workspace }));
   if (!pane) throw new Error('could not create a pane');
-  const sub = (a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session ?? '');
+  const newSession = crypto.randomUUID();
+  const sub = (a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session ?? '').replace('{newsession}', newSession);
   // an installed skill is discovered by the agent itself: don't pass it again
   const withoutSkill = (list) => (skillInstalled() ? list.filter((a, i) => a !== '{skill}' && list[i + 1] !== '{skill}') : list);
-  const args = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []).map(sub), ...agentArgs, ...extraArgs];
+  const kindArgs = withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []);
+  const known = mode === 'resume' ? session : kindArgs.includes('{newsession}') ? newSession : null;
+  const args = [...kindArgs.map(sub), ...agentArgs, ...extraArgs];
   const started = herdr(['agent', 'start', name, '--kind', kind, '--pane', pane, ...(args.length ? ['--', ...args] : [])], { timeout: 60_000 });
   if (!started) {
     herdr(['pane', 'close', pane]);
@@ -255,7 +204,7 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
   // register before anything writes to the plan: hooks fired by the assignment below
   // must already know this agent was just launched (no duplicate kickoff nudge)
   updateRegistry((reg) => {
-    reg[regKey(root, name)] = { name, kind, agent, root, plan: planId, task: target.id, pane, workspace: paneWorkspace(pane), socket: currentSocket(), launchedAt: Date.now(), idleSince: null };
+    reg[regKey(root, name)] = { name, kind, agent, root, plan: planId, task: target.id, pane, workspace: paneWorkspace(pane), socket: currentSocket(), launchedAt: Date.now(), idleSince: null, session: known };
   });
   if (assign && target.assignee !== name && !(target.owner === name && !isPackage)) {
     // write as whoever called spawn, with the same identity the atf CLI uses for them
@@ -268,24 +217,12 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
   herdr(['agent', 'prompt', pane, buildPrompt({ s: fresh, t: fresh.tasks[leaf.id], name, mode, pkg: isPackage ? fresh.tasks[target.id] : null, kindCfg, early })]);
   // file the session on what was spawned (the package or the task), not on a guess of
   // which leaf the agent will pick: leaves get it when the agent works on them (hook)
-  recordSession(root, planId, [target.id], name, kind, pane);
+  recordSession(root, planId, [target.id], name, kind, pane, known);
   return { name, pane, mode, kind, agent, leaf: leaf.id, reason: lp.reason };
 }
 
 // ---------- the coordinator ----------
 const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-
-export function coordinatorPrompt(s, mode, name) {
-  const plan = `--plan ${s.id}`;
-  if (mode === 'resume')
-    return `[ATF] You are resumed as the coordinator of plan "${s.title}" (${plan}). Catch up: \`atf wait ${plan}\` reports what happened since your last wait, \`atf status ${plan}\` shows where things stand. Handle what needs you, then run \`atf wait ${plan}\` again (if it says you will be woken, end your turn). Follow the atf skill (coordinator part).`;
-  const docs = s.docs?.length ? ` the documents it lists (${s.docs.join(', ')}),` : '';
-  return (
-    `You are "${name}", the coordinator of ATF plan "${s.title}" (${plan}), in a new session. Follow the atf skill, coordinator part: you make the decisions and start every subagent. ` +
-    `Get up to speed first: \`atf plan show ${plan}\` (goal, documents, the plan checkpoint from the previous session),${docs} then \`atf status ${plan}\`. ` +
-    `Then handle what needs attention and run \`atf wait ${plan}\` (if it says you will be woken, end your turn; otherwise keep waiting in a loop). Your identity is set (ATF_ACTOR=${name}, ATF_ROLE=coordinator).`
-  );
-}
 
 /**
  * Start (or resume) the coordinator of a plan in its own tab (SPEC §12.6). By default the
@@ -324,6 +261,8 @@ export function launchCoordinator({ root, planId, fresh = false, kind, handoffMs
     herdr(['pane', 'close', running.pane_id]);
   }
   const env = { ATF_DIR: root, ATF_PLAN: planId, ATF_ACTOR: name, ATF_ROLE: 'coordinator', ATF_HARNESS: 'herdr', PATH: `${ATF_BIN}:${process.env.PATH}` };
+  // a harness whose wake extension cannot set the agent's env (Copilot): the arm file is set here
+  if (kindCfg.wakeEnv) env.ATF_WAKE = path.join(stateDir(), `wake-${planId}.json`);
   const envArgs = Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
   const tab = herdr(['tab', 'create', ...(workspace ? ['--workspace', workspace] : []), '--cwd', path.dirname(root), '--label', `plan: ${s.title}`.slice(0, 40), '--focus', ...envArgs]);
   const pane = tab?.root_pane?.pane_id;
@@ -332,9 +271,9 @@ export function launchCoordinator({ root, planId, fresh = false, kind, handoffMs
   const hname = herdr(['agent', 'get', name])?.agent ? `${name}-${s.id.slice(-4)}` : name;
   const session = mode === 'resume' ? s.session.ref : '';
   const withoutSkill = (list) => (skillInstalled() ? list.filter((a, i) => a !== '{skill}' && list[i + 1] !== '{skill}') : list);
-  const args = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []), ...(kindCfg.coordinator || [])].map((a) =>
-    a.replace('{skill}', SKILL_DIR).replace('{session}', session).replace('{wake}', WAKE_EXT),
-  );
+  const newSession = crypto.randomUUID();
+  const kindArgs = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []), ...(kindCfg.coordinator || [])];
+  const args = kindArgs.map((a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session).replace('{newsession}', newSession).replace('{wake}', WAKE_EXT));
   if (!herdr(['agent', 'start', hname, '--kind', kind, '--pane', pane, ...(args.length ? ['--', ...args] : [])], { timeout: 60_000 })) {
     herdr(['pane', 'close', pane]);
     throw new Error(`herdr could not start ${kind} agent "${hname}"`);
@@ -345,7 +284,7 @@ export function launchCoordinator({ root, planId, fresh = false, kind, handoffMs
   });
   herdr(['agent', 'prompt', pane, coordinatorPrompt(s, mode, name)]);
   // the plan's session: what `s` on the board resumes next time
-  const ref = herdr(['agent', 'get', pane])?.agent?.agent_session?.value;
+  const ref = herdr(['agent', 'get', pane])?.agent?.agent_session?.value || (kindArgs.includes('{newsession}') ? newSession : null);
   if (ref && ref !== s.session?.ref) transact(root, planId, { id: 'atf-herdr', role: 'launcher', harness: 'herdr' }, () => [{ type: 'plan.session', data: { ref, kind, actor: name } }]);
   return { name, hname, pane, mode };
 }
@@ -374,7 +313,7 @@ export function recordSessionsForEvents(root, planId, events) {
     if (!byActor.has(rec)) byActor.set(rec, new Set());
     byActor.get(rec).add(e.task);
   }
-  for (const [rec, tasks] of byActor) recordSession(root, planId, [...tasks], rec.name, rec.kind, rec.pane);
+  for (const [rec, tasks] of byActor) recordSession(root, planId, [...tasks], rec.name, rec.kind, rec.pane, rec.session);
 }
 
 // ---------- lifecycle sweep ----------
@@ -481,7 +420,7 @@ function sweepLocked(root) {
         pending = true;
         continue;
       }
-      recordSession(root, s.id, workedThisLaunch(s, actor, rec), actor.id, rec.kind, agent.pane_id);
+      recordSession(root, s.id, workedThisLaunch(s, actor, rec), actor.id, rec.kind, agent.pane_id, rec.session);
       herdr(['pane', 'close', agent.pane_id]);
       rec.pane = null;
       rec.idleSince = null;

@@ -1,0 +1,3 @@
+#!/bin/sh
+# PATH shim for the GitHub Copilot CLI adapter.
+exec node "$(dirname "$0")/../adapters/copilot/atf-copilot.mjs" "$@"

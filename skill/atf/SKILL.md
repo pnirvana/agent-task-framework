@@ -34,6 +34,8 @@ You are given **one task** (e.g. T3) or a **work package**: a parent task (e.g. 
 whole subtree you own (`atf list --mine` shows it). Your prompt holds the coordinator's
 instructions. **You do the work; you do not make decisions beyond your task, and you do
 not wait.** Anything that needs a decision goes back to the coordinator as a `block`.
+If your prompt says to add `--as <your name>` to your atf commands (you run inside the
+coordinator's harness and share its environment), do so on **every** atf command.
 
 For a work package, loop: `atf next --package` → do the task → finish it (step 6) → repeat.
 Sending a task to `review` or blocking it does not end your work: continue with the next
@@ -166,8 +168,9 @@ show it, or they ask you). Two rules make that work:
    subtasks. Declare every dependency that crosses packages: undeclared cross-package
    dependencies are the main cause of agents waiting on each other.
 4. **Dispatch: you start every subagent.** **Every task of a plan is delegated through
-   ATF**, never through another subagent mechanism (e.g. pi's `subagent` tool): work
-   started that way is invisible to ATF. In herdr: `atf-herdr spawn <task>`; it assigns
+   ATF**: in herdr with `atf-herdr spawn`, elsewhere with `atf dispatch` (below), never
+   by handing a task to another subagent mechanism directly: work started that way is
+   invisible to ATF. In herdr: `atf-herdr spawn <task>`; it assigns
    the task, starts a fresh agent and gives it the task. `atf-herdr agents` lists named
    agent definitions (e.g. `reviewer`, `worker`); `atf-herdr spawn T7 --agent reviewer`
    (or `atf add … --agent reviewer`) runs a task with one, e.g. a cheaper model for a
@@ -178,11 +181,19 @@ show it, or they ask you). Two rules make that work:
    already (tests against an agreed interface), `atf-herdr spawn T5 --early`; the agent
    does what it can and blocks `--on` the dependency. If the dependency is not real,
    remove it: `atf edit T5 --dep T2` keeps only T2, `--dep ''` removes all.
-   Outside herdr, start subagents with `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR=<name>`,
+   **Outside herdr** (e.g. GitHub Copilot CLI, `$ATF_HARNESS` is not `herdr`): use your
+   harness's own subagents, through ATF: `atf dispatch T2 --name backend` assigns the task
+   and prints a prompt; start a **background** subagent (Copilot: the task tool,
+   general-purpose agent, background mode) with that prompt, unchanged, and end your turn
+   or keep working. The subagent shares your shell, so the prompt has it add
+   `--as backend` to its atf commands. You are woken when it finishes or asks something
+   (`atf wait`, as always); its reply to you is only a summary: the plan has the details.
+   Other ways to start subagents: with `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR=<name>`,
    `ATF_ROLE=subagent` in their environment and a prompt like *"You are backend. You own
    ATF work package T2. Follow the atf skill."*
-   Other subagent tools are fine only for quick work **outside** the plan (a one-off
-   exploration question whose answer you need now).
+   Delegating plan work **without ATF** (a subagent tool given the task directly) is
+   invisible to the plan: subagent tools without `atf dispatch` are fine only for quick
+   work **outside** the plan (a one-off exploration question whose answer you need now).
 5. **Monitor**: `atf wait --timeout 600000` in a loop (or once, then end your turn, when
    it says you will be woken). It returns as soon as something
    needs you, with the reason per task, plus every task that finished or failed since

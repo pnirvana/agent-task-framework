@@ -660,26 +660,51 @@ the agent with `session.send({prompt, source: "automation-atf"})` (recorded as a
 automation turn, not as the user); it inherits the coordinator's `ATF_*` environment;
 Copilot finds the ATF skill without setup; herdr shows it idle while it waits.
 
-- **Wake:** as pi, armed from the environment at start (the launcher sets `ATF_DIR`,
-  `ATF_PLAN`, `ATF_ACTOR`, `ATF_ROLE`, `ATF_WAKE`; an extension cannot change the agent's
-  shell environment). Requires Copilot's experimental mode, a saved setting
-  (`/settings experimental on`, or `--experimental` once), and a one-time approval of
-  the extension.
-- **What waits for the human:** no widget; after each turn (`session.idle`) one
-  ephemeral transcript line `for you: T5 question · T1 review` (`session.log(…,
-  {ephemeral: true})`); `/atf` lists, `/atf T5` prints the brief, ephemerally. Optionally
-  `session.ui.select` to pick an item.
-- **Sessions:** the launcher chooses the id (`copilot --session-id <uuid>`) and records
-  it (`plan.session`, `task.session`); resume with `--resume <id>`.
-- **herdr:** agent kind `copilot` (start/resume args as above), usable for the
-  coordinator and for subagents (`agent_kind` in the plugin config).
-- **Packaging:** a Copilot plugin (skill, extension) or `~/.copilot/extensions/atf/`.
+Copilot users often do not run herdr, so the adapter works in a plain terminal, and in
+herdr as one more agent kind.
+
+- **Extension** (`adapters/copilot/atf-extension.mjs`; `atf-copilot install` writes
+  `~/.copilot/extensions/atf/extension.mjs`, which imports it and hands it the SDK's
+  `joinSession`). Inert unless the session is a coordinator with `ATF_WAKE` set.
+  - **Wake:** as pi (§9), armed from the environment or from what `atf wait` armed (the
+    launcher sets `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR`, `ATF_ROLE`, `ATF_WAKE`; an extension
+    cannot change the agent's shell environment). Requires Copilot's experimental mode
+    (the launchers pass `--experimental`) and a one-time approval of the extension.
+  - **What waits for the human:** no widget; after each turn one transient line
+    `for you: T5 question · T1 review   (/peek <id> for details)` (`session.log(…,
+    {ephemeral: true})`, only when it changed). `/peek` lists the items with their first
+    sentence, `/peek T5` prints `atf brief T5` (not `/atf`: Copilot makes every skill a
+    slash command, and the atf skill already is `/atf`). Answers go through the chat (§13.3).
+- **`atf-copilot`** starts a plan's coordinator in the current terminal: sets the
+  environment, picks the session id (`copilot --session-id <uuid>`, recorded as
+  `plan.session` with kind `copilot`), resumes it next time (`--resume <id>`, `--fresh`
+  for a new one) and prompts it like herdr does. Without a plan it starts Copilot as a
+  coordinator that plans on request (`atf wait` arms the extension once the plan exists).
+- **Subagents outside herdr: Copilot's own.** Copilot has background subagents (its
+  `task` tool; `read_agent`/`list_agents`; completion notifications). ATF uses them
+  instead of a separate launcher: `atf dispatch T2 --name backend` (harness-neutral, any
+  harness with subagents) assigns the task as the coordinator and prints the subagent
+  prompt; the coordinator starts a background subagent with it. Such a subagent shares
+  the coordinator's environment, so it names itself on every command (`--as backend`,
+  written into the prompt's commands); `--as` with another name ignores `$ATF_ROLE`. As
+  a safety net the coordinator's identity may not start, submit or checkpoint a task
+  owned by someone else (the error tells a subagent that forgot `--as` what to do).
+  Trade-offs: subagents live inside the coordinator's session (no pane, no own
+  session to resume: the next one starts fresh from the checkpoint, the default anyway),
+  and tool approvals are asked in the coordinator's chat. Headless `copilot -p`
+  subagents would need `--allow-all-tools`; not used.
+- **herdr:** agent kind `copilot` (`--experimental --session-id {newsession}` /
+  `--resume {session}`; ATF records the session id it chose), for the coordinator
+  (`ATF_WAKE` set by the launcher, `wakeEnv`) and for subagents (`agent_kind` in the
+  plugin config). In herdr the coordinator uses `atf-herdr spawn` as usual.
+- **Later:** a Copilot plugin (skill + agents) once plugins can carry extensions;
+  `onSubagentStop` could hold a dispatched subagent that ends with its task unfinished.
 
 ### 13.8 Protocol changes
 
 All additive (§11): `data.relayed {from, quote, via}` on `task.note`, `task.status`
 (done, and the `changes` send-back) and `plan.note`; `data.recommend` on `task.status`
-to blocked. New CLI: `--relay`, `--recommend`, `atf brief`, `atf inbox --for`.
+to blocked. New CLI: `--relay`, `--recommend`, `atf brief`, `atf inbox --for`, `atf dispatch`.
 
 ### 13.9 Implementation order
 
@@ -688,7 +713,8 @@ to blocked. New CLI: `--relay`, `--recommend`, `atf brief`, `atf inbox --for`.
 2. Skill: relay rule, asking in the chat, the end-of-turn list. **Done.**
 3. pi extension: widget, peek, peek-on-type (on top of the existing wake). **Done**
    (`adapters/pi/atf.ts`).
-4. Copilot adapter: extension (wake, end-of-turn line, `/atf`), herdr kind `copilot`,
-   session ids, packaging.
+4. Copilot adapter: extension (wake, end-of-turn line, `/peek`), `atf-copilot`,
+   `atf dispatch` + `--as`, herdr kind `copilot`, session ids. **Implemented**
+   (`adapters/copilot/`); a live run with Copilot's background subagents is pending.
 5. Later (the board is not changed now): show relayed decisions as "human (via
    coordinator)" there too.

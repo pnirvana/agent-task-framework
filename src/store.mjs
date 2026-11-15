@@ -218,10 +218,13 @@ export function resolveActor(overrides = {}) {
   for (const [k, v] of Object.entries(env)) {
     if (k.startsWith('ATF_CTX_') && v) ctx[k.slice(8).toLowerCase()] = v;
   }
-  if (env.HERDR_PANE_ID) ctx.herdr_pane ??= env.HERDR_PANE_ID;
+  // the pane belongs to $ATF_ACTOR: an actor named with --as in someone else's shell (a
+  // subagent of the coordinator's harness, atf dispatch) does not take it over
+  const own = !overrides.id || !env.ATF_ACTOR || overrides.id === env.ATF_ACTOR;
+  if (own && env.HERDR_PANE_ID) ctx.herdr_pane ??= env.HERDR_PANE_ID;
   if (env.HERDR_WORKSPACE_ID) ctx.herdr_workspace ??= env.HERDR_WORKSPACE_ID;
   if (env.HERDR_SOCKET_PATH) ctx.herdr_socket ??= env.HERDR_SOCKET_PATH; // identifies the herdr server/session
-  if (env.TMUX_PANE) ctx.tmux_pane ??= env.TMUX_PANE;
+  if (own && env.TMUX_PANE) ctx.tmux_pane ??= env.TMUX_PANE;
   const harness =
     overrides.harness || env.ATF_HARNESS || (env.HERDR_ENV === '1' ? 'herdr' : env.TMUX ? 'tmux' : 'shell');
   const actor = {

@@ -22,6 +22,7 @@ import {
   brief,
 } from '../src/core.mjs';
 import { execFileSync } from 'node:child_process';
+import { buildPrompt } from '../src/prompts.mjs';
 import {
   findRoot,
   initRoot,
@@ -95,6 +96,8 @@ Tasks (worker)
   atf session <task> <ref> [--kind K] [--for WHO]
                                         record an agent session reference (for resuming)
   atf resume-info <task> [--for WHO]    resume or fresh? (used by launchers)
+  atf dispatch <task> [--name N] [--early]  coordinator: assign it and print the prompt for a
+                                        subagent of your own harness (it adds --as N to atf commands)
   atf block <task> -m <reason> [--on T8,T9]
                                         needs a decision: a question for the coordinator (write
                                         a checkpoint first, then end). --on: blocked on other
@@ -267,9 +270,12 @@ function ctx({ needPlan = true } = {}) {
   }
   const actor = resolveActor({ id: FLAGS.as, role: FLAGS.role });
   if (actor.id === HUMAN && !FLAGS.role) actor.role = 'human'; // whatever $ATF_ROLE the shell has
+  // $ATF_ROLE belongs to $ATF_ACTOR: `--as <other>` (a subagent in the coordinator's shell,
+  // atf dispatch) does not inherit it
+  const envRole = process.env.ATF_ROLE && (!FLAGS.as || FLAGS.as === process.env.ATF_ACTOR) ? process.env.ATF_ROLE : null;
   // No explicit role (--role / $ATF_ROLE): infer it from the plan, so a coordinator that
   // was started by hand (no ATF env) is still treated as the coordinator.
-  actor.role_source = FLAGS.role ? '--role' : process.env.ATF_ROLE ? '$ATF_ROLE' : null;
+  actor.role_source = FLAGS.role ? '--role' : envRole ? '$ATF_ROLE' : null;
   if (!actor.role_source) {
     if (planId && fs.existsSync(eventsPath(root, planId))) {
       const r = inferRole(loadPlan(root, planId), actor.id);
@@ -636,6 +642,10 @@ function statusCmd(target, msgRequired) {
         if (target === 'in_progress' && t.waiting_on.length && !FLAGS.early)
           die(`${t.id} waits on ${t.waiting_on.join(', ')} (--early starts it anyway, for work that does not need them yet)`);
         if (target === 'in_progress' && t.children.length) die(`${t.id} has subtasks; start those instead (use --force)`);
+        // the coordinator does not work on tasks it delegated: this is usually a subagent that
+        // shares the coordinator's shell (atf dispatch) and forgot to name itself
+        if (['in_progress', 'review'].includes(target) && actor.role === 'coordinator' && t.owner && t.owner !== actor.id)
+          die(`${t.id} is ${t.assignee ? 'assigned to' : 'in a work package owned by'} ${t.owner}: if you are ${t.owner}, add \`--as ${t.owner}\` to every atf command (use --force)`);
         // decisions on a task in review (approve = done, reopen) belong to its reviewer
         const reviewing = t.status === 'review' && ['done', 'todo'].includes(target);
         if (reviewing) {
@@ -966,7 +976,13 @@ const commands = {
     if (!message) die('note message required');
     const kind = FLAGS.kind || (relay ? 'decision' : 'info');
     if (!NOTE_KINDS.includes(kind)) die(`--kind must be one of ${NOTE_KINDS.join(', ')}`);
-    const { state } = transact(root, planId, actor, (st) => [{ type: 'task.note', task: requireTask(st, pos[0]).id, data: { message, kind, ...(relay ? { relayed: relay } : {}) } }]);
+    const { state } = transact(root, planId, actor, (st) => {
+      const t = requireTask(st, pos[0]);
+      // a checkpoint is the worker's: see statusCmd (a subagent in the coordinator's shell)
+      if (kind === 'checkpoint' && actor.role === 'coordinator' && t.owner && t.owner !== actor.id && !FLAGS.force)
+        die(`${t.id} is owned by ${t.owner}: if you are ${t.owner}, add \`--as ${t.owner}\` to every atf command (use --force)`);
+      return [{ type: 'task.note', task: t.id, data: { message, kind, ...(relay ? { relayed: relay } : {}) } }];
+    });
     const t = state.tasks[pos[0]];
     out({ ok: true, ...(relay ? { answered: !!t?.answered } : {}) }, relay ? `${pos[0]} ${dim('decision recorded as the human\'s (relayed)')}${t?.answered ? green(' · question answered') : ''}` : dim('ok'));
   },
@@ -998,6 +1014,39 @@ const commands = {
     const t = requireTask(state, pos[0]);
     const lp = launchPlan(state, t.id, FLAGS.for || t.owner);
     out(lp, `${t.id}: ${bold(lp.mode)} (${lp.reason})${lp.session ? `\nsession: ${lp.session.kind ?? ''} ${lp.session.ref}` : ''}${lp.checkpoint ? `\ncheckpoint: ${lp.checkpoint.message}` : ''}`);
+  },
+
+  dispatch(pos) {
+    // Delegate a task to a subagent of the coordinator's own harness (Copilot's or Claude
+    // Code's background subagents): assign it and print the prompt to give that subagent.
+    // The subagent shares the coordinator's environment, so the prompt has it name itself
+    // (`--as`) on every atf command. In herdr use `atf-herdr spawn` instead.
+    const { root, planId, actor } = ctx();
+    if (actor.role !== 'coordinator' && !FLAGS.force) die('only the coordinator dispatches tasks (use --force)');
+    const s = loadPlan(root, planId);
+    const t = requireTask(s, pos[0]);
+    const eff = t.rollup_status ?? t.status;
+    if (['done', 'cancelled'].includes(eff)) die(`${t.id} is already ${eff}`);
+    if (!t.children.length && t.status === 'todo' && !t.ready && !FLAGS.early)
+      die(`${t.id} is not ready (waits on ${t.waiting_on.join(', ')}); --early starts it anyway for work that does not need them yet`);
+    const name = String(FLAGS.name || t.assignee || `w-${t.id}`)
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '-')
+      .replace(/^[^a-z]+/, 'w-')
+      .slice(0, 32);
+    if (name === actor.id || name === HUMAN) die(`--name ${name}: pick a name for the subagent`);
+    const isPackage = t.children.length > 0;
+    if (t.assignee !== name && !(t.owner === name && !isPackage))
+      transact(root, planId, actor, () => [{ type: 'task.assigned', task: t.id, data: { assignee: name } }]);
+    const fresh = loadPlan(root, planId);
+    const leaf = isPackage
+      ? fresh.order.map((id) => fresh.tasks[id]).find((x) => !x.children.length && x.path.includes(t.id) && (x.ready || x.can_resume || x.answered)) || fresh.tasks[t.id]
+      : fresh.tasks[t.id];
+    const prompt = buildPrompt({ s: fresh, t: leaf, name, mode: 'fresh', pkg: isPackage ? fresh.tasks[t.id] : null, kindCfg: { nativeSkill: true }, early: !!FLAGS.early, inSession: true });
+    out(
+      { ok: true, task: t.id, name, prompt },
+      `${dim(`${t.id} assigned to ${name}. Start a background subagent named ${name} with this prompt, unchanged:`)}\n\n${prompt}`,
+    );
   },
 
   plans() {

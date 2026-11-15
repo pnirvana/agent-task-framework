@@ -30,6 +30,8 @@ plans, break them into tasks, and report progress, in a format any frontend can 
 | `bin/atf.mjs` | reference CLI (`bin/atf` is a PATH shim) |
 | `skill/atf/SKILL.md` | agent instructions for coordinator and subagent roles (Agent Skills format; `atf skill install`) |
 | `adapters/herdr/` | herdr plugin: board TUI, pane labels, sidebar progress, notifications, spawn, agent lifecycle |
+| `adapters/pi/atf.ts` | pi extension: wakes the idle coordinator; what waits for you next to the chat |
+| `adapters/copilot/` | GitHub Copilot CLI: `atf-copilot` launcher and extension (wake, `/peek`) |
 | `test/` | `npm test` (fold semantics, transitions, a 12-way concurrent-claim race, wait) |
 
 ## Install
@@ -223,6 +225,27 @@ Events written from herdr panes automatically carry `actor.ctx.herdr_pane`, whic
 the plugin maps tasks to panes. Any `ATF_CTX_<KEY>` env var gets recorded the same way
 in other harnesses.
 
+## Using it with GitHub Copilot CLI
+
+No herdr needed. In the project directory:
+
+```sh
+atf-copilot install            # once: the ATF extension for Copilot (approve it once in Copilot)
+atf-copilot                    # the current plan's coordinator, in this terminal (resumes its session)
+atf-copilot --plan P --fresh   # another plan; a new Copilot session
+```
+
+The coordinator is Copilot with the atf skill. It starts subagents as Copilot's own
+background subagents: `atf dispatch T2 --name backend` assigns the task and prints the
+prompt it gives the subagent, which records its work as `backend` (`--as backend`). The
+extension wakes the idle coordinator when something needs it, prints one line after each
+turn with what waits for you (`for you: T5 question · T1 review`) and adds `/peek` (list)
+and `/peek T5` (the full request). Answer in the chat (`T5: yes, SQLite`); the coordinator
+records it as your decision. Copilot's experimental mode is required (`atf-copilot`
+passes `--experimental`). In herdr, use the agent kind `copilot` (`atf-herdr coordinate
+--kind copilot`, or `"agent_kind": "copilot"` in the plugin config). Details:
+[adapters/copilot/README.md](adapters/copilot/README.md).
+
 ## Building a frontend
 
 See [SPEC.md §7](SPEC.md#7-consuming-the-protocol-frontends). Minimal browser example:
@@ -257,7 +280,8 @@ stalled agents, and jumps into any plan, task or agent (see `adapters/herdr/READ
 | `ATF_HARNESS` | harness label (auto: `herdr` / `tmux` / `shell`) |
 | `ATF_CTX_*` | extra harness context recorded on every event |
 | `ATF_REGISTRY` | project registry file (default `~/.config/atf/roots.json`); `ATF_NO_REGISTRY=1` disables updates |
-| `ATF_WAKE` | set by a harness that wakes idle agents (the pi extension): the coordinator's `atf wait` does not block (SPEC §9) |
+| `ATF_WAKE` | set by a harness that wakes idle agents (the pi extension, `atf-copilot`): the coordinator's `atf wait` does not block (SPEC §9) |
+| `ATF_HARNESS` | set by launchers (`herdr`, `copilot`); outside herdr the coordinator starts subagents with `atf dispatch` |
 | `ATF_LIFECYCLE` | set by launchers: `ephemeral` makes `atf wait` tell idle agents to end their turn |
 
 ## License

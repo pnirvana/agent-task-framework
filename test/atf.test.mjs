@@ -1108,3 +1108,45 @@ test('§13: relayed human decisions, --recommend, brief, inbox --for', () => {
   assert.equal(run(['brief', 'plan']).questions.length, 0);
   assert.deepEqual(run(['inbox', '--for', 'human']).filter((i) => i.kind === 'plan-question'), []);
 });
+
+test('§13.7: atf dispatch for subagents in the coordinator\'s harness (--as)', () => {
+  const { run, runFail } = sandbox();
+  run(['add', 'Cart API', '--accept', 'tests pass', '--review']);
+  run(['add', 'Docs', '--dep', 'T1']);
+  assert.match(runFail(['dispatch', 'T2']).error, /not ready/);
+  assert.match(runFail(['dispatch', 'T1'], { ATF_ACTOR: 'w1', ATF_ROLE: 'subagent' }).error, /only the coordinator/);
+  const d = run(['dispatch', 'T1', '--name', 'Backend']);
+  assert.equal(d.name, 'backend');
+  assert.equal(run(['show', 'T1']).assignee, 'backend');
+  assert.match(d.prompt, /`atf start T1 --as backend`/);
+  assert.match(d.prompt, /`atf review T1 -m "[^`]*" --as backend`/);
+  assert.match(d.prompt, /add `--as backend` to every atf command/);
+  // the coordinator's identity does not start or submit a delegated task (a subagent that forgot --as)
+  assert.match(runFail(['start', 'T1']).error, /if you are backend, add `--as backend`/);
+  assert.match(runFail(['note', 'T1', 'half done', '--kind', 'checkpoint']).error, /--as backend/);
+  // --as in the coordinator's shell: $ATF_ROLE (the coordinator's) does not apply
+  assert.equal(run(['whoami', '--as', 'backend']).role, 'agent');
+  run(['start', 'T1', '--as', 'backend']);
+  run(['review', 'T1', '-m', 'done, check the tests', '--as', 'backend']);
+  const t = run(['show', 'T1']);
+  assert.equal(t.status, 'review');
+  assert.equal(t.owner, 'backend');
+  // dispatching again keeps the assignment; a package names its next leaf
+  run(['add', 'Pkg']);
+  run(['add', 'Leaf', '--parent', 'T3']);
+  const p = run(['dispatch', 'T3', '--name', 'docs']);
+  assert.match(p.prompt, /work package T3/);
+  assert.match(p.prompt, /next task is T4/);
+});
+
+test('--as in another actor\'s shell does not take over its herdr pane', () => {
+  const { run, dir, env } = sandbox();
+  run(['add', 'A']);
+  run(['dispatch', 'T1', '--name', 'w1'], { HERDR_PANE_ID: 'w1:p9' });
+  run(['start', 'T1', '--as', 'w1'], { HERDR_PANE_ID: 'w1:p9' });
+  const raw = execFileSync('node', [ATF, 'log', '-n', '5', '--json'], { cwd: dir, env }).toString();
+  const log = raw.trim().split('\n').map((l) => JSON.parse(l));
+  const byW1 = log.filter((e) => e.actor.id === 'w1');
+  assert.ok(byW1.length && byW1.every((e) => !e.actor.ctx?.herdr_pane));
+  assert.equal(log.find((e) => e.type === 'task.assigned' && e.actor.id === 'lead').actor.ctx.herdr_pane, 'w1:p9');
+});
