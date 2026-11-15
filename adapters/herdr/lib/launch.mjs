@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TERMINAL, attentionFor, launchPlan } from '../../../src/core.mjs';
-import { listPlanIds, loadPlan, transact, skillInstalled, resolveActor } from '../../../src/store.mjs';
+import { listPlanIds, loadPlan, transact, skillInstalled, resolveActor, hasLiveWaiter } from '../../../src/store.mjs';
 import { herdr, notify, pluginConfig, sameServer, currentSocket, liveAgents, inProject, boardPaneIds, pluginStateDir } from './herdr.mjs';
 import { chooseSplit, tabLayout, withPlacementLock } from './layout.mjs';
 import { resolveAgentDef, piArgsForAgent } from './agents.mjs';
@@ -18,6 +18,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ATF_BIN = path.resolve(HERE, '../../../bin');
 export const SKILL_DIR = path.resolve(HERE, '../../../skill/atf');
 const SKILL_FILE = path.join(SKILL_DIR, 'SKILL.md');
+const WAKE_EXT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../pi/atf-wake.ts');
 
 /**
  * Per agent kind: extra args to start fresh, args to resume a session, and whether the
@@ -25,7 +26,9 @@ const SKILL_FILE = path.join(SKILL_DIR, 'SKILL.md');
  * Kinds without `resume` always start fresh (from checkpoint + task history).
  */
 export const AGENT_KINDS = {
-  pi: { start: ['--skill', '{skill}'], resume: ['--session', '{session}', '--skill', '{skill}'], nativeSkill: true },
+  // coordinator: extra args for the plan's coordinator only (the wake extension: it waits
+  // for the plan in the background, so pi is idle and promptable while nothing needs it)
+  pi: { start: ['--skill', '{skill}'], resume: ['--session', '{session}', '--skill', '{skill}'], coordinator: ['-e', '{wake}'], nativeSkill: true },
   claude: { start: [], resume: ['--resume', '{session}'] },
   codex: { start: [], resume: ['resume', '{session}'] },
 };
@@ -248,6 +251,7 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
     herdr(['pane', 'close', pane]);
     throw new Error(`herdr could not start ${kind} agent "${name}"`);
   }
+  herdr(['pane', 'rename', pane, name]); // the pane shows who works in it, not the tab it sits in
   // register before anything writes to the plan: hooks fired by the assignment below
   // must already know this agent was just launched (no duplicate kickoff nudge)
   updateRegistry((reg) => {
@@ -274,12 +278,12 @@ const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0
 export function coordinatorPrompt(s, mode, name) {
   const plan = `--plan ${s.id}`;
   if (mode === 'resume')
-    return `[ATF] You are resumed as the coordinator of plan "${s.title}" (${plan}). Catch up: \`atf wait ${plan}\` reports what happened since your last wait, \`atf status ${plan}\` shows where things stand. Handle what needs you, then continue the \`atf wait ${plan}\` loop. Follow the atf skill (coordinator part).`;
+    return `[ATF] You are resumed as the coordinator of plan "${s.title}" (${plan}). Catch up: \`atf wait ${plan}\` reports what happened since your last wait, \`atf status ${plan}\` shows where things stand. Handle what needs you, then run \`atf wait ${plan}\` again (if it says you will be woken, end your turn). Follow the atf skill (coordinator part).`;
   const docs = s.docs?.length ? ` the documents it lists (${s.docs.join(', ')}),` : '';
   return (
     `You are "${name}", the coordinator of ATF plan "${s.title}" (${plan}), in a new session. Follow the atf skill, coordinator part: you make the decisions and start every subagent. ` +
     `Get up to speed first: \`atf plan show ${plan}\` (goal, documents, the plan checkpoint from the previous session),${docs} then \`atf status ${plan}\`. ` +
-    `Then handle what needs attention and keep running \`atf wait ${plan}\` in a loop. Your identity is set (ATF_ACTOR=${name}, ATF_ROLE=coordinator).`
+    `Then handle what needs attention and run \`atf wait ${plan}\` (if it says you will be woken, end your turn; otherwise keep waiting in a loop). Your identity is set (ATF_ACTOR=${name}, ATF_ROLE=coordinator).`
   );
 }
 
@@ -321,18 +325,21 @@ export function launchCoordinator({ root, planId, fresh = false, kind, handoffMs
   }
   const env = { ATF_DIR: root, ATF_PLAN: planId, ATF_ACTOR: name, ATF_ROLE: 'coordinator', ATF_HARNESS: 'herdr', PATH: `${ATF_BIN}:${process.env.PATH}` };
   const envArgs = Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
-  const tab = herdr(['tab', 'create', ...(workspace ? ['--workspace', workspace] : []), '--cwd', path.dirname(root), '--label', `coordinator: ${s.title}`.slice(0, 40), '--focus', ...envArgs]);
+  const tab = herdr(['tab', 'create', ...(workspace ? ['--workspace', workspace] : []), '--cwd', path.dirname(root), '--label', `plan: ${s.title}`.slice(0, 40), '--focus', ...envArgs]);
   const pane = tab?.root_pane?.pane_id;
   if (!pane) throw new Error('could not open a tab for the coordinator');
   // herdr agent names are unique per server: another project may have a "coordinator"
   const hname = herdr(['agent', 'get', name])?.agent ? `${name}-${s.id.slice(-4)}` : name;
   const session = mode === 'resume' ? s.session.ref : '';
   const withoutSkill = (list) => (skillInstalled() ? list.filter((a, i) => a !== '{skill}' && list[i + 1] !== '{skill}') : list);
-  const args = withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []).map((a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session));
+  const args = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []), ...(kindCfg.coordinator || [])].map((a) =>
+    a.replace('{skill}', SKILL_DIR).replace('{session}', session).replace('{wake}', WAKE_EXT),
+  );
   if (!herdr(['agent', 'start', hname, '--kind', kind, '--pane', pane, ...(args.length ? ['--', ...args] : [])], { timeout: 60_000 })) {
     herdr(['pane', 'close', pane]);
     throw new Error(`herdr could not start ${kind} agent "${hname}"`);
   }
+  herdr(['pane', 'rename', pane, name]);
   updateRegistry((reg) => {
     reg[regKey(root, name)] = { name: hname, actor: name, role: 'coordinator', kind, root, plan: planId, pane, workspace: paneWorkspace(pane), socket: currentSocket(), launchedAt: Date.now() };
   });
@@ -503,6 +510,12 @@ function sweepLocked(root) {
     const att = attentionFor(s, coordId, 'coordinator');
     const attKey = [...att.map((a) => `${a.task}:${a.reason}`), ...stalled.map((t) => `${t.id}:stalled`)].join(',');
     if (!attKey) {
+      delete nudges[nkey];
+      continue;
+    }
+    // an idle coordinator with a background waiter (the pi extension's `atf wait --new`) is
+    // woken by it when something needs it: no nudge on top
+    if (hasLiveWaiter(root, s.id, coordId)) {
       delete nudges[nkey];
       continue;
     }

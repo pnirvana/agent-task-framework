@@ -177,6 +177,13 @@ also start pi yourself (then `atf` must be on its PATH, see Install); it writes 
 `$ATF_ACTOR`, else your user name, and the adapter finds its pane by that name or by the
 pane its ATF commands come from, to nudge it when something needs it.
 
+**pi extension** (`adapters/pi/atf-wake.ts`): the coordinator does not block in `atf wait`.
+It ends its turn, so pi is idle (and shown as idle in herdr) and you can prompt it any
+time; the extension waits for the plan in the background and wakes it with the report as
+soon as something new needs it. `atf-herdr coordinate` loads it; for a pi you start
+yourself use `pi -e <repo>/adapters/pi/atf-wake.ts`, or install the repo as a pi package
+(`pi install git:github.com/pnirvana/agent-task-framework`).
+
 ```sh
 # inside herdr, in the project dir
 atf-herdr coordinate                         # the plan's coordinator (resumes its session)
@@ -244,6 +251,7 @@ stalled agents, and jumps into any plan, task or agent (see `adapters/herdr/READ
 | `ATF_HARNESS` | harness label (auto: `herdr` / `tmux` / `shell`) |
 | `ATF_CTX_*` | extra harness context recorded on every event |
 | `ATF_REGISTRY` | project registry file (default `~/.config/atf/roots.json`); `ATF_NO_REGISTRY=1` disables updates |
+| `ATF_WAKE` | set by a harness that wakes idle agents (the pi extension): the coordinator's `atf wait` does not block (SPEC §9) |
 | `ATF_LIFECYCLE` | set by launchers: `ephemeral` makes `atf wait` tell idle agents to end their turn |
 
 ## License

@@ -207,11 +207,15 @@ Elsewhere in the board use `j` / `k` or the arrow keys.
 ### Agent lifecycle (SPEC §12: the coordinator decides)
 
 - **The coordinator** runs as long as its plan is active. `atf-herdr coordinate` (or `s`
-  on the board) starts it in its own tab with the plan's identity, resuming the plan's
+  on the board) starts it in its own tab, labelled `plan: <title>`, with the plan's
+  identity (the subagents it spawns open next to it there; every agent pane is labelled
+  with the agent's name), resuming the plan's
   coordinator session if one is recorded; `--fresh` (`S`) starts a new session, and a
   running coordinator is first asked for a plan checkpoint (`atf plan checkpoint`), then
   replaced. Its session is recorded on the plan (`plan.session`) at start and on its
-  first write.
+  first write. A pi coordinator gets the wake extension (`adapters/pi/atf-wake.ts`):
+  between decisions it ends its turn instead of blocking in `atf wait`, so herdr shows it
+  idle and you can prompt it; the extension wakes it when something new needs it.
 - **Subagents** are started only by the coordinator (`atf-herdr spawn`), fresh by
   default (the task, its checkpoint and the coordinator's instructions), or resuming the
   task's earlier session with `--resume`. They do their assignment and end; once an agent
@@ -222,7 +226,8 @@ Elsewhere in the board use `j` / `k` or the arrow keys.
   name is still running.
 - **Sweeps** (after every ATF write via the hook, a self-rescheduling delayed sweep, and
   every 20 s from an open board; always in a separate `atf-herdr` process): close
-  finished subagents; nudge an idle coordinator once per situation with what needs it,
+  finished subagents; nudge an idle coordinator once per situation with what needs it
+  (not one the wake extension waits for),
   including **stalled** subagents (idle > 90 s with a task in progress); notify once when
   an active plan has no coordinator running. When the coordinator is busy but wrote within
   the last minute (probably finishing its turn), or another sweep held the lock, the next

@@ -34,6 +34,9 @@ import {
   eventsPath,
   readCursor,
   writeCursor,
+  readSeen,
+  writeSeen,
+  registerWaiter,
   readDrafts,
   writeDrafts,
   reviewEvents,
@@ -131,6 +134,11 @@ Viewing
                                         tasks, the human's input. Reports everything since your last
                                         wait (per-actor cursor), so nothing between waits is missed.
                                         Subagents do not wait: they finish and end.
+                                        With $ATF_WAKE set (a harness wakes the agent, e.g. the
+                                        pi extension), it does not block: it reports what needs
+                                        you now, else tells you to end your turn.
+  atf wait --new                        (harness) block until something not reported yet needs
+                                        the actor: wakes an idle agent once per item
   atf wait --task T1,T2 [--status S,..] wait for specific tasks to reach a status
   atf validate
 
@@ -143,7 +151,7 @@ Global flags
 `;
 
 // ---------- args ----------
-const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early', 'review']);
+const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early', 'review', 'new']);
 const MULTI = new Set(['accept', 'dep', 'label', 'doc']);
 const SHORT = { m: 'message', n: 'limit', h: 'help', j: 'json' };
 
@@ -1028,6 +1036,19 @@ const commands = {
     const tasks = FLAGS.task ? FLAGS.task.split(',') : null;
     const statuses = (FLAGS.status || 'done,failed,blocked,review').split(',');
     const timeout = FLAGS.timeout ? Number(FLAGS.timeout) : 0;
+    // --new: a harness waits for the agent while it is idle and wakes it with the report;
+    // only what the last report did not contain counts (no wake loop on an item left open)
+    const onlyNew = !!FLAGS.new && !explicit;
+    // $ATF_WAKE (set by such a harness, naming its arm file): the agent's own wait does not
+    // block; it reports what is there and arms the harness, which wakes the agent later
+    const wake = !onlyNew && !FLAGS.since && process.env.ATF_WAKE && actor.role === 'coordinator' ? process.env.ATF_WAKE : null;
+    const armWake = () => {
+      try {
+        fs.writeFileSync(wake, JSON.stringify({ root, plan: planId, actor: actor.id, role: actor.role, at: new Date().toISOString() }));
+      } catch {}
+    };
+    const seen = onlyNew ? readSeen(root, planId, actor.id) : null;
+    if (onlyNew) registerWaiter(root, planId, actor.id);
     const now0 = loadPlan(root, planId);
     // Where to report from. Explicit --since wins. Otherwise (default mode) from this
     // actor's cursor, i.e. where its previous wait left off, so nothing that happened
@@ -1039,9 +1060,14 @@ const commands = {
     const startSeq = FLAGS.since !== undefined ? Number(FLAGS.since) : explicit ? now0.last_seq : (readCursor(root, planId, actor.id) ?? (lastOwn() || now0.last_seq));
     const leaves = (st) => st.order.map((id) => st.tasks[id]).filter((t) => !t.children.length);
 
+    const keyOf = (a) => `${a.task ?? 'plan'}:${a.reason}`;
     const finish = (st, attention, events, note) => {
       fs.unwatchFile(p);
-      if (!explicit) writeCursor(root, planId, actor.id, st.last_seq); // seen up to here
+      if (!explicit) {
+        writeCursor(root, planId, actor.id, st.last_seq); // seen up to here
+        writeSeen(root, planId, actor.id, [...attention.map(keyOf), ...(note ? [`note:${note}`] : [])]);
+      }
+      if (wake && !explicit) armWake();
       const human = [
         note,
         ...attention.map((a) =>
@@ -1095,11 +1121,26 @@ const commands = {
       const lastStatus = {};
       for (const e of hits) if (e.type === 'task.status') lastStatus[e.task] = e.seq;
       const news = hits.filter((e) => e.type !== 'task.status' || lastStatus[e.task] === e.seq);
+      const allDone = isCoord && leaves(st).length && leaves(st).every((t) => TERMINAL.has(t.status));
+      if (onlyNew) {
+        // wake for news, or for an attention item the last report did not have; the report
+        // then lists everything that needs the actor, old and new
+        const fresh = attention.filter((a) => !seen.has(keyOf(a)));
+        if (news.length || fresh.length) return finish(st, attention, news);
+        if (allDone && !seen.has('note:all tasks are finished')) return finish(st, attention, [], 'all tasks are finished');
+        return;
+      }
       if (attention.length || news.length) return finish(st, attention, news);
-      if (isCoord && leaves(st).length && leaves(st).every((t) => TERMINAL.has(t.status))) return finish(st, [], [], 'all tasks are finished');
+      if (allDone) return finish(st, [], [], 'all tasks are finished');
     };
 
     evaluate(); // return at once if something already needs you
+    if (wake) {
+      // nothing right now: do not block the agent (it stays promptable and shows as idle)
+      armWake();
+      out({ ok: true, armed: true, attention: [], events: [] }, 'nothing needs you right now. End your turn: you will be woken with the report when something does (the human can still prompt you meanwhile).');
+      process.exit(0);
+    }
     fs.watchFile(p, { interval: 300 }, evaluate);
     if (timeout)
       setTimeout(() => {

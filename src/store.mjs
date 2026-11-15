@@ -348,6 +348,47 @@ export function writeCursor(root, planId, actorId, seq) {
   fs.renameSync(f + '.' + process.pid, f);
 }
 
+// What the actor's last wait reported as needing it (attention keys "T3:review"), so
+// `atf wait --new` wakes only for something not reported yet (a harness that wakes an
+// idle agent must not wake it again and again for an item it chose to leave for now).
+const seenFile = (root, planId, actorId) => cursorFile(root, planId, actorId).replace(/\.seq$/, '.seen');
+export function readSeen(root, planId, actorId) {
+  try {
+    return new Set(JSON.parse(fs.readFileSync(seenFile(root, planId, actorId), 'utf8')));
+  } catch {
+    return new Set();
+  }
+}
+export function writeSeen(root, planId, actorId, keys) {
+  const f = seenFile(root, planId, actorId);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f + '.' + process.pid, JSON.stringify([...keys]));
+  fs.renameSync(f + '.' + process.pid, f);
+}
+
+// A harness-side waiter (`atf wait --new` run in the background for an idle agent): while
+// it runs, the agent is taken care of and needs no other nudge.
+const waiterFile = (root, planId, actorId) => cursorFile(root, planId, actorId).replace(/\.seq$/, '.waiter');
+export function registerWaiter(root, planId, actorId) {
+  const f = waiterFile(root, planId, actorId);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, JSON.stringify({ pid: process.pid, since: new Date().toISOString() }));
+  process.on('exit', () => {
+    try {
+      if (JSON.parse(fs.readFileSync(f, 'utf8')).pid === process.pid) fs.rmSync(f, { force: true });
+    } catch {}
+  });
+}
+export function hasLiveWaiter(root, planId, actorId) {
+  try {
+    const { pid } = JSON.parse(fs.readFileSync(waiterFile(root, planId, actorId), 'utf8'));
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code === 'EPERM';
+  }
+}
+
 // ---------- review drafts ----------
 // Feedback items collected before they are sent (per plan and actor): any tool (CLI,
 // board, an editor plugin) adds drafts; `atf feedback submit` applies them in one write.

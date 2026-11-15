@@ -1012,3 +1012,31 @@ test('herdr board (v2): an escalated question is for the human; the answer goes 
   assert.deepEqual(t.human_input.map((n) => [n.actor, n.message]), [['human', 'use the adapter']]);
   assert.deepEqual(run(['wait', '--timeout', '1500']).attention, [{ task: 'T1', reason: 'human' }]);
 });
+
+test('wait with a waking harness: does not block, arms it; --new wakes once per new item', () => {
+  const { dir, run, runFail } = sandbox();
+  const arm = path.join(dir, 'arm.json');
+  const wake = { ATF_WAKE: arm };
+  // nothing needs the coordinator: it is told to end its turn, the harness is armed
+  let r = run(['wait', '--timeout', '600000'], wake);
+  assert.equal(r.armed, true);
+  const a = JSON.parse(fs.readFileSync(arm, 'utf8'));
+  assert.equal(a.actor, 'lead');
+  assert.ok(a.plan && a.root);
+  // something needs it: reported at once (and armed again)
+  run(['add', 'a']); // T1 dispatch
+  fs.rmSync(arm);
+  r = run(['wait'], wake);
+  assert.deepEqual(r.attention, [{ task: 'T1', reason: 'dispatch' }]);
+  assert.ok(fs.existsSync(arm));
+  // the harness waits with --new: T1 was reported and left open -> no wake loop
+  const t = runFail(['wait', '--new', '--timeout', '1200']);
+  assert.equal(t.timeout, true);
+  // a new item wakes it, with everything that needs it
+  run(['add', 'b']); // T2
+  r = run(['wait', '--new', '--timeout', '3000']);
+  assert.deepEqual(r.attention.map((x) => x.task), ['T1', 'T2']);
+  // the waiter registration is gone when the wait ends
+  const cursors = fs.readdirSync(path.join(dir, '.atf', 'plans', a.plan, 'cursors'));
+  assert.ok(!cursors.some((f) => f.endsWith('.waiter')), cursors.join(','));
+});

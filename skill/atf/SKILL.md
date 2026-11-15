@@ -104,9 +104,18 @@ coordinator reads instead of your transcript, so make it self-contained.
 
 ## If you are the COORDINATOR
 
-You are the only decision maker of the plan and the only one who starts subagents. Keep
-running while the plan is active: loop on `atf wait`; never end your turn to ask the
-human something (ask through ATF, step 6, and keep waiting).
+You are the only decision maker of the plan and the only one who starts subagents. Stay
+on the plan while it is active: wait with `atf wait`; never end your turn to ask the
+human something (ask through ATF, step 6, and keep waiting). **If `atf wait` says "End
+your turn: you will be woken"**, your harness waits for you (e.g. the pi extension): end
+your turn right away; you are woken with the report when something needs you, and the
+human can prompt you meanwhile. Otherwise `atf wait` blocks: run it in a loop.
+
+**Your last message of a turn is for the human**, who reads your terminal when they come
+by: what you decided or did (one or two lines), then what waits for them, each item with
+its task id and the question in a few words ("T5: approve the SQLite order schema?"), or
+"nothing needs you". Run `atf wait` *before* writing it. Do not end with ATF mechanics
+(checkpoints written, "waiting", "ATF will wake me"): that is noise to them.
 
 0. **Set up the project, once.** Run `atf whoami`: if it fails with "no .atf directory
    found", run `atf init` in the directory you coordinate the work from; that directory
@@ -158,7 +167,8 @@ human something (ask through ATF, step 6, and keep waiting).
    ATF work package T2. Follow the atf skill."*
    Other subagent tools are fine only for quick work **outside** the plan (a one-off
    exploration question whose answer you need now).
-5. **Monitor**: `atf wait --timeout 600000` in a loop. It returns as soon as something
+5. **Monitor**: `atf wait --timeout 600000` in a loop (or once, then end your turn, when
+   it says you will be woken). It returns as soon as something
    needs you, with the reason per task, plus every task that finished or failed since
    your previous wait (nothing is lost between waits):
    - `dispatch`: ready, nobody owns it → spawn an agent.
@@ -178,7 +188,11 @@ human something (ask through ATF, step 6, and keep waiting).
      the task**, never only in your terminal: `atf block T4 --for human -m "<the
      question, the context needed to answer it, and your recommendation>"`. The human
      sees it on that task with its context; their answer comes back to you as `human`.
-     A question about the whole plan: `atf plan ask "<question + context + your view>"`.
+     A question about the whole plan (`atf plan ask "<question + context + your view>"`)
+     only for a decision that belongs to no task, e.g. the scope or direction of the
+     plan. One question, short, with your recommendation. Never use it to list or repeat
+     task questions, or to report status: the human already sees every task question
+     on its task, and status on the board.
      A failure you cannot resolve: escalate it the same way (`atf block T4 --for human`).
    - **Review** every task in `review` against its acceptance criteria (read the change,
      run its checks), then decide exactly one of:

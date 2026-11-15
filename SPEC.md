@@ -315,6 +315,21 @@ Since v2 also, for a coordinator: `task.note` and `plan.note` by the human; bloc
 
 A subagent's `atf wait` returns at once, telling it to finish and end (§12.2).
 
+**Waking harnesses.** A coordinator that blocks in `atf wait` looks busy to its harness and
+cannot be prompted. A harness that can wake an idle agent sets `ATF_WAKE` to the path of an
+*arm file*. Then the coordinator's `atf wait` does not block: it reports what needs it now
+(as usual), or else says "end your turn: you will be woken"; either way it writes
+`{root, plan, actor, role}` to the arm file. While the agent is idle, the harness runs
+`atf wait --new` for that actor and wakes the agent with its report. `--new` returns only
+for something the actor's last report did not contain (new relevant events, or attention
+items not reported before; the reported keys are kept in `cursors/<actor>.seen`), so an
+item the coordinator leaves open does not wake it again and again. Its report still lists
+everything that needs the actor. While it blocks, `--new` registers itself
+(`cursors/<actor>.waiter`, with its pid); launchers do not nudge an actor with a live
+waiter. The pi implementation is `adapters/pi/atf-wake.ts`: it waits on `agent_settled`,
+stops on `agent_start` (a prompt by the human, or the wake itself) and wakes the agent
+with `pi.sendMessage(..., { triggerTurn: true })`.
+
 ### Roles without configuration
 
 A writer that is given no role (no `--role`, no `$ATF_ROLE`) infers it from the plan
