@@ -548,3 +548,146 @@ All additive (§11): new optional fields and one new attention reason; no versio
 2. Skill (both roles), including the document and handoff rules.
 3. herdr adapter: simplified sweep, `atf-herdr coordinate`, fresh-by-default spawn.
 4. Board: needs-you items, input routing, documents, removals.
+
+## 13. The coordinator's chat is the main channel
+
+**Status: proposed.** Builds on §12 (the coordinator decides) and the waking harnesses of §9.
+The board stays as it is (§12.9); this section adds the chat path next to it.
+
+### 13.1 Why
+
+With §12 the coordinator is the one agent the human deals with, and the back and forth
+belongs in its chat, not in a separate tool. Two things stand in the way today: (1)
+what the human says in the chat is recorded by the coordinator under its own name, so
+the protocol no longer knows the human decided; (2) questions and reviews scroll out of
+sight in the chat, while the board, which keeps them visible, is a second place to look.
+Some users also work with harnesses less extensible than pi (GitHub Copilot CLI, later
+opencode), so the design must degrade gracefully.
+
+### 13.2 Principle: the protocol carries the behaviour, adapters add comfort
+
+Everything the chat path needs is in the protocol, the CLI and the skill, so it works in
+any harness. Harness adapters only present it better. Capability levels:
+
+| level | needs | gives |
+|---|---|---|
+| 0 | a shell | skill + CLI: the coordinator relays decisions (§13.3), asks in the chat (§13.4), lists what waits for the human at the end of each turn; `atf wait` blocks |
+| 1 | a way to wake an idle agent | the coordinator idles between decisions and stays promptable (§9, waking harnesses) |
+| 2 | UI extensions | what waits for the human stays visible next to the chat, with details on demand (§13.6, §13.7) |
+
+pi reaches level 2, Copilot CLI level 2 with less UI (§13.7), any agent in herdr at
+least level 1 (herdr types the wake-up into the pane), anything else level 0.
+
+### 13.3 Relayed human decisions
+
+When the human answers, approves or requests changes **in the coordinator's chat**, the
+coordinator records it as the human's decision, relayed:
+
+```sh
+atf note T5 --relay "yes, go with SQLite"            # an answer
+atf done T1 --relay "looks good, approve"            # an approval of a review for the human
+atf changes T1 --relay "rename the module, else fine" -m "1. rename cart.py to cart_api.py"
+atf plan note --relay "local demo, not production"   # on the plan
+```
+
+- The event's actor stays the coordinator (it wrote it); `data.relayed = {from: "human",
+  quote: "<the human's words, verbatim>", via: "chat"}`. `--relay` requires the verbatim
+  quote; the coordinator may add its own interpretation in `-m` / the message.
+- Folding treats a relayed event as the human's decision: a relayed answer on a task
+  blocked for the human answers it (§12.4); a relayed approval may approve a task whose
+  reviewer is the human (otherwise only the human may, §12); relayed input does not wake
+  the coordinator (it wrote it) and counts as handled.
+- Frontends show it as "human (via coordinator)" with the quote. Input the human writes
+  directly (board, peek actions, CLI as `human`) is unchanged: actor `human`, no relay.
+- Only the coordinator may relay, only for the `human` actor, and only what the human
+  actually said in its chat (skill rule).
+
+### 13.4 Asking in the chat (trial)
+
+The coordinator keeps escalating scoped (§12.4: `atf block T5 --for human`, `atf plan
+ask`) and additionally asks the question in its chat when it escalates. Its last message
+of every turn lists what waits for the human (task id + the question in a few words).
+This is on trial: if it feels noisy, it is reduced to the end-of-turn list.
+
+`block --for human` gets an optional `--recommend "<the coordinator's view>"`
+(`data.recommend`), shown with the question everywhere.
+
+### 13.5 `atf brief`: the details of one request
+
+One harness-neutral command produces what a human needs to act on a request, so every
+frontend shows the same content:
+
+```sh
+atf brief T1 [--json]       # a task waiting for the human
+atf brief --plan [--json]   # the plan's open questions
+atf inbox --for human --json
+```
+
+Content per kind, from the plan's events and git only (no model call, instant):
+- **question:** the question, who asked it originally (the subagent, before the
+  coordinator escalated), the coordinator's recommendation, the task's goal and
+  acceptance criteria;
+- **review:** the submission message, the acceptance criteria and how they are met (from
+  the agent's notes), artifacts, changed files with line counts (`git diff --stat` of the
+  task's work when known), the coordinator's assessment if it reviewed first;
+- **plan question:** the question, the plan goal and documents.
+
+### 13.6 pi: widget, peek and peek-on-type
+
+All in the ATF pi extension (with the wake of §9). Nothing here writes to the transcript
+or the model's context.
+
+- **Widget** (`ctx.ui.setWidget`, above the input): one numbered line per item waiting
+  for the human in this coordinator's plan: `1 T5 question  approve the SQLite order
+  schema?`. Hidden when nothing waits. Kept current by watching the plan's events.
+- **Peek** (`alt+1…9`, or `/atf [T5]`): a read-only overlay (`ctx.ui.custom`, overlay)
+  with the item's `atf brief`. Keys: `esc` close (the typed input is untouched); `r` close
+  and put `T5: ` into the input; `d` diff, `o` open a file (scrollable view or `$EDITOR`);
+  `←/→` other items. No approve key: decisions go through the chat (§13.3).
+- **Peek-on-type**: when the input starts with a waiting item's id (`T5`, `t5`, `T5:`),
+  the widget expands that item in place to a few lines of its brief (question,
+  recommendation, original asker; for reviews the summary and file counts); it collapses
+  when the prefix changes or the message is sent. Implemented with
+  `ctx.ui.onTerminalInput` (observing only, never consuming keys) plus
+  `ctx.ui.getEditorText()`, debounced. An autocomplete provider suggests the waiting
+  items after `T` at the start of the input.
+
+### 13.7 GitHub Copilot CLI adapter
+
+Verified in a spike (Copilot CLI 1.0.112, SDK 1.0.34): an extension (`extension.mjs`,
+`joinSession` from `@github/copilot-sdk/extension`) receives `session.idle` and wakes
+the agent with `session.send({prompt, source: "automation-atf"})` (recorded as an
+automation turn, not as the user); it inherits the coordinator's `ATF_*` environment;
+Copilot finds the ATF skill without setup; herdr shows it idle while it waits.
+
+- **Wake:** as pi, armed from the environment at start (the launcher sets `ATF_DIR`,
+  `ATF_PLAN`, `ATF_ACTOR`, `ATF_ROLE`, `ATF_WAKE`; an extension cannot change the agent's
+  shell environment). Requires Copilot's experimental mode, a saved setting
+  (`/settings experimental on`, or `--experimental` once), and a one-time approval of
+  the extension.
+- **What waits for the human:** no widget; after each turn (`session.idle`) one
+  ephemeral transcript line `for you: T5 question · T1 review` (`session.log(…,
+  {ephemeral: true})`); `/atf` lists, `/atf T5` prints the brief, ephemerally. Optionally
+  `session.ui.select` to pick an item.
+- **Sessions:** the launcher chooses the id (`copilot --session-id <uuid>`) and records
+  it (`plan.session`, `task.session`); resume with `--resume <id>`.
+- **herdr:** agent kind `copilot` (start/resume args as above), usable for the
+  coordinator and for subagents (`agent_kind` in the plugin config).
+- **Packaging:** a Copilot plugin (skill, extension) or `~/.copilot/extensions/atf/`.
+
+### 13.8 Protocol changes
+
+All additive (§11): `data.relayed {from, quote, via}` on `task.note`, `task.status`
+(done, and the `changes` send-back) and `plan.note`; `data.recommend` on `task.status`
+to blocked. New CLI: `--relay`, `--recommend`, `atf brief`, `atf inbox --for`.
+
+### 13.9 Implementation order
+
+1. Protocol and CLI: `--relay` (fold, permissions, rendering), `--recommend`,
+   `atf brief`, `inbox --for`; tests.
+2. Skill: relay rule, asking in the chat, the end-of-turn list.
+3. pi extension: widget, peek, peek-on-type (on top of the existing wake).
+4. Copilot adapter: extension (wake, end-of-turn line, `/atf`), herdr kind `copilot`,
+   session ids, packaging.
+5. Later (the board is not changed now): show relayed decisions as "human (via
+   coordinator)" there too.
