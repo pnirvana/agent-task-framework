@@ -88,6 +88,8 @@ For each task:
      answers or asks the human); you continue with other ready tasks or end. Questions
      belong in a block, not in a note: a note wakes nobody.
    - `atf fail T3 -m "<what was tried, why it failed>"`: cannot be done as specified.
+   **Start every message with one short sentence** (the result, or the question itself),
+   then the details: overviews show only that first sentence.
 7. **Started early?** If your task depends on unfinished tasks and you were told to start
    early (`atf start <id> --early`), do only what does not need them. Then write a
    checkpoint and `atf block <id> --on <deps> -m "<what you need>"`.
@@ -111,11 +113,25 @@ your turn: you will be woken"**, your harness waits for you (e.g. the pi extensi
 your turn right away; you are woken with the report when something needs you, and the
 human can prompt you meanwhile. Otherwise `atf wait` blocks: run it in a loop.
 
-**Your last message of a turn is for the human**, who reads your terminal when they come
-by: what you decided or did (one or two lines), then what waits for them, each item with
-its task id and the question in a few words ("T5: approve the SQLite order schema?"), or
-"nothing needs you". Run `atf wait` *before* writing it. Do not end with ATF mechanics
-(checkpoints written, "waiting", "ATF will wake me"): that is noise to them.
+**Your chat is where the human works with you.** They answer your questions, review and
+give directions here, and see what waits for them next to the chat (their harness may
+show it, or they ask you). Two rules make that work:
+
+- **Record what they decide, as theirs.** When the human answers, approves, rejects or
+  decides something in your chat, record it on the task (or the plan) with their words,
+  verbatim, in `--relay`: `atf note T5 --relay "yes, go with SQLite"` (an answer: it
+  resolves the question), `atf done T1 --relay "looks good, approve"` (an approval, also
+  of a review that waits for the human), `atf changes T1 --relay "<their words>" -m "1.
+  <your instructions>"`, `atf plan note --relay "<their words>"`. Then act on it as on any
+  input (step 7). Relay only what the human actually said; your own decisions are plain
+  notes. Input they write elsewhere (board, editor) reaches you as `human` in `atf wait`.
+- **Your last message of a turn is for the human**, who reads your chat when they come
+  by: what you decided or did (one or two lines), then what waits for them, each item
+  with its task id and the question in a few words ("T5: approve the SQLite order
+  schema?"), or "nothing needs you". Run `atf wait` *before* writing it. Do not end with
+  ATF mechanics (checkpoints written, "waiting", "ATF will wake me"): that is noise to
+  them. `atf inbox --for human` lists what waits for them; `atf brief T5` shows one
+  request in full (also useful when they ask "what was T5 again?").
 
 0. **Set up the project, once.** Run `atf whoami`: if it fails with "no .atf directory
    found", run `atf init` in the directory you coordinate the work from; that directory
@@ -185,9 +201,11 @@ its task id and the question in a few words ("T5: approve the SQLite order schem
    - **Questions from subagents.** Answer them when you can: record the answer on the
      task (`atf note T4 "use cookies" --kind decision`), then spawn a new agent for it,
      with the answer in its instructions. When the human must decide, **escalate it on
-     the task**, never only in your terminal: `atf block T4 --for human -m "<the
-     question, the context needed to answer it, and your recommendation>"`. The human
-     sees it on that task with its context; their answer comes back to you as `human`.
+     the task**, never only in your chat: `atf block T4 --for human -m "<the question in
+     one sentence, then the context needed to answer it>" --recommend "<your view>"`. The
+     human sees it on that task with its context. **Also ask it in your chat** (in your
+     message for the human), so they can answer you right there; record that answer with
+     `--relay`. An answer they give elsewhere comes back to you as `human`.
      A question about the whole plan (`atf plan ask "<question + context + your view>"`)
      only for a decision that belongs to no task, e.g. the scope or direction of the
      plan. One question, short, with your recommendation. Never use it to list or repeat
@@ -212,8 +230,10 @@ its task id and the question in a few words ("T5: approve the SQLite order schem
      If a subagent says the human must test something, decide whether that is needed;
      if so, hand the review to them: `atf edit T4 --reviewer human`.
    - **Reviews by the human.** Tasks whose reviewer is the human are not yours to approve
-     (`atf done` refuses; `atf wait` does not report them). Their approval marks the task
-     done; anything else they write comes to you as `human` (step 7).
+     (`atf done` refuses; `atf wait` does not report them). Mention them in your message
+     for the human. If they approve in your chat, record it: `atf done T4 --relay "<their
+     words>"`; an approval elsewhere marks the task done by itself; anything else they
+     write comes to you (in your chat, or as `human`, step 7).
 7. **The human's input** (`human` in `atf wait`; `atf show <task>` lists it under "human
    input", `atf plan show` for the plan). It is addressed to you, not to the subagent:
    **interpret it and decide**. You may combine, correct, extend or narrow it, and turn it

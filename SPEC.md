@@ -685,7 +685,7 @@ to blocked. New CLI: `--relay`, `--recommend`, `atf brief`, `atf inbox --for`.
 
 1. Protocol and CLI: `--relay` (fold, permissions, rendering), `--recommend`,
    `atf brief`, `inbox --for`; tests. **Done.**
-2. Skill: relay rule, asking in the chat, the end-of-turn list.
+2. Skill: relay rule, asking in the chat, the end-of-turn list. **Done.**
 3. pi extension: widget, peek, peek-on-type (on top of the existing wake).
 4. Copilot adapter: extension (wake, end-of-turn line, `/atf`), herdr kind `copilot`,
    session ids, packaging.
