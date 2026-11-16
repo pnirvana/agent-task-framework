@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Demo stand-in for the Maven wrapper: prints Maven-like output and writes surefire reports.
+# The api module's PriceTest compares the computed total (1299) with
+# api/src/test/resources/expected-total.txt.
+cd "$(dirname "$0")"
+say() { echo "[INFO] $*"; }
+T0=$(date +%s)
+say "Scanning for projects..."
+say "------------------------------------------------------------------------"
+say "Reactor Build Order:"
+for m in core api web; do say "  demo-$m [jar]"; done
+mod() { # name idx tests class
+  say ""
+  say "--------------------------< com.demo:$1 >---------------------------"
+  say "Building $1 1.0-SNAPSHOT [$2/3]"
+  say "--------------------------------[ jar ]---------------------------------"
+  say "--- maven-resources-plugin:3.3.1:resources (default-resources) @ $1 ---"
+  sleep 2
+  say "--- maven-compiler-plugin:3.13.0:compile (default-compile) @ $1 ---"
+  say "Compiling $((RANDOM % 20 + 8)) source files with javac [debug release 21] to target/classes"
+  sleep 4
+  say "--- maven-surefire-plugin:3.2.5:test (default-test) @ $1 ---"
+  say ""
+  say "-------------------------------------------------------"
+  say " T E S T S"
+  say "-------------------------------------------------------"
+  mkdir -p "$1/target/surefire-reports"
+}
+report() { # module class tests failures failing-name
+  local f="$1/target/surefire-reports/TEST-$2.xml"
+  { echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    echo "<testsuite name=\"$2\" tests=\"$3\" failures=\"$4\" errors=\"0\" skipped=\"0\">"
+    [ -n "$5" ] && echo "<testcase name=\"$5\" classname=\"$2\" time=\"0.04\"><failure message=\"expected total\"/></testcase>"
+    echo "</testsuite>"; } > "$f"
+}
+cls() { # module class tests seconds
+  say "Running $2"; sleep "$4"
+  say "Tests run: $3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: $4.1$((RANDOM % 9)) s - in $2"
+  report "$1" "$2" "$3" 0
+}
+mod core 1; cls core com.demo.core.MoneyTest 14 4; cls core com.demo.core.CurrencyTest 9 3; cls core com.demo.core.RoundingTest 22 5
+mod api 2; cls api com.demo.api.OrderTest 18 4; cls api com.demo.api.CartTest 11 3
+say "Running com.demo.api.PriceTest"; sleep 4
+exp=$(tr -d '[:space:]' < api/src/test/resources/expected-total.txt)
+if [ "$exp" != "1299" ]; then
+  echo "[ERROR] Tests run: 7, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 3.92 s <<< FAILURE! - in com.demo.api.PriceTest"
+  echo "[ERROR] com.demo.api.PriceTest.totalIncludesVat  Time elapsed: 0.041 s  <<< FAILURE!"
+  echo "org.opentest4j.AssertionFailedError: expected: <$exp> but was: <1299>"
+  echo "	at com.demo.api.PriceTest.totalIncludesVat(PriceTest.java:42)"
+  report api com.demo.api.PriceTest 7 1 totalIncludesVat
+  say ""; say "Results:"; say ""
+  echo "[ERROR] Failures: "
+  echo "[ERROR]   PriceTest.totalIncludesVat:42 expected: <$exp> but was: <1299>"
+  echo "[ERROR] Tests run: 81, Failures: 1, Errors: 0, Skipped: 0"
+  say "------------------------------------------------------------------------"
+  say "Reactor Summary for demo 1.0-SNAPSHOT:"
+  say "demo-core .......................................... SUCCESS"
+  say "demo-api ........................................... FAILURE"
+  say "demo-web ........................................... SKIPPED"
+  say "------------------------------------------------------------------------"
+  say "BUILD FAILURE"
+  say "------------------------------------------------------------------------"
+  say "Total time:  $(( $(date +%s) - T0 )) s"
+  echo "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test (default-test) on project api: There are test failures."
+  echo "[ERROR] Please refer to api/target/surefire-reports for the individual test results."
+  exit 1
+fi
+say "Tests run: 7, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 3.9 s - in com.demo.api.PriceTest"
+report api com.demo.api.PriceTest 7 0
+mod web 3; cls web com.demo.web.CheckoutPageTest 12 6; cls web com.demo.web.SessionTest 6 3
+say "------------------------------------------------------------------------"
+say "Reactor Summary for demo 1.0-SNAPSHOT:"
+for m in core api web; do say "demo-$m .......................................... SUCCESS"; done
+say "------------------------------------------------------------------------"
+say "BUILD SUCCESS"
+say "------------------------------------------------------------------------"
+say "Total time:  $(( $(date +%s) - T0 )) s"

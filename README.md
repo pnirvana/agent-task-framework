@@ -30,6 +30,7 @@ plans, break them into tasks, and report progress, in a format any frontend can 
 | `src/live.mjs` | live artifacts (SPEC §14): live kinds (built-in and plugins), summaries of builds, tests, pipelines, logs |
 | `docs/live-plugins.md` | writing a live plugin (a new kind of command on the board, e.g. GitLab pipeline jobs) |
 | `examples/live-plugins/` | plugin template, GitLab sample plugin, fake GitLab server |
+| `examples/live-demo/` | a sandbox project (stand-in Maven, CI, app) where agents show the live view at work |
 | `bin/atf.mjs` | reference CLI (`bin/atf` is a PATH shim) |
 | `skill/atf/SKILL.md` | agent instructions for coordinator and subagent roles (Agent Skills format; `atf skill install`) |
 | `adapters/herdr/` | herdr plugin: board TUI, pane labels, sidebar progress, notifications, spawn, agent lifecycle |

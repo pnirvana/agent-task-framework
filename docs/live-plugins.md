@@ -15,6 +15,8 @@ agent asked to write one, read it to the end. The checklist in
 - Full example (GitLab pipeline with jobs per stage, from the agent's output and the GitLab
   API): [`examples/live-plugins/gitlab.mjs`](../examples/live-plugins/gitlab.mjs)
 - Built-in kinds (the same interface): `BUILTIN` in [`src/live.mjs`](../src/live.mjs)
+- A sandbox where real agents build, test, wait for a pipeline and run an app, all with
+  stand-ins (no Maven, no GitLab): [`examples/live-demo/`](../examples/live-demo/README.md)
 
 ## How it fits together
 
@@ -219,6 +221,9 @@ atf live-try gitlab output.txt --json            # everything as JSON
   `<project>/.atf/plans/<plan>/live/runs/` (`atf show <task> --json` lists them as
   artifacts with their `cmd`). Or run the command yourself and save its output:
   `glab ci status > out.txt 2>&1`.
+- To see it end to end with real agents, without your real tools: the sandbox in
+  [`examples/live-demo/`](../examples/live-demo/README.md) (`setup.sh` creates a project
+  with a plan; change its stand-ins to print what your tools print).
 - Test with several outputs: running, finished ok, failed, cut off (a long run whose
   beginning is past `tailBytes`), empty.
 - A plugin is a plain ES module: unit-test it with `node --test` by importing it and

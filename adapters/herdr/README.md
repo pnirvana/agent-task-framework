@@ -220,7 +220,8 @@ tests`); the first run has no total.
 with its jobs per stage, from the agent's output or the GitLab API. One `.mjs` file in
 `~/.config/atf/live/`; restart the board to load it. `atf live-kinds` lists the kinds,
 `atf live-try` tries one on a saved output. Guide:
-[docs/live-plugins.md](../../docs/live-plugins.md).
+[docs/live-plugins.md](../../docs/live-plugins.md). To see all of it at work without Maven or
+GitLab: `sh examples/live-demo/setup.sh <dir>` ([examples/live-demo](../../examples/live-demo/README.md)).
 
 ### Plugin config (optional)
 
