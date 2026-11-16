@@ -145,7 +145,7 @@ function spawnAgent() {
     const kind = flags.kind || pluginConfig().agent_kind || 'pi';
     const cfg = agentKinds()[kind] || {};
     const raw = ((force || lp.mode) === 'resume' ? cfg.resume : cfg.start) || [];
-    let used = skillInstalled() ? raw.filter((a, i) => a !== '{skill}' && raw[i + 1] !== '{skill}') : raw;
+    let used = [...(skillInstalled() ? raw.filter((a, i) => a !== '{skill}' && raw[i + 1] !== '{skill}') : raw), ...(cfg.agent || [])];
     if (agentName) {
       const def = resolveAgentDef(agentName, path.dirname(root));
       if (!def) fail(`unknown agent definition "${agentName}" (see \`atf-herdr agents\`)`);

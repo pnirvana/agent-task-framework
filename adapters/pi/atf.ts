@@ -548,11 +548,12 @@ export default function (pi: any) {
 		// a task that asks nothing of the human (opened from the task list): where it stands
 		if (b.latest) L.push("", dim(`latest${b.latest.percent != null ? ` (${b.latest.percent}%)` : ""}: `) + b.latest.message);
 		if (b.checkpoint) L.push("", dim("checkpoint: ") + b.checkpoint.message);
+		if (b.live?.length) L.push("", dim("live (builds, tests, pipelines):"), ...b.live.map((l: string) => l.replace(/^ {2}/, "")));
 		if (t.acceptance?.length) L.push("", dim("acceptance:"), ...t.acceptance.map((a: string) => `  - ${a}`));
 		else if (t.description) L.push("", dim("goal: ") + t.description);
 		if (b.files?.length)
 			L.push("", dim("files: ") + b.files.map((f: any) => `${f.path}${f.added != null ? ` (+${f.added}${f.removed ? ` -${f.removed}` : ""}${f.state === "new" ? ", new" : ""})` : ` (${f.state})`}`).join("  "));
-		const other = (b.artifacts ?? []).filter((a: any) => a.kind !== "file");
+		const other = (b.artifacts ?? []).filter((a: any) => a.kind !== "file" && !a.live && !a.cmd);
 		if (other.length) L.push(dim("artifacts: ") + other.map((a: any) => `${a.kind}: ${a.ref}`).join("  "));
 		return L;
 	}

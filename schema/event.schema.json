@@ -61,7 +61,7 @@
     },
     {
       "if": { "properties": { "type": { "const": "task.artifact" } } },
-      "then": { "properties": { "data": { "required": ["ref"], "properties": { "kind": { "enum": ["file", "commit", "branch", "pr", "url", "other"] }, "ref": { "type": "string" } } } } }
+      "then": { "properties": { "data": { "required": ["ref"], "properties": { "kind": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" }, "ref": { "type": "string" }, "live": { "type": "boolean" }, "cmd": { "type": "string" }, "cwd": { "type": "string" }, "exit": { "type": ["integer", "null"] }, "duration_ms": { "type": "number" }, "since": { "type": "string" }, "extra": { "type": "object" } } } } }
     }
   ]
 }

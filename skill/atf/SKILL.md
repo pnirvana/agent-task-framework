@@ -68,6 +68,11 @@ For each task:
 4. Record outputs as you produce them:
    `atf artifact T3 src/auth/callback.ts` · `atf artifact T3 abc1234 --kind commit` ·
    `atf artifact T3 feature/login --kind branch` (reviewers open these directly)
+   Something running longer than your command (in the background, or output you check
+   later, e.g. a server log)? Register what you watch: `atf artifact T3 <file> --live`.
+   Run builds, tests and pipeline checks as you normally would: the board sees them.
+   (Asked to make the board show a new kind of command, e.g. CI pipeline jobs? That is a
+   live plugin: `atf live-kinds` names the guide.)
 5. Record decisions others need to know: `atf note T3 "chose cookie sessions (no redis)" --kind decision`
 6. Finish with exactly one of:
    - `atf done T3 -m "<what was done, where, how verified>"`: all acceptance criteria met

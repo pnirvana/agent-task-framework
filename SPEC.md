@@ -734,3 +734,117 @@ to blocked. New CLI: `--relay`, `--recommend`, `atf brief`, `atf inbox --for`, `
    and reviews approved in the chat, both recorded with `--relay`.
 5. Later (the board is not changed now): show relayed decisions as "human (via
    coordinator)" there too.
+
+## 14. Live artifacts: what agents run and wait for
+
+### 14.1 Why
+
+Most of an agent's time goes into builds, test runs and waiting: on a Maven build, on a
+GitLab pipeline, on a server to come up. None of it shows in the plan until the agent
+reports, and agents report at milestones, not while `mvn verify` runs for nine minutes.
+The human (and the coordinator) should see what runs, how far it is, and what failed,
+without asking the agent and without spending its tokens.
+
+### 14.2 Principles
+
+- **Observe, never wrap.** Agents run their usual commands (`mvn -B test`, `glab ci
+  status --live`); models know these workflows well, and an ATF wrapper around them would
+  change what the model sees and does. A harness hook observes the commands beside the
+  agent: their text, directory, output and exit code. The model's context is unchanged.
+- **The agent points, frontends read.** No progress reporting by the agent: files are
+  summarized by the frontends (`src/live.mjs`), from the file itself and, for Maven, its
+  test reports.
+- **Directories belong to runs, not tasks.** A task can touch several repositories, or
+  none. Each observed command carries its own directory (`cd api && mvn test` runs in
+  `api`); a kind finds its reports relative to it (Maven: `target/surefire-reports`,
+  `target/failsafe-reports` of the module and its submodules, written since the run started).
+- **Nothing misattributed.** Only what an agent's own commands produce is attributed to
+  its task; there is no scanning of project directories (two agents building in one
+  repository could not be told apart).
+
+### 14.3 Sources
+
+1. **Harness hook** (pi: `adapters/pi/atf-live.ts`, loaded into every pi agent
+   atf-herdr starts; installed as a pi package it loads with the ATF extension). For an
+   agent with `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR` and a leaf task of its own in progress:
+   - each shell command is classified: `maven`, `tests` (npm/jest/vitest/pytest/go/cargo/
+     node --test/unittest), `pipeline` (`glab ci|pipeline`, `gh run watch|view`, `gh pr
+     checks`, `curl …/pipelines`), `wait` (`while/until … sleep` loops, `watch -n`),
+     `build` (gradle, make, docker build, …), or ordinary;
+   - **while it runs** it is listed in `<plan>/live/<actor>.json` (ephemeral, not in the
+     log: `{actor, pid, runs: [{id, task, kind, cmd, cwd, since, out}]}`; `out` is the
+     output so far). Frontends ignore it once the agent's process is gone. Ordinary
+     commands appear after 4 s;
+   - **when it ends**, a classified command, or any command that ran 30 s or more, is
+     recorded: its full output is kept under `<plan>/live/runs/`, and a `task.artifact`
+     is written with `cmd`, `cwd`, `since`, `exit`, `duration_ms` and the summary line as
+     `description`. Quick ordinary commands leave nothing;
+   - a file the command writes in the background (`… > build.log &`, `nohup`, `| tee
+     f`), or a `.log` file the agent reads twice or more, is registered as a live artifact.
+2. **Explicit registration** for what the hook cannot see: `atf artifact T3 <file>
+   --live [--kind log|maven|tests|pipeline] [--cwd DIR]` (a build started elsewhere, a
+   server log). The skill mentions it in one line; it is never required.
+
+Without a hook (a harness that offers none) only (2) remains: the board shows less,
+nothing wrong.
+
+### 14.4 Protocol
+
+Additive (§11). `task.artifact` gains optional fields `live` (watched while the task
+runs), `cmd`, `cwd`, `since`, `exit`, `duration_ms` and `extra` (what the kind's `onStart`
+returned, e.g. Maven's baseline file). A recorded run is an artifact with `cmd` and no
+`live`. Its `kind` is a live kind: the built-in `log`, `maven`, `tests`, `pipeline`, or a
+plugin's (any `^[a-z][a-z0-9-]{0,31}$`). The log holds pointers and summaries only, never
+output. Readers that do not know a kind show it as any other artifact.
+
+### 14.5 Kinds, summaries and views
+
+A **live kind** recognizes commands (`match`), summarizes their output (`summarize` →
+`{state: running|waiting|ok|failed|unknown|gone, line, counts, details}`), and may show a
+detailed view (`view`), fetch data from elsewhere (`refresh`, e.g. a CI API), choose what
+`L` opens (`open`), and act when a matching command starts or ends in the agent's harness
+(`onStart`, `onEnd`). The built-in kinds:
+- `maven`: reactor modules and their state, test classes done from the surefire/failsafe
+  reports (the class running now from the log), progress against the previous run of the
+  same directory (its reports, taken when a run starts: `onStart`; kept in
+  `<plan>/live/baselines/` so a `mvn clean` loses nothing), BUILD SUCCESS/FAILURE, failing
+  tests with their message. The pom decides what runs (includes, groups, `-Dtest`), so
+  sources are never counted: without a previous run there is no total;
+- `tests`: totals from jest/vitest, pytest, TAP (`node --test`), unittest, go/cargo;
+  details: failing tests;
+- `pipeline`: pipeline id and URL (GitLab `/-/pipelines/N`, GitHub `actions/runs/N`) and
+  the latest status word; `L` opens the URL;
+- `wait` (polling loops) and `build` (other build tools): shown like a log, recorded as `log`;
+- `log` (and any other text file): error/warning counts and the last line.
+
+A newer run of the same kind in the same directory replaces an older one (generic logs:
+the same command too): frontends show the current runs, and a line for the replaced ones
+(`atf live <task> --all` lists them). A task's row shows `✗` only for a current run that
+failed.
+
+Every frontend shows the same: `atf show` / `atf brief` ("live:"), the pi peek, Copilot
+`/peek`, `atf live <task> [--watch]` (the full view), and the herdr board: a badge on task
+rows (`⚙ 2/3 api · 74/~99 tests` while a build runs, `⧖ pipeline #4712 running` while the
+agent waits, `✗ BUILD FAILURE …`), a "live" section in the task details and the
+Overview's context panel, and `L` to open it (the kind's `open`, else `atf live --watch`
+for kinds with a view, else the output followed in a herdr tab or a finished one in `less`).
+
+### 14.6 Plugins
+
+A plugin adds a kind or replaces a built-in one: an ES module in `~/.config/atf/live/`
+(or `$ATF_LIVE_PLUGINS`) whose default export is a kind definition (or an array). The
+built-in kinds use the same interface (`BUILTIN` in `src/live.mjs`). Every process that
+shows or records live data loads them (the agent's hook, the board, the CLI); errors are
+collected and reported (`atf live-kinds`), never fatal. Only the board (and `atf live`)
+calls `refresh`, throttled, so credentials are needed on the board's machine only.
+`atf live-try <kind|plugin.mjs> <output-file>` runs a kind on a saved output without an
+agent. The interface, rules and a step-by-step procedure (written for agents that build
+plugins): [`docs/live-plugins.md`](docs/live-plugins.md); examples: `examples/live-plugins/`
+(a template; GitLab pipeline jobs per stage from the output or the GitLab API; a fake
+GitLab server for trying it).
+
+### 14.7 Not yet
+
+- A Copilot CLI hook (its extension API has tool events; the same `src/live.mjs`).
+- Retention: run outputs stay under `<plan>/live/runs/` until the plan directory is removed.
+- More built-in kinds (gradle test reports, coverage).

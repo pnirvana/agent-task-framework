@@ -23,7 +23,7 @@ export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'review', 'done'
 export const TERMINAL = new Set(['done', 'failed', 'cancelled']);
 export const NOTE_KINDS = ['info', 'question', 'decision', 'warning', 'checkpoint', 'feedback'];
 export const RESUME_POLICIES = ['auto', 'resume', 'fresh'];
-export const ARTIFACT_KINDS = ['file', 'commit', 'branch', 'pr', 'url', 'other'];
+export const ARTIFACT_KINDS = ['file', 'commit', 'branch', 'pr', 'url', 'other', 'log', 'maven', 'tests', 'pipeline'];
 
 // Allowed task status transitions (enforced by writers, NOT by fold).
 export const TRANSITIONS = {
@@ -242,7 +242,15 @@ export function fold(events) {
         break;
       }
       case 'task.artifact':
-        t.artifacts.push({ ...entry, kind: d.kind || 'other', ref: d.ref, description: d.description ?? null });
+        t.artifacts.push({
+          ...entry,
+          kind: d.kind || 'other',
+          ref: d.ref,
+          description: d.description ?? null,
+          // live artifacts (§14): watched while the task runs; runs recorded by a harness hook
+          ...(d.live ? { live: true } : {}),
+          ...Object.fromEntries(['cmd', 'cwd', 'exit', 'duration_ms', 'since', 'extra'].filter((k) => d[k] != null).map((k) => [k, d[k]])),
+        });
         break;
     }
   }

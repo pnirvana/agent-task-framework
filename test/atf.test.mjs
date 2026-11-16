@@ -1166,3 +1166,202 @@ test('--as in another actor\'s shell does not take over its herdr pane', () => {
   assert.ok(byW1.length && byW1.every((e) => !e.actor.ctx?.herdr_pane));
   assert.equal(log.find((e) => e.type === 'task.assigned' && e.actor.id === 'lead').actor.ctx.herdr_pane, 'w1:p9');
 });
+
+test('§14 live: classify commands, output files, summarizers', async () => {
+  const L = await import('../src/live.mjs');
+  assert.equal(L.classify('mvn -B test'), 'maven');
+  assert.equal(L.classify('cd api && ./mvnw verify'), 'maven');
+  assert.equal(L.classify('glab ci status --live'), 'pipeline');
+  assert.equal(L.classify('gh run watch 42'), 'pipeline');
+  assert.equal(L.classify('until curl -sf localhost:8080/health; do sleep 2; done'), 'wait');
+  assert.equal(L.classify('for i in $(seq 1 30); do\n  r=$(curl -fsS "localhost:8765/api/v4/projects/demo/pipelines/$id")\n  sleep 10\ndone'), 'pipeline');
+  assert.equal(L.classify('for i in 1 2 3; do\n  test -f done.txt && break\n  sleep 5\ndone'), 'wait');
+  assert.equal(L.classify('npm test'), 'tests');
+  assert.equal(L.classify('echo "mvn test"'), null);
+  assert.equal(L.classify('ls -la'), null);
+  assert.equal(L.cwdOf('cd api && mvn test', '/w'), '/w/api');
+  assert.deepEqual(L.outputFiles('nohup mvn test > /tmp/b.log 2>&1 &', '/w').map((f) => f.file), ['/tmp/b.log']);
+  assert.deepEqual(L.outputFiles('mvn test | tee build.log', '/w').map((f) => f.file), ['/w/build.log']);
+  assert.deepEqual(L.outputFiles('mvn test > out.txt', '/w'), []); // foreground: captured anyway
+  assert.deepEqual(L.outputFiles('x > /dev/null &', '/w'), []);
+  assert.deepEqual(L.outputFiles('./run-app.sh > app.log 2>&1 &\npid=$!\nprintf "%s" "$pid" > /tmp/app.pid', '/w').map((f) => f.file), ['/w/app.log']);
+
+  const mvn = '[INFO] Building core 1.0 [2/5]\n[INFO] Tests run: 10, Failures: 1, Errors: 0, Skipped: 2, Time elapsed: 0.5 s - in com.x.FooTest\n[ERROR] com.x.FooTest.testBar:42 expected\n[INFO] Tests run: 10, Failures: 1, Errors: 0, Skipped: 2\n';
+  const running = L.summarizeText('maven', mvn);
+  assert.equal(running.state, 'running');
+  assert.equal(running.counts.tests, 10); // the Results: total is not counted twice
+  assert.match(running.line, /2\/5 core · 10 tests · 1 ✗/);
+  const failed = L.summarizeText('maven', mvn + '[INFO] BUILD FAILURE\n');
+  assert.equal(failed.state, 'failed');
+  assert.match(failed.line, /^BUILD FAILURE in core/);
+  assert.equal(L.summarizeText('tests', 'Tests:       2 failed, 410 passed, 412 total\n').counts.failed, 2);
+  assert.equal(L.summarizeText('tests', '# tests 45\n# pass 45\n# fail 0\n').state, 'ok');
+  const pipe = L.summarizeText('pipeline', 'https://gitlab.example.com/g/p/-/pipelines/98765\n(running) build\n');
+  assert.equal(pipe.state, 'waiting');
+  assert.equal(pipe.counts.url, 'https://gitlab.example.com/g/p/-/pipelines/98765');
+  assert.equal(L.summarizeText('pipeline', 'Pipeline state: success').state, 'ok');
+
+  // surefire reports beat the log
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-live-'));
+  fs.mkdirSync(path.join(dir, 'core', 'target', 'surefire-reports'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'core', 'target', 'surefire-reports', 'TEST-com.x.FooTest.xml'), '<testsuite name="com.x.FooTest" tests="12" failures="1" errors="0" skipped="0"><testcase name="testBar" classname="com.x.FooTest"><failure/></testcase></testsuite>');
+  const rep = L.surefire(dir);
+  assert.equal(rep.run, 12);
+  assert.deepEqual(rep.failing, ['FooTest#testBar']);
+  assert.deepEqual(L.summarizeText('maven', '[INFO] Building core 1.0 [1/1]\n[ERROR] com.x.FooTest.testBar  Time elapsed: 0.04 s  <<< FAILURE!\n', { cwd: dir }).details, ['✗ FooTest#testBar']);
+});
+
+// the pi extension is TypeScript: node runs it directly from 23.6 (type stripping)
+const nodeStripsTypes = +process.versions.node.split('.')[0] > 23 || (+process.versions.node.split('.')[0] === 23 && +process.versions.node.split('.')[1] >= 6);
+test('§14 live: artifact --live, the pi hook records runs, show/brief summarize them', { skip: !nodeStripsTypes && 'needs node >= 23.6 to load the .ts extension' }, async () => {
+  const { run, dir, env } = sandbox();
+  run(['add', 'Build']);
+  run(['dispatch', 'T1', '--name', 'w1']);
+  run(['start', 'T1', '--as', 'w1']);
+  fs.writeFileSync(path.join(dir, 'server.log'), 'started\nERROR boom\n');
+  run(['artifact', 'T1', 'server.log', '--live', '--as', 'w1']);
+  let t = run(['show', 'T1']);
+  run(['artifact', 'T1', 'https://ci.example.com/g/p/-/pipelines/7', '--live', '--as', 'w1']); // a URL: not a live file
+  assert.equal(run(['show', 'T1']).artifacts.find((a) => a.ref.startsWith('https:')).kind, 'url');
+  run(['artifact', 'T1', 'server.log', '--live', '--as', 'w1']); // again: no second entry
+  t = run(['show', 'T1']);
+  assert.equal(t.artifacts.filter((a) => a.live).length, 1);
+  const live = t.artifacts.find((a) => a.live);
+  assert.equal(live.kind, 'log');
+  assert.equal(live.ref, fs.realpathSync(path.join(dir, 'server.log')));
+
+  // the pi extension, driven like pi does: start, streamed output, end
+  const root = path.join(dir, '.atf');
+  const plan = fs.readdirSync(path.join(root, 'plans'))[0];
+  const saved = { ...process.env };
+  Object.assign(process.env, { ATF_DIR: root, ATF_PLAN: plan, ATF_ACTOR: 'w1', ATF_ROLE: 'subagent', ATF_REGISTRY: env.ATF_REGISTRY });
+  delete globalThis.__atfLiveLoaded;
+  try {
+    const h = {};
+    (await import('../adapters/pi/atf-live.ts')).default({ on: (e, f) => (h[e] = f) });
+    const L = await import('../src/live.mjs');
+    await h.tool_execution_start({ toolName: 'bash', toolCallId: 'c1', args: { command: 'mvn -B test' } }, { cwd: dir });
+    await h.tool_execution_update({ toolCallId: 'c1', partialResult: { content: [{ type: 'text', text: '[INFO] Building core 1.0 [1/2]\n' }] } });
+    const now = L.activeRuns(root, plan);
+    assert.equal(now.length, 1);
+    assert.equal(now[0].task, 'T1');
+    assert.equal(L.summarize(now[0]).line, '1/2 core');
+    await h.tool_execution_start({ toolName: 'bash', toolCallId: 'c2', args: { command: 'ls' } }, { cwd: dir });
+    await h.tool_execution_end({ toolCallId: 'c2', durationMs: 10, isError: false, result: { content: [{ type: 'text', text: 'x' }] } });
+    await h.tool_execution_end({ toolCallId: 'c1', durationMs: 4000, isError: true, result: { content: [{ type: 'text', text: '[INFO] BUILD FAILURE\n\nCommand exited with code 1' }] } });
+    assert.equal(L.activeRuns(root, plan).length, 0);
+    await h.session_shutdown({});
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+  t = run(['show', 'T1']);
+  const runs = t.artifacts.filter((a) => a.cmd && !a.live);
+  assert.equal(runs.length, 1); // the quick `ls` is not recorded
+  assert.equal(runs[0].kind, 'maven');
+  assert.equal(runs[0].exit, 1);
+  assert.match(runs[0].description, /BUILD FAILURE/);
+  const text = execFileSync('node', [ATF, 'brief', 'T1'], { cwd: dir, env }).toString();
+  assert.match(text, /live:/);
+  assert.match(text, /maven BUILD FAILURE .*exit 1/);
+  assert.match(text, /log 1 error/);
+});
+
+test('§14 live: maven test progress against the previous run (baseline)', async () => {
+  const L = await import('../src/live.mjs');
+  const log = [
+    '[INFO] Reactor Build Order:',
+    '[INFO]   demo-core [jar]',
+    '[INFO]   demo-api [jar]',
+    '[INFO] ',
+    '[INFO] --------------------------< com.demo:core >---------------------------',
+    '[INFO] Building core 1.0-SNAPSHOT [1/2]',
+    '[INFO] Running com.demo.core.MoneyTest',
+    '[INFO] Tests run: 14, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 4.1 s - in com.demo.core.MoneyTest',
+    '[INFO] Running com.demo.core.RoundingTest',
+  ].join('\n');
+  const baseline = { classes: { 'com.demo.core.MoneyTest': { module: 'core', tests: 14 }, 'com.demo.core.RoundingTest': { module: 'core', tests: 22 }, 'com.demo.api.PriceTest': { module: 'api', tests: 7 } } };
+  const bfile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'atf-base-')), 'b.json');
+  fs.writeFileSync(bfile, JSON.stringify(baseline));
+  const s = L.summarizeText('maven', log, { extra: { baseline: bfile }, file: 'x' }); // as the hook's onStart recorded it
+  assert.equal(s.line, '1/2 core · 14/~43 tests');
+  assert.equal(s.counts.percent, 33);
+  const p = s.progress;
+  assert.equal(p.running.cls, 'com.demo.core.RoundingTest');
+  assert.deepEqual(p.dirs.map((d) => [d.module, d.state, d.classesDone, d.classesTotal, d.testsDone, d.testsTotal]), [
+    ['core', 'building', 1, 2, 14, 36],
+    ['api', 'pending', 0, 1, 0, 7],
+  ]);
+  // no previous run: what is done, without a total
+  assert.equal(L.summarizeText('maven', log).line, '1/2 core · 14 tests');
+  // the Results section names the failure and its message
+  const failed = L.summarizeText('maven', log + '\n[ERROR] Failures: \n[ERROR]   RoundingTest.halfUp:12 expected: <3> but was: <2>\n[INFO] BUILD FAILURE\n');
+  assert.deepEqual(failed.progress.failures, [{ test: 'RoundingTest#halfUp', message: 'expected: <3> but was: <2>' }]);
+  // the view renders modules and the running class
+  const text = L.mavenView(s, { width: 100, active: true }).map((l) => l.map(([x]) => x).join('')).join('\n');
+  assert.match(text, /14\/~43 tests/);
+  assert.match(text, /▸ running RoundingTest/);
+});
+
+test('§14 live: a newer run of the same kind and directory replaces the older one', async () => {
+  const L = await import('../src/live.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-sup-'));
+  const f = (name, text) => (fs.writeFileSync(path.join(dir, name), text), path.join(dir, name));
+  const failed = { kind: 'maven', ref: f('a.log', '[INFO] BUILD FAILURE\n'), cmd: 'mvn verify', cwd: '/w', exit: 1, ts: '2026-01-01T00:00:01Z' };
+  const fixed = { kind: 'maven', ref: f('b.log', '[INFO] BUILD SUCCESS\n'), cmd: 'atf progress T1 "x" && mvn verify', cwd: '/w', exit: 0, ts: '2026-01-01T00:00:02Z' };
+  const other = { kind: 'maven', ref: f('c.log', '[INFO] BUILD FAILURE\n'), cmd: 'mvn verify', cwd: '/w/other', exit: 1, ts: '2026-01-01T00:00:03Z' };
+  let live = L.taskLive({ id: 'T1', artifacts: [failed, fixed] });
+  assert.deepEqual(live.recorded.map((a) => a.ref), [fixed.ref]);
+  assert.deepEqual(live.earlier.map((a) => a.ref), [failed.ref]);
+  assert.equal(L.liveBadge(live), null); // the failure was fixed: no ✗ on the row
+  assert.match(L.earlierText(live), /1 earlier run \(1 failed\)/);
+  // another directory is another build: its failure stays current
+  live = L.taskLive({ id: 'T1', artifacts: [failed, fixed, other] });
+  assert.deepEqual(live.recorded.map((a) => a.ref), [other.ref, fixed.ref]);
+  assert.equal(L.liveBadge(live).glyph, '✗');
+  // generic logs replace each other only for the same command
+  const l1 = { kind: 'log', ref: f('d.log', 'x'), cmd: './a.sh', cwd: '/w', exit: 0 };
+  const l2 = { kind: 'log', ref: f('e.log', 'y'), cmd: './b.sh', cwd: '/w', exit: 0 };
+  assert.equal(L.taskLive({ id: 'T1', artifacts: [l1, l2] }).recorded.length, 2);
+});
+
+test('§14 live plugins: load, replace a built-in, broken plugins, live-try', () => {
+  const { dir, env } = sandbox();
+  const plug = path.join(dir, 'plugins');
+  fs.mkdirSync(plug);
+  fs.writeFileSync(path.join(plug, 'deploy.mjs'), `export default {
+    kind: 'deploy', waiting: true, priority: 5,
+    match: (cmd, { unquoted }) => /\\.\\/deploy\\.sh\\b/.test(unquoted),
+    summarize: (text) => ({ state: /DONE/.test(text) ? 'ok' : 'waiting', line: 'deploy ' + (text.match(/step (\\d+)/g) || []).length + ' steps', counts: {}, details: [] }),
+    view: (s) => [[['  ' + s.line, 'cyan']]],
+    open: () => ({ url: 'https://deploy.example.com' }),
+  };`);
+  fs.writeFileSync(path.join(plug, 'tests.mjs'), `export default { kind: 'tests', summarize: () => ({ state: 'ok', line: 'mine', counts: {}, details: [] }) };`);
+  fs.writeFileSync(path.join(plug, 'broken.mjs'), `export default { kind: 'Bad Name', summarize: 1 };`);
+  const e = { ...env, ATF_LIVE_PLUGINS: plug, XDG_CONFIG_HOME: path.join(dir, 'cfg') };
+  const k = JSON.parse(execFileSync('node', [ATF, 'live-kinds', '--json'], { cwd: dir, env: e }).toString());
+  const by = Object.fromEntries(k.kinds.map((x) => [x.kind, x]));
+  assert.ok(by.deploy && by.deploy.waiting && by.deploy.has.includes('view'));
+  assert.equal(by.tests.source, path.join(plug, 'tests.mjs'));
+  assert.equal(by.tests.replaces, 'built-in');
+  assert.equal(k.errors.length, 1);
+  assert.match(k.errors[0].error, /kind must match/);
+  fs.writeFileSync(path.join(dir, 'out.txt'), 'step 1\nstep 2\nDONE\n');
+  const t = JSON.parse(execFileSync('node', [ATF, 'live-try', 'deploy', 'out.txt', '--cmd', './deploy.sh prod', '--json'], { cwd: dir, env: e }).toString());
+  assert.equal(t.match, 'deploy');
+  assert.equal(t.summary.state, 'ok');
+  assert.equal(t.summary.line, 'deploy 2 steps');
+  assert.equal(t.open.url, 'https://deploy.example.com');
+  // a plugin file given directly, without installing it
+  const t2 = JSON.parse(execFileSync('node', [ATF, 'live-try', path.join(plug, 'deploy.mjs'), 'out.txt', '--json'], { cwd: dir, env: { ...env, XDG_CONFIG_HOME: path.join(dir, 'cfg') } }).toString());
+  assert.equal(t2.kind, 'deploy');
+});
+
+test('board: no line wider than the pane (wide characters would wrap and make it flicker)', async () => {
+  const { fit, strWidth } = await import('../adapters/herdr/lib/tui.mjs');
+  const visible = (s) => strWidth(s.replace(/\x1b\[[0-9;]*m/g, ''));
+  assert.equal(strWidth('⏳ 日本 ok'), 10);
+  assert.equal(strWidth('é'), 1); // combining accent
+  for (const segs of [[['x'.repeat(39) + '⏳', '']], [['⏳'.repeat(30), 'red']], [['ab', ''], ['日本語テキスト', 'cyan'], ['🚀 done', '']]]) assert.ok(visible(fit(segs, 40)) <= 40, JSON.stringify(segs));
+  assert.equal(visible(fit([['x'.repeat(39) + '⏳', '']], 40)), 39); // the wide char does not fit: the column stays empty
+});

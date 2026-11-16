@@ -177,6 +177,7 @@ Rows always know their project and plan, so `g`, `a`, `x`, `r`, `o`, `s` and ⏎
 | `g` | focus the owning agent's pane (closes the popup) |
 | `a` / `x` / `r` (`n`) | approve / change request / answer or message, at once; `x`, `r` go to the coordinator |
 | `o` | open the task's artifact (PR, branch diff, commit, file, URL) or the plan's documents |
+| `L` | open what the task's agent runs or watches: a running output followed in a new tab, a finished run in `less`, a pipeline in the browser |
 | `s` / `S` | start the plan's coordinator: resume its session / a fresh session (press twice; replaces a running one after its checkpoint) |
 | `p` | plan picker: a popup listing every plan by project with its goal and state; typing filters it; ⏎ goes to the plan (in the Log: filters the log to it) |
 | `/` | Log: search |
@@ -188,6 +189,38 @@ plugin such as [herdr-nvim-nav](https://github.com/aimdevlee/herdr-nvim-nav) bin
 ctrl+h/j/k/l in herdr, the board registers its pane with it the way Neovim does, but only
 while the picker is open, so the keys still move between panes the rest of the time.
 Elsewhere in the board use `j` / `k` or the arrow keys.
+
+### Live: builds, tests, pipelines (SPEC §14)
+
+Every pi agent `spawn` starts loads `adapters/pi/atf-live.ts`. It observes the agent's
+shell commands (it never wraps or changes them) and records what they are about:
+
+- **While a command runs**, the task row shows a badge: `⚙ 2/5 core · 40 tests` for a
+  Maven build, `⧖ pipeline #555 running` while the agent waits on `glab ci status`,
+  `gh run watch` or a polling loop. Task details (and the Overview's context panel) list
+  it under **live** with the elapsed time, the command and its last output lines.
+- **When it ends**, builds, test runs, pipeline watches and anything that ran 30 s or
+  more are recorded on the task: exit code, duration, a summary (Maven: module, tests,
+  BUILD SUCCESS/FAILURE, failing tests from the surefire/failsafe reports) and the full
+  output. A failed latest run shows as `✗ BUILD FAILURE …` on the row.
+- **Background files** (`… > build.log &`, `| tee x.log`) and log files the agent keeps
+  reading are registered as live logs.
+
+`L` opens the selected task's: a pipeline in the browser (when its URL appeared in the
+output), a running output followed (`tail -F`) in a new tab, a finished one in `less`.
+Agents can add what the hook cannot see with `atf artifact T3 <file> --live`. Other kinds
+(claude, codex, copilot) have no hook yet: only registered files show.
+
+A newer run of the same kind in the same directory replaces the older one on the board
+(the green build after a fix hides the failed one; `atf live T3 --all` keeps the history).
+Maven progress counts against what the previous run in that directory ran (`81/~99
+tests`); the first run has no total.
+
+**Plugins** add kinds of commands, or replace built-in ones: e.g. your GitLab pipeline
+with its jobs per stage, from the agent's output or the GitLab API. One `.mjs` file in
+`~/.config/atf/live/`; restart the board to load it. `atf live-kinds` lists the kinds,
+`atf live-try` tries one on a saved output. Guide:
+[docs/live-plugins.md](../../docs/live-plugins.md).
 
 ### Plugin config (optional)
 

@@ -7,6 +7,9 @@ import { TERMINAL, driverInbox, planSummary, HUMAN } from '../../../src/core.mjs
 import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, reviewEvents, hasLiveWaiter } from '../../../src/store.mjs';
 import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject } from './herdr.mjs';
 import { progressText } from './sync.mjs';
+import { activeRuns, taskLive, liveBadge, elapsed, readTail, earlierText, liveView, hasView, liveOpen, loadLiveKinds, enableAutoRefresh } from '../../../src/live.mjs';
+import { fileURLToPath } from 'node:url';
+const ATF_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../bin/atf.mjs');
 
 const ESC = '\x1b[';
 const STYLE = { reset: 0, bold: 1, dim: 2, inverse: 7, red: 31, green: 32, yellow: 33, blue: 34, magenta: 35, cyan: 36, gray: 90 };
@@ -23,15 +26,36 @@ const STATUS = {
 const AGENT_GLYPH = { working: ['⚙', 'blue'], idle: ['◌', 'yellow'], done: ['✓', 'green'], blocked: ['!', 'red'], unknown: ['?', 'gray'] };
 const STALE_MS = 90_000; // task in_progress but its herdr agent idle for this long => flag
 
-/** A line is a list of [text, style] segments; fit() truncates to width before styling. */
-function fit(segs, width, fill = false) {
+// Display width of a character: wide ones (emoji such as ⧖, CJK) take two columns,
+// combining marks and variation selectors none. A line wider than the pane wraps, scrolls
+// the screen by a line, and every redraw puts it back: the top of the board flickers.
+const WIDE = [[0x1100, 0x115f], [0x231a, 0x231b], [0x2329, 0x232a], [0x23e9, 0x23ec], [0x23f0, 0x23f0], [0x23f3, 0x23f3], [0x25fd, 0x25fe], [0x2614, 0x2615], [0x2648, 0x2653], [0x267f, 0x267f], [0x2693, 0x2693], [0x26a1, 0x26a1], [0x26aa, 0x26ab], [0x26bd, 0x26be], [0x26c4, 0x26c5], [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea], [0x26f2, 0x26f3], [0x26f5, 0x26f5], [0x26fa, 0x26fa], [0x26fd, 0x26fd], [0x2705, 0x2705], [0x270a, 0x270b], [0x2728, 0x2728], [0x274c, 0x274c], [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797], [0x27b0, 0x27b0], [0x27bf, 0x27bf], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50], [0x2b55, 0x2b55], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe30, 0xfe4f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f680, 0x1f6ff], [0x1f900, 0x1f9ff], [0x20000, 0x3fffd]];
+export function charWidth(ch) {
+  const c = ch.codePointAt(0);
+  if (c < 0x300) return c < 32 ? 0 : 1;
+  if ((c >= 0x300 && c <= 0x36f) || (c >= 0x200b && c <= 0x200f) || (c >= 0x20d0 && c <= 0x20ff) || (c >= 0xfe00 && c <= 0xfe0f)) return 0;
+  for (const [a, b] of WIDE) if (c >= a && c <= b) return 2;
+  return 1;
+}
+/** Display width of a string (columns). */
+export const strWidth = (s) => [...String(s)].reduce((n, ch) => n + charWidth(ch), 0);
+
+/** A line is a list of [text, style] segments; fit() truncates to width (columns) before styling. */
+export function fit(segs, width, fill = false) {
   let out = '';
   let used = 0;
   for (const [text, style] of segs) {
     if (used >= width) break;
-    const chars = [...String(text)];
-    const take = chars.slice(0, width - used).join('');
-    used += Math.min(chars.length, width - used);
+    let take = '';
+    for (const ch of String(text)) {
+      const w = charWidth(ch);
+      if (used + w > width) {
+        used = width; // a wide character that does not fit: leave the column empty
+        break;
+      }
+      take += ch;
+      used += w;
+    }
     out += style ? sty(style) + take + `${ESC}0m` : take;
   }
   if (fill && used < width) out += ' '.repeat(width - used);
@@ -272,7 +296,18 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       ['░'.repeat(w - fill), 'gray'],
     ];
   }
-  const clip = (s, w) => ([...s].length > w ? [...s].slice(0, Math.max(1, w - 1)).join('') + '…' : s.padEnd(w));
+  // shorten to w columns (with …), or pad to w
+  const clip = (s, w) => {
+    if (strWidth(s) <= w) return s + ' '.repeat(w - strWidth(s));
+    let out = '';
+    let n = 0;
+    for (const ch of String(s)) {
+      if (n + charWidth(ch) > Math.max(1, w - 1)) break;
+      out += ch;
+      n += charWidth(ch);
+    }
+    return out + '…' + ' '.repeat(Math.max(0, w - n - 1));
+  };
 
   function tabBar() {
     const tabs = [[' ', '']];
@@ -318,7 +353,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const segs = [
       mark(selected),
       [open ? '▾ ' : '▸ ', 'bold cyan'],
-      [clip(p.st.title, Math.max(12, Math.min(48, W - 56))).trimEnd(), selected ? 'inverse bold cyan' : 'bold cyan'],
+      [clip(p.st.title, Math.max(12, W - 56)).trimEnd(), selected ? 'inverse bold cyan' : 'bold cyan'],
       [ui.scope.level === 'all' ? `  ${projectName(p.root)}` : '', 'cyan'],
       ['  ', ''],
       ...bar(sum.progress, 8),
@@ -330,6 +365,19 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const used = segs.reduce((n, [x]) => n + [...String(x)].length, 0);
     return [...segs, ['─'.repeat(Math.max(0, W - used - 1)), 'cyan dim']];
   }
+
+  /** §14: commands agents of a plan run right now (re-read at most once a second). */
+  const runsCache = new Map();
+  function runsOf(root, planId) {
+    const k = keyOf(root, planId);
+    const hit = runsCache.get(k);
+    if (hit && Date.now() - hit.at < 900) return hit.runs;
+    const runs = activeRuns(root, planId);
+    runsCache.set(k, { at: Date.now(), runs });
+    return runs;
+  }
+  /** The live view of a task: only for tasks that can have something running or just ran. */
+  const liveOf = (st, t) => (!st.root || t.children.length || ['todo', 'done', 'cancelled'].includes(t.status) ? null : taskLive(t, runsOf(st.root, st.id)));
 
   function taskRowLine(row, W, selected) {
     const { st, task: id } = row;
@@ -349,6 +397,9 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (t.status === 'blocked' && t.blocked_for === 'human' && !t.answered) right.push(['for you', 'red bold']);
       if (t.changes_requested) right.push([`↺ changes`, 'magenta']);
       else if (t.ready && !t.owner) right.push(['ready', 'green']);
+      const live = liveOf(st, t);
+      const badge = live && liveBadge(live);
+      if (badge) right.push([`${badge.glyph} ${clip(badge.text, 26).trimEnd()}`, badge.color]);
       if (t.status === 'in_progress' && t.percent != null) right.push([`${t.percent}%`, 'yellow']);
       if (row.under && t.owner === row.under); // the agent heading above names it
       else if (t.assignee) right.push([t.assignee, 'cyan']);
@@ -459,6 +510,41 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     );
   }
 
+  /**
+   * §14: what the task's agent runs or waits for now (with the last lines of its output),
+   * and the recorded runs and live files with their summaries. L opens the output.
+   */
+  function liveDetail(st, t, W, { recorded: maxRec = 5, tail = 4 } = {}) {
+    const live = st.root ? taskLive(t, runsOf(st.root, st.id)) : null;
+    if (!live || (!live.now.length && !live.recorded.length)) return [];
+    const L = [[], [['live', 'bold'], ['  L opens the output', 'dim']]];
+    const COL = { ok: 'green', failed: 'red', waiting: 'yellow', running: 'cyan', gone: 'gray', unknown: '' };
+    const cmdLine = (c) => String(c || '').split('\n')[0];
+    for (const r of live.now) {
+      L.push([[r.waiting ? '  ⧖ waiting ' : '  ⚙ running ', r.waiting ? 'yellow bold' : 'cyan bold'], [elapsed(r.since) + '  ', 'dim'], [r.summary.line, COL[r.summary.state] || '']]);
+      L.push([['    $ ' + cmdLine(r.cmd), 'dim']]);
+      if (hasView(r.kind)) {
+        // the kind's own view (maven: test progress, modules, the class running now)
+        for (const l of liveView(r, r.summary, { width: W - 4, active: true })) L.push([['    ', ''], ...l]);
+        continue;
+      }
+      const out = (readTail(r.out, 8192) || '').replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').split('\n').filter((l) => l.trim()).slice(-tail);
+      for (const l of tail ? out : []) L.push([['    │ ' + clip(l, W - 7).trimEnd(), 'gray']]);
+      for (const d of r.summary.details.slice(0, 4)) L.push([['    ' + d, 'red']]);
+    }
+    for (const a of live.recorded.slice(0, maxRec)) {
+      const s = a.summary;
+      const when = a.exit != null ? `exit ${a.exit}${a.duration_ms ? ' · ' + elapsed(0, a.duration_ms) : ''} · ${ago(a.ts)} ago` : a.live ? (s.mtime ? `written ${ago(new Date(s.mtime).toISOString())} ago` : '') : '';
+      L.push([[`  ${a.kind.padEnd(8)} `, COL[s.state] || ''], [s.line + '  ', COL[s.state] || ''], [when, 'dim']]);
+      if (a.cmd || a.live) L.push([[`    ${a.cmd ? '$ ' + cmdLine(a.cmd) : path.basename(a.ref)}`, 'dim']]);
+      for (const d of s.details.slice(0, 4)) L.push([['    ' + d, s.state === 'failed' ? 'red' : 'dim']]);
+    }
+    if (live.recorded.length > maxRec) L.push([[`  … ${live.recorded.length - maxRec} more (${maxRec < 5 ? '⏎ details' : 'atf live ' + t.id})`, 'dim']]);
+    // runs a newer run of the same kind and directory replaced: history, one line
+    if (live.earlier.length) L.push([[`  ${earlierText(live)} · atf live ${t.id} --all`, 'dim']]);
+    return L;
+  }
+
   function detailLines(st, id, W) {
     const t = st.tasks[id];
     if (!t) return [];
@@ -492,6 +578,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     L.push(meta);
     if (a?.stale) L.push([['⚠ agent is idle but the task is still in progress: it may have stopped without reporting', 'red']]);
     if (t.last_message && !TERMINAL.has(t.status)) for (const l of wrap('» ' + t.last_message, W - 2)) L.push([[l, t.status === 'blocked' ? 'red' : 'yellow']]);
+    L.push(...liveDetail(st, t, W));
     if (t.description) {
       L.push([]);
       for (const l of wrap(t.description, W - 2)) L.push([[l, '']]);
@@ -523,9 +610,10 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       L.push([], [['result', 'bold']]);
       for (const l of wrap(t.result, W - 2)) L.push([[l, 'green']]);
     }
-    if (t.artifacts.length) {
+    const outputs = t.artifacts.filter((x) => !x.live && !x.cmd); // live files and runs: under live
+    if (outputs.length) {
       L.push([], [['artifacts', 'bold']]);
-      for (const x of t.artifacts) L.push([[`  ${x.kind} `, 'dim'], [x.ref, 'cyan'], [x.description ? ' — ' + x.description : '', 'dim']]);
+      for (const x of outputs) L.push([[`  ${x.kind} `, 'dim'], [x.ref, 'cyan'], [x.description ? ' — ' + x.description : '', 'dim']]);
     }
     if (t.notes.length) {
       L.push([], [['notes', 'bold']]);
@@ -564,7 +652,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
           mark(sel),
           [folded ? '▸ ' : '▾ ', 'bold cyan'],
           // closed plans: plain cyan instead of bold, still readable (they used to be dimmed)
-          [clip(s.title, Math.max(14, Math.min(50, W - 52))).trimEnd(), (sel ? 'inverse ' : '') + (isOpenStatus(s) ? 'bold cyan' : 'cyan')],
+          [clip(s.title, Math.max(14, W - 52)).trimEnd(), (sel ? 'inverse ' : '') + (isOpenStatus(s) ? 'bold cyan' : 'cyan')],
           [ui.scope.level === 'all' ? `  ${projectName(p.root)}` : '', 'cyan'],
           [`  ${s.status} · ${s.counts.done}/${planSummary(s).total} tasks · ${ago(s.updated_at)} ago `, s.status === 'completed' ? 'green' : s.status === 'active' ? 'blue' : 'yellow'],
         ];
@@ -582,7 +670,10 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       field('goal', s.goal);
       if (!isOpenStatus(s)) field('outcome', s.status_message, s.status === 'completed' ? 'green' : 'yellow');
       const roots = s.order.filter((id) => !s.tasks[id].parent || !s.tasks[s.tasks[id].parent]);
-      const nameW = Math.min(30, Math.max(8, ...roots.map((id) => [...`${id} ${s.tasks[id].title}`].length)));
+      // names as wide as the pane allows: lead, glyph, bar, percent and owners take the rest
+      const ownersOf = (id) => [...new Set(s.order.filter((x) => (x === id || s.tasks[x].path.includes(id)) && s.tasks[x].owner).map((x) => s.tasks[x].owner))].join(', ');
+      const ownW = Math.min(30, Math.max(0, ...roots.slice(0, 6).map((id) => strWidth(ownersOf(id)))));
+      const nameW = Math.max(12, Math.min(Math.max(8, ...roots.map((id) => strWidth(`${id} ${s.tasks[id].title}`))), W - 8 - 1 - 8 - 7 - ownW - 2));
       for (const id of roots.slice(0, 6)) {
         const t = s.tasks[id];
         const es = effStatus(t);
@@ -593,7 +684,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (roots.length > 6) L.push([[`        … ${roots.length - 6} more branches`, 'dim']]);
       const notes = s.order.flatMap((id) => s.tasks[id].notes);
       const n = (k) => notes.filter((x) => x.kind === k).length;
-      const arts = s.order.reduce((a, id) => a + s.tasks[id].artifacts.length, 0);
+      const arts = s.order.reduce((a, id) => a + s.tasks[id].artifacts.filter((x) => !x.live && !x.cmd).length, 0);
       const counts = [n('decision') && `${n('decision')} decision${n('decision') === 1 ? '' : 's'}`, n('question') && `${n('question')} question${n('question') === 1 ? '' : 's'}`, n('warning') && `${n('warning')} warning${n('warning') === 1 ? '' : 's'}`, arts && `${arts} artifact${arts === 1 ? '' : 's'}`].filter(Boolean);
       if (counts.length) L.push([[`      ${counts.join(' · ')}`, 'dim']]);
       L.push([]);
@@ -639,7 +730,9 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const roots = s.order.filter((id) => !s.tasks[id].parent || !s.tasks[s.tasks[id].parent]);
     if (roots.length) {
       L.push([], [[' breakdown', 'bold'], ['  (top-level branches)', 'dim']]);
-      const nameW = Math.min(36, Math.max(...roots.map((id) => [...`${id} ${s.tasks[id].title}`].length)));
+      const ownersOf = (id) => [...new Set(s.order.filter((x) => (x === id || s.tasks[x].path.includes(id)) && s.tasks[x].owner).map((x) => s.tasks[x].owner))].join(', ');
+      const ownW = Math.min(30, Math.max(0, ...roots.map((id) => strWidth(ownersOf(id)))));
+      const nameW = Math.max(12, Math.min(Math.max(...roots.map((id) => strWidth(`${id} ${s.tasks[id].title}`))), W - 4 - 1 - 10 - 7 - ownW - 2));
       for (const id of roots) {
         const t = s.tasks[id];
         const es = effStatus(t);
@@ -670,7 +763,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
             : [[`  ${t.id} `, 'bold'], [t.last_message || t.title, 'red']],
         );
     }
-    const arts = s.order.flatMap((id) => s.tasks[id].artifacts.map((x) => ({ ...x, task: id })));
+    const arts = s.order.flatMap((id) => s.tasks[id].artifacts.filter((x) => !x.live && !x.cmd).map((x) => ({ ...x, task: id })));
     if (arts.length) {
       L.push([], [[' artifacts', 'bold']]);
       for (const x of arts) L.push([[`  ${x.task.padEnd(4)} ${x.kind.padEnd(7)}`, 'dim'], [x.ref, 'cyan'], [x.description ? ' — ' + x.description : '', 'dim']]);
@@ -990,17 +1083,24 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
 
   /** Lay out a row: left segments clipped with … to leave room for the right segments. */
   function row(left, right, W) {
-    const len = (segs) => segs.reduce((n, [x]) => n + [...String(x)].length, 0);
+    const len = (segs) => segs.reduce((n, [x]) => n + strWidth(x), 0); // columns, not characters
     const room = Math.max(10, W - 1 - len(right));
     const outSegs = [];
     let used = 0;
     for (const [x, s] of left) {
-      const chars = [...String(x)];
-      if (used + chars.length <= room) {
+      const w = strWidth(x);
+      if (used + w <= room) {
         outSegs.push([x, s]);
-        used += chars.length;
+        used += w;
       } else {
-        if (room - used > 1) outSegs.push([chars.slice(0, room - used - 1).join('') + '…', s]);
+        let cut = '';
+        let cw = 0;
+        for (const ch of String(x)) {
+          if (used + cw + charWidth(ch) > room - 1) break;
+          cut += ch;
+          cw += charWidth(ch);
+        }
+        if (room - used > 1) outSegs.push([cut + '…', s]);
         used = room;
         break;
       }
@@ -1099,6 +1199,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const [g, gc] = rework ? ['↺', 'magenta'] : t.answered ? ['⊘', 'green'] : STATUS[t.status];
     const crumb = t.path.length ? st.tasks[t.path[t.path.length - 1]].title + ' › ' : '';
     const msg = rework ? `changes requested (round ${t.feedback.length}): ${t.feedback[t.feedback.length - 1]?.message ?? ''}` : t.answered ? 'question answered, resuming' : t.last_message || '';
+    const live = liveOf(st, t);
+    const badge = live && liveBadge(live);
     const right = [];
     if (t.owner) right.push([t.owner, 'cyan']);
     if (a) right.push([' ' + (AGENT_GLYPH[a.agent_status] || AGENT_GLYPH.unknown)[0], (AGENT_GLYPH[a.agent_status] || AGENT_GLYPH.unknown)[1]]);
@@ -1107,7 +1209,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (a?.stale) right.push([' stalled?', 'red bold']);
     right.push([`  ${ago(t.updated_at).padStart(3)}`, 'dim']);
     return row(
-      [mark(sel), ['  ' + g + ' ', gc], [t.id + ' ', sel ? 'inverse bold' : 'bold'], [crumb, 'gray'], [t.title, ''], [t.percent != null && t.status === 'in_progress' ? `  ${t.percent}%` : '', 'yellow'], [msg ? '  ' + msg.replace(/\s+/g, ' ') : '', 'dim']],
+      [mark(sel), ['  ' + g + ' ', gc], [t.id + ' ', sel ? 'inverse bold' : 'bold'], [crumb, 'gray'], [t.title, ''], [t.percent != null && t.status === 'in_progress' ? `  ${t.percent}%` : '', 'yellow'], badge ? [`  ${badge.glyph} ${badge.text}`, badge.color] : ['', ''], [msg ? '  ' + msg.replace(/\s+/g, ' ') : '', 'dim']],
       right,
       W,
     );
@@ -1179,7 +1281,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   function reviewArtifacts(r) {
     const st = r.st;
     const ids = r.task ? st.order.filter((id) => id === r.task || st.tasks[id].path.includes(r.task)) : st.order;
-    const arts = ids.flatMap((id) => st.tasks[id].artifacts.map((x, i) => ({ ...x, task: id, i })));
+    const arts = ids.flatMap((id) => st.tasks[id].artifacts.map((x, i) => ({ ...x, task: id, i }))).filter((x) => !x.live && !x.cmd);
     return arts.sort((a, b) => (ART_RANK[a.kind] ?? 9) - (ART_RANK[b.kind] ?? 9) || (b.ts || '').localeCompare(a.ts || '') || b.i - a.i);
   }
 
@@ -1282,6 +1384,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       label('latest');
       for (const h of trail) L.push([[`   ${ago(h.ts).padStart(3)} `, 'dim'], [clip(h.message.replace(/\s+/g, ' '), W - 9).trimEnd(), h === trail[trail.length - 1] ? '' : 'dim']]);
     }
+    L.push(...liveDetail(st, t, W, { recorded: 2, tail: 2 }));
     if (t.checkpoint && !TERMINAL.has(t.status)) {
       L.push([]);
       label('checkpoint', `${ago(t.checkpoint.ts)} ago`);
@@ -1453,7 +1556,22 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       lab('for you', 'red bold', 'a question the coordinator escalated to you'),
       lab('40%', 'yellow', 'progress last reported by the agent'),
       lab('2/3', 'dim', 'finished / total subtasks of a parent'),
+      lab('⚙ 2/5 core', 'cyan', 'the agent runs a build or tests now (live, see "Live" below)'),
+      lab('⧖ pipeline #5', 'yellow', 'the agent waits on something: a pipeline, a polling loop'),
+      lab('✗ BUILD FAILURE', 'red', 'its latest build, test run or pipeline failed'),
       T('Details also show its agent definition, reviewer, follow-up links and checkpoint.', 'dim'),
+      [],
+      H('Live: what agents run and wait for'),
+      T('The agent’s harness observes its shell commands (pi: atf-live, loaded by atf-herdr);'),
+      T('nothing changes for the agent. A task’s details list under "live":'),
+      T('  ⚙ running / ⧖ waiting   the command now, its summary and last output lines'),
+      T('  maven · tests · pipeline · log   finished runs (exit code, summary, failing tests)'),
+      T('                and files the agent writes in the background or keeps reading'),
+      T('Maven summaries add surefire/failsafe reports; pipelines link their URL.'),
+      K('L', 'open it: a Maven run in the test viewer (atf live), other output followed in a'),
+      T('                herdr tab, a finished run in less,'),
+      T('                a pipeline in the browser'),
+      T('Agents add what the hook cannot see: atf artifact T3 <file> --live [--kind maven]', 'dim'),
       [],
       H('Agent state: the symbol after an agent name (live from herdr)'),
       sym(AGENT_GLYPH.working[0], AGENT_GLYPH.working[1], 'working', 'the agent is running'),
@@ -1486,10 +1604,10 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const esc = ui.scope.level === 'all' ? 'esc quit' : 'esc widen';
     const keys = {
       overview: overviewKeys(ui.rows.overview[ui.sel.overview]),
-      tasks: `↑↓ move  ←→ fold  v ${ui.byAgent ? 'tree' : 'by agent'}  ⏎ details  a approve  x changes  r message  o open  g agent  s/S coordinator  p plan  ${esc}`,
+      tasks: `↑↓ move  ←→ fold  v ${ui.byAgent ? 'tree' : 'by agent'}  ⏎ details  a approve  x changes  r message  o open  L live  g agent  s/S coordinator  p plan  ${esc}`,
       plan: multi() ? `↑↓ select  ←→ fold  ⏎ open plan  o docs  r note  s/S coordinator  g jump  c close  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}` : `↑↓ scroll  o docs  r note  s/S coordinator  ${esc}  ? help`,
       log: `↑↓ scroll  / search  ${multi() ? 'p plan  ' : ''}${ui.log.plan || ui.log.query ? 'esc clear filter  ' : esc + '  '}tab views  ? help`,
-      detail: '↑↓ scroll  ⏎/esc back  a approve  x changes  r message  o open  g agent  s/S coordinator',
+      detail: '↑↓ scroll  ⏎/esc back  a approve  x changes  r message  o open  L live  g agent  s/S coordinator',
       help: '↑↓ scroll  any other key: back',
     }[view()];
     return [[' ' + keys, 'dim']];
@@ -1698,6 +1816,52 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const r = selectedTask();
     if (!r) return flash('select a task');
     ui.input = { label: `change request for ${r.task}, for the coordinator: `, value: '', hint: '⏎ send', onSubmit: (text) => text.trim() && reviewNow('change', text.trim()) };
+  }
+
+  /**
+   * L: open what the task's agent runs or watches (§14): a pipeline in the browser when
+   * its URL is known; else the output in a herdr tab, followed while it is written.
+   * Running/waiting commands first, then the latest recorded run or live file.
+   */
+  async function openLive() {
+    const r = selectedRow();
+    const t = r?.task && r.st?.tasks[r.task];
+    if (!t) return flash('select a task');
+    const live = taskLive(t, runsOf(r.root, r.plan));
+    const x = live.now.find((n) => n.waiting) || live.now[0] || live.recorded[0];
+    if (!x) return flash(`nothing live on ${t.id} (agents' builds, tests and pipelines show here)`);
+    // the kind decides: a URL (a pipeline page) or a file; else its viewer or the output
+    const o = liveOpen(x, x.summary);
+    const url = o?.url;
+    const browser = process.platform === 'darwin' ? 'open' : 'xdg-open';
+    if (url) {
+      const c = spawn(browser, [url], { detached: true, stdio: 'ignore' });
+      c.on('error', () => flash(`could not run ${browser}`, 'red'));
+      c.unref();
+      return flash(`opened ${url}`, 'green');
+    }
+    const file = o?.file || x.out || x.ref;
+    if (!fs.existsSync(file)) return flash(`${file} is gone`, 'red');
+    const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+    const following = x.active || (x.live && t.status === 'in_progress');
+    // a kind with a view (maven: test progress): the viewer (atf live), else the raw output
+    const cmd =
+      hasView(x.kind) && !o?.file
+        ? `ATF_DIR=${q(r.root)} node ${q(ATF_CLI)} live ${t.id} --plan ${q(r.plan)}${following ? ' --watch' : ''}${x.active ? '' : ' --run ' + q(x.ref)}`
+        : following
+          ? `tail -n 200 -F ${q(file)}`
+          : `less -R +G ${q(file)}`;
+    if (!inHerdr()) return flash(`run: ${cmd}`);
+    const coord = coordinatorOf(r.st);
+    const ws = (coord.id && !coord.away && r.st.actors[coord.id]?.ctx?.herdr_workspace) || process.env.HERDR_WORKSPACE_ID;
+    const label = `${t.id} ${x.kind}`;
+    const tab = await herdrAsync(['tab', 'create', ...(ws ? ['--workspace', ws] : []), '--cwd', x.cwd || path.dirname(r.root), '--label', label, '--focus']);
+    const pane = tab?.root_pane?.pane_id;
+    if (!pane) return flash('could not open a herdr tab', 'red');
+    if (ws) await herdrAsync(['workspace', 'focus', ws]);
+    await herdrText(['pane', 'run', pane, cmd]);
+    if (popup) quit();
+    else flash(`opened ${path.basename(file)} in tab "${label}"`, 'green');
   }
 
   /** o: open the task's best review artifact: PR/URL in the browser, branch/commit diff or file in a herdr tab. */
@@ -1946,6 +2110,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (v !== 'plan' && k === 'x') return changeNow(), draw();
       if (k === 'r' || k === 'n') return reply(), draw();
       if (k === 'o') return openArtifact();
+      if (k === 'L') return openLive();
       if (k === 's') return startCoordinator(false);
       if (k === 'S') return startCoordinator(true);
     }
@@ -2053,6 +2218,12 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   if (initialRoot) ui.focus = ui.focus || { root: initialRoot, plan: pickPlan(initialRoot) };
 
   registerBoardProcess(); // lets the toggle tell this board from a shell restored in its pane
+  // live kinds from plugins (docs/live-plugins.md): built-ins until they are loaded; their
+  // refresh (e.g. a CI API) runs in the background for what the board shows
+  enableAutoRefresh();
+  loadLiveKinds()
+    .then(({ errors }) => (errors.length ? flash(`live plugin failed: ${errors[0].file}: ${errors[0].error}`, 'red') : draw()))
+    .catch(() => {});
   out.write(`${ESC}?1049h${ESC}?25l${ESC}2J`);
   process.on('SIGTERM', quit);
   process.on('SIGHUP', quit);

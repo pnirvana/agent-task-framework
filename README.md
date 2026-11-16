@@ -27,10 +27,14 @@ plans, break them into tasks, and report progress, in a format any frontend can 
 | `schema/event.schema.json` | JSON Schema for one event line |
 | `src/core.mjs` | pure fold: events → plan state (shared by CLI and frontends) |
 | `src/store.mjs` | file store: root discovery, locking, transactions, actor identity |
+| `src/live.mjs` | live artifacts (SPEC §14): live kinds (built-in and plugins), summaries of builds, tests, pipelines, logs |
+| `docs/live-plugins.md` | writing a live plugin (a new kind of command on the board, e.g. GitLab pipeline jobs) |
+| `examples/live-plugins/` | plugin template, GitLab sample plugin, fake GitLab server |
 | `bin/atf.mjs` | reference CLI (`bin/atf` is a PATH shim) |
 | `skill/atf/SKILL.md` | agent instructions for coordinator and subagent roles (Agent Skills format; `atf skill install`) |
 | `adapters/herdr/` | herdr plugin: board TUI, pane labels, sidebar progress, notifications, spawn, agent lifecycle |
 | `adapters/pi/atf.ts` | pi extension: wakes the idle coordinator; what waits for you next to the chat |
+| `adapters/pi/atf-live.ts` | pi extension for subagents: observes their builds, tests and pipeline watches (SPEC §14) |
 | `adapters/copilot/` | GitHub Copilot CLI: `atf-copilot` launcher and extension (wake, `/peek`) |
 | `test/` | `npm test` (fold semantics, transitions, a 12-way concurrent-claim race, wait) |
 
@@ -216,6 +220,15 @@ list them with `atf-herdr agents`). Subagents start fresh by default (`--resume`
 session that worked on the task before) and their panes are closed once they finished.
 They are never relaunched: the coordinator starts a new agent when a task comes back.
 Details: [adapters/herdr/README.md](adapters/herdr/README.md).
+
+**What agents run and wait for** (SPEC §14): pi subagents started by `spawn` load
+`adapters/pi/atf-live.ts`, which observes their shell commands without changing them.
+The board shows what an agent runs right now (`⚙ 2/5 core · 40 tests`), what it waits for
+(`⧖ pipeline #555 running`), and the result of each build, test run and pipeline watch
+(exit code, summary, failing tests, the full output: `L` opens it). Agents can register
+files the hook cannot see: `atf artifact T3 server.log --live`. Plugins add kinds of
+commands (e.g. your CI's pipeline jobs): one `.mjs` file in `~/.config/atf/live/`, see
+[docs/live-plugins.md](docs/live-plugins.md); `atf live-kinds` lists what is loaded.
 
 **herdr plugin** (`herdr plugin link <repo>/adapters/herdr`): a task board (`prefix+t`, a
 full-height side column; `prefix+alt+t`, a popup) with one scope for all tabs

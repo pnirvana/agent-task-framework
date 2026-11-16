@@ -23,6 +23,7 @@ import {
 } from '../src/core.mjs';
 import { execFileSync } from 'node:child_process';
 import { buildPrompt } from '../src/prompts.mjs';
+import { activeRuns, taskLive, elapsed, readTail, earlierText, liveView, loadLiveKinds, liveKinds, liveKind, refreshLive, refreshError, enableAutoRefresh, summarizeText, classify, registerLiveKind, STYLES } from '../src/live.mjs';
 import {
   findRoot,
   initRoot,
@@ -91,6 +92,10 @@ Tasks (worker)
   atf progress <task> <msg> [--pct N]   heartbeat / milestone
   atf note <task> <msg> [--kind ${NOTE_KINDS.join('|')}]
   atf artifact <task> <ref> [--kind ${ARTIFACT_KINDS.join('|')}] [--desc D]
+  atf artifact <task> <file> --live [--kind log|maven|tests|pipeline] [--cwd DIR]
+                                        a file you watch (background build, server log):
+                                        the board shows it while the task runs (--cwd: where
+                                        a maven build runs, for its test reports)
   atf note <task> "<done / left / how to verify>" --kind checkpoint
                                         where the work stands (write one before you block or stop)
   atf session <task> <ref> [--kind K] [--for WHO]
@@ -137,6 +142,13 @@ Viewing
   atf log [-n N] [--follow]
   atf plans [--all] [--closed]          active plans in this project / all known projects
   atf inbox [--all] [--for human]       what needs a decision, and for whom (human / coordinator)
+  atf live <task> [--watch] [--run F] [--all]
+                                        what the task's agent runs: Maven test progress, outputs
+                                        (--all: also runs replaced by newer ones)
+  atf live-kinds                        live kinds: built-in and from plugins (~/.config/atf/live)
+  atf live-try <kind|plugin.mjs> <output-file> [--cmd C] [--cwd D] [--exit N] [--active]
+                                        try a kind on a saved output: match, refresh, summary,
+                                        view, open (writing plugins: docs/live-plugins.md)
   atf brief <task>|plan                 what the human needs to act on a request: the question
                                         (who asked, the recommendation) or the review (submission,
                                         acceptance, changed files)
@@ -166,7 +178,7 @@ Global flags
 `;
 
 // ---------- args ----------
-const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early', 'review', 'new']);
+const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early', 'review', 'new', 'live']);
 const MULTI = new Set(['accept', 'dep', 'label', 'doc']);
 const SHORT = { m: 'message', n: 'limit', h: 'help', j: 'json' };
 
@@ -466,6 +478,37 @@ function renderPlan(state) {
   if (arts.length) L.push('', bold('artifacts:'), ...arts.map((x) => `  ${x.task} ${x.kind}: ${x.ref}${x.description ? dim(' — ' + x.description) : ''}`));
   return L.join('\n');
 }
+/** `atf live --watch`: redraw every second until q / ctrl+c / esc. */
+function watchLive(render) {
+  const draw = () => process.stdout.write('\x1b[H\x1b[2J' + render() + '\n\n' + dim('watching · q quits'));
+  process.stdout.write('\x1b[?25l');
+  const quit = () => (process.stdout.write('\x1b[?25h\n'), process.exit(0));
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.on('data', (d) => /[q\x03\x1b]/.test(String(d)) && quit());
+  }
+  process.on('SIGINT', quit);
+  draw();
+  setInterval(draw, 1000);
+}
+
+/** §14: what runs for a task now and its recorded runs / live files, one line each. */
+function liveLines(t, runs, indent = '  ') {
+  const live = taskLive(t, runs);
+  const col = { ok: green, failed: red, waiting: yellow, running: cyan, gone: dim, unknown: String };
+  const L = [];
+  for (const r of live.now) L.push(`${indent}${(r.waiting ? yellow : cyan)(r.waiting ? '⧖ waiting' : '⚙ running')} ${dim(elapsed(r.since))} ${r.kind ?? 'cmd'}: ${r.summary.line}${dim('  $ ' + String(r.cmd).split('\n')[0].slice(0, 70))}`);
+  for (const a of live.recorded.slice(0, 6)) {
+    const s = a.summary;
+    const when = a.exit != null ? `exit ${a.exit}${a.duration_ms ? ', ' + elapsed(0, a.duration_ms) : ''}` : a.live ? 'live' : '';
+    const rel = path.relative(process.cwd(), a.ref);
+    const where = a.cmd && !a.live ? '$ ' + String(a.cmd).split('\n')[0].slice(0, 60) : rel.startsWith('../..') ? a.ref : rel; // the output file: atf show --json
+    L.push(`${indent}${(col[s.state] || String)(a.kind)} ${s.line}${when ? dim(' (' + when + ')') : ''}${dim('  ' + where)}`);
+    for (const d of s.details.slice(0, 4)) L.push(`${indent}    ${dim(d)}`);
+  }
+  if (live.earlier.length) L.push(`${indent}${dim(earlierText(live) + ` (atf live ${t.id} --all)`)}`);
+  return L;
+}
 function renderTask(t, state) {
   const L = [];
   if (t.path.length) L.push(dim(breadcrumb(t, state) + ' ›'));
@@ -498,7 +541,10 @@ function renderTask(t, state) {
   if (t.result) L.push('', bold('result:'), t.result);
   const sess = Object.values(t.sessions || {});
   if (sess.length || t.resume) L.push('', bold('agent context:') + dim(` resume policy ${t.resume_policy}`), ...sess.map((x) => `  ${cyan(x.actor ?? '?')} ${x.kind ?? ''} session ${dim(x.ref)}`));
-  if (t.artifacts.length) L.push('', bold('artifacts:'), ...t.artifacts.map((a) => `  ${a.kind}: ${a.ref}${a.description ? dim(' — ' + a.description) : ''}`));
+  const outputs = t.artifacts.filter((a) => !a.live && !a.cmd); // live files and runs: under live
+  if (outputs.length) L.push('', bold('artifacts:'), ...outputs.map((a) => `  ${a.kind}: ${a.ref}${a.description ? dim(' — ' + a.description) : ''}`));
+  const ll = liveLines(t, state.runs || []);
+  if (ll.length) L.push('', bold('live:'), ...ll);
   if (t.notes.length) L.push('', bold('notes:'), ...t.notes.map((n) => `  ${dim(n.ts.slice(11, 19))} ${n.kind !== 'info' ? yellow(`[${n.kind}] `) : ''}${n.relayed ? quoteOf(n.relayed) + (n.message !== n.relayed.quote ? dim(' → ') + n.message : '') : (n.actor ? cyan(n.actor) + ': ' : '') + n.message}`));
   const hist = t.history.slice(-8);
   if (hist.length) {
@@ -600,10 +646,11 @@ function renderBrief(b) {
   if (b.failure) L.push('', red('  failed: ') + (b.failure.message ?? ''));
   if (b.latest) L.push('', dim(`  latest${b.latest.percent != null ? ` (${b.latest.percent}%)` : ''}: `) + b.latest.message);
   if (b.checkpoint) L.push(dim('  checkpoint: ') + b.checkpoint.message);
+  if (b.live?.length) L.push('', dim('  live:'), ...b.live);
   if (t.acceptance.length) L.push('', dim('  acceptance:'), ...t.acceptance.map((a) => `    - ${a}`));
   else if (t.description) L.push('', dim('  goal: ') + t.description);
   if (b.files?.length) L.push('', dim('  files: ') + b.files.map((f) => `${f.path}${f.added != null ? ` (+${f.added}${f.removed ? ` -${f.removed}` : ''}${f.state === 'new' ? ', new' : ''})` : ` (${f.state})`}`).join('  '));
-  const other = b.artifacts.filter((a) => a.kind !== 'file');
+  const other = b.artifacts.filter((a) => a.kind !== 'file' && !a.live && !a.cmd);
   if (other.length) L.push(dim('  artifacts: ') + other.map((a) => `${a.kind}: ${a.ref}`).join('  '));
   return L.join('\n');
 }
@@ -995,10 +1042,118 @@ const commands = {
     const { root, planId, actor } = ctx();
     if (!pos[1]) die('artifact ref required');
     const kind = FLAGS.kind || (fs.existsSync(pos[1]) ? 'file' : /^https?:/.test(pos[1]) ? 'url' : 'other');
-    if (!ARTIFACT_KINDS.includes(kind)) die(`--kind must be one of ${ARTIFACT_KINDS.join(', ')}`);
-    const data = { kind, ref: pos[1], ...(FLAGS.desc ? { description: FLAGS.desc } : {}) };
-    transact(root, planId, actor, (st) => [{ type: 'task.artifact', task: requireTask(st, pos[0]).id, data }]);
+    if (!ARTIFACT_KINDS.includes(kind) && !liveKind(kind)) die(`--kind must be one of ${ARTIFACT_KINDS.join(', ')}, or a live kind (atf live-kinds)`);
+    // --live: a file the board watches while the task runs (§14); a relative path is
+    // made absolute, so every frontend finds it whatever its own directory
+    // a URL is not a file to watch (agents register pipeline pages so): an ordinary url artifact
+    if (FLAGS.live && /^[a-z]+:\/\//.test(pos[1])) (FLAGS.live = false), (FLAGS.kind ||= 'url');
+    const ref = FLAGS.live ? path.resolve(pos[1]) : pos[1];
+    const data = { kind: FLAGS.live && !FLAGS.kind ? 'log' : kind, ref, ...(FLAGS.desc ? { description: FLAGS.desc } : {}), ...(FLAGS.live ? { live: true, since: new Date().toISOString() } : {}), ...(FLAGS.cwd ? { cwd: path.resolve(FLAGS.cwd) } : {}) };
+    // a live file already registered on the task (e.g. by the harness hook): nothing to add
+    transact(root, planId, actor, (st) => (data.live && requireTask(st, pos[0]).artifacts.some((a) => a.live && a.ref === ref) ? [] : [{ type: 'task.artifact', task: requireTask(st, pos[0]).id, data }]));
     out({ ok: true }, dim('ok'));
+  },
+
+  live(pos) {
+    // §14: the live view of a task. Maven: test progress (modules, classes, failures)
+    // against the previous run; other kinds: their output. --watch redraws every second
+    // (q quits); --run <file> shows one recorded run.
+    const { root, planId } = ctx();
+    const STY = { bold, dim, red, green, yellow, cyan, magenta, gray: dim, 'bold red': (x) => bold(red(x)), 'bold green': (x) => bold(green(x)), 'bold yellow': (x) => bold(yellow(x)), 'bold cyan': (x) => bold(cyan(x)) };
+    const seg = (l) => l.map(([x, st]) => (st && STY[st] ? STY[st](x) : x)).join('');
+    const render = () => {
+      const state = loadPlan(root, planId);
+      const t = requireTask(state, pos[0]);
+      const live = taskLive(t, activeRuns(root, planId));
+      const W = process.stdout.columns || 100;
+      const L = [`${bold(t.id)} ${t.title}  ${dim(t.status)}`];
+      const pick = FLAGS.run ? live.all.find((a) => a.ref === path.resolve(FLAGS.run)) : null;
+      const runs = pick ? [] : live.now;
+      for (const r of runs) {
+        L.push('', `${(r.waiting ? yellow : cyan)(r.waiting ? '⧖ waiting' : '⚙ running')} ${dim(elapsed(r.since))}  ${r.kind}: ${r.summary.line}`, dim('  $ ' + String(r.cmd).split('\n')[0].slice(0, W - 6)));
+        if (liveKind(r.kind)?.view) L.push(...liveView(r, r.summary, { width: W, full: true, active: true }).map(seg));
+        else L.push(...(readTail(r.out, 16384) || '').split('\n').filter((x) => x.trim()).slice(-15).map((x) => dim('  │ ') + x.slice(0, W - 4)));
+      }
+      // nothing running: the chosen run, else the latest maven run, else the latest run
+      const rec = pick || (!runs.length && (live.recorded.find((a) => a.kind === 'maven') || live.recorded[0]));
+      if (rec) {
+        const s = rec.summary;
+        L.push('', `${(s.state === 'failed' ? red : s.state === 'ok' ? green : String)(rec.kind)} ${s.line}${rec.exit != null ? dim(`  exit ${rec.exit} · ${elapsed(0, rec.duration_ms || 0)} · ${ago(rec.ts)}`) : ''}`);
+        if (rec.cmd) L.push(dim('  $ ' + String(rec.cmd).split('\n')[0].slice(0, W - 6)));
+        if (liveKind(rec.kind)?.view) L.push(...liveView(rec, s, { width: W, full: true }).map(seg));
+        else L.push(...(readTail(rec.ref, 16384) || '').split('\n').filter((x) => x.trim()).slice(-15).map((x) => dim('  │ ') + x.slice(0, W - 4)));
+        L.push('', dim(`output: ${rec.ref}`));
+      }
+      if (!runs.length && !rec) L.push('', dim('nothing live on this task yet: builds, tests and pipelines its agent runs show here'));
+      // the other current runs, then (--all) the history: one line each
+      const line = (a) => `  ${(a.summary.state === 'failed' ? red : a.summary.state === 'ok' ? green : String)(a.kind)} ${a.summary.line}${a.exit != null ? dim(`  exit ${a.exit} · ${ago(a.ts)}`) : ''}${dim('  --run ' + path.relative(process.cwd(), a.ref))}`;
+      const others = live.recorded.filter((a) => a !== rec);
+      if (others.length) L.push('', bold('also current'), ...others.map(line));
+      if (FLAGS.all && live.earlier.length) L.push('', bold('earlier runs') + dim('  replaced by newer ones'), ...live.earlier.map(line));
+      else if (live.earlier.length) L.push('', dim(`${earlierText(live)} (--all lists them)`));
+      return L.join('\n');
+    };
+    // kinds that fetch data (refresh): fetch it before the one-shot view
+    const first = taskLive(requireTask(loadPlan(root, planId), pos[0]), activeRuns(root, planId));
+    return Promise.all([...first.now, ...first.all].map((x) => refreshLive(x).catch(() => null))).then(() => {
+      if (!FLAGS.watch || FLAGS.json) return out(taskLive(requireTask(loadPlan(root, planId), pos[0]), activeRuns(root, planId)), render());
+      enableAutoRefresh(); // redraws pick up new data as it arrives
+      watchLive(render);
+    });
+  },
+
+  'live-kinds'() {
+    // the live kinds: built-in and from plugins (~/.config/atf/live, $ATF_LIVE_PLUGINS)
+    const k = liveKinds();
+    out(k, [
+      ...k.kinds.map((d) => `${bold(d.kind.padEnd(10))} ${d.source === 'built-in' ? dim('built-in') : cyan(d.source)}${d.replaces ? yellow(` (replaces ${d.replaces === 'built-in' ? 'the built-in' : d.replaces})`) : ''}${d.waiting ? yellow('  waiting') : ''}${d.record ? dim(`  recorded as ${d.record}`) : ''}\n           ${dim(d.has.join(' · '))}${d.description ? '\n           ' + d.description : ''}`),
+      ...(k.errors.length ? ['', red('plugins that failed to load:'), ...k.errors.map((e) => `  ${e.file}: ${e.error}`)] : []),
+      '',
+      dim(`plugins: $ATF_LIVE_PLUGINS, ~/.config/atf/live/*.mjs  ·  trying one: atf live-try <kind|file.mjs> <output>`),
+      dim(`writing one (a guide for agents too): ${path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'docs', 'live-plugins.md')}`),
+      dim(`examples: ${path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'examples', 'live-plugins')}`),
+    ].join('\n'));
+  },
+
+  async 'live-try'(pos) {
+    // try a kind (or a plugin file) on a saved output, without an agent: match, summarize,
+    // refresh, view, open, as the board would. For writing plugins (docs/live-plugins.md).
+    if (!pos[0] || !pos[1]) die('usage: atf live-try <kind|plugin.mjs> <output-file> [--cmd C] [--cwd D] [--exit N] [--active] [--no-refresh] [--width W]');
+    let kind = pos[0];
+    if (/\.(mjs|js)$/.test(kind)) {
+      const before = new Set(liveKinds().kinds.map((d) => `${d.kind}|${d.source}`));
+      const res = await loadLiveKinds({ files: [path.resolve(kind)] });
+      const err = res.errors.find((e) => e.file === path.resolve(kind));
+      if (err) die(`${kind}: ${err.error}`);
+      kind = res.kinds.find((d) => d.source === path.resolve(kind) && !before.has(`${d.kind}|${d.source}`))?.kind ?? res.kinds.find((d) => d.source === path.resolve(kind))?.kind;
+      if (!kind) die(`${pos[0]}: no kind registered`);
+    } else await loadLiveKinds();
+    if (!liveKind(kind)) die(`unknown kind ${kind} (atf live-kinds)`);
+    const file = path.resolve(pos[1]);
+    if (!fs.existsSync(file)) die(`no such file: ${pos[1]}`);
+    const x = { kind, ref: file, cwd: FLAGS.cwd ? path.resolve(FLAGS.cwd) : process.cwd(), cmd: FLAGS.cmd ?? null, exit: FLAGS.exit != null ? Number(FLAGS.exit) : null, active: !!FLAGS.active, since: new Date(fs.statSync(file).mtimeMs - 3600_000).toISOString() };
+    const W = Number(FLAGS.width) || process.stdout.columns || 100;
+    const L = [];
+    if (FLAGS.cmd) {
+      const got = classify(FLAGS.cmd, x.cwd);
+      L.push(`${bold('match')}    ${got === kind ? green('✓ ' + kind) : red(`✗ the command is classified as ${got ?? 'an ordinary command'}`)}  ${dim('$ ' + FLAGS.cmd)}`);
+    }
+    let fetched = null;
+    if (liveKind(kind).refresh && !FLAGS['no-refresh']) {
+      const t0 = Date.now();
+      fetched = await refreshLive(x, { force: true });
+      const err = refreshError(x);
+      L.push(`${bold('refresh')}  ${err ? red('failed: ' + err) : fetched == null ? yellow('no data (refresh returned nothing)') : green('ok')} ${dim(`${Date.now() - t0} ms`)}${fetched != null ? dim('  ' + JSON.stringify(fetched).slice(0, W - 30)) : ''}`);
+    }
+    const sum = summarizeText(kind, readTail(file, liveKind(kind).tailBytes ?? 256 << 10) ?? '', { cwd: x.cwd, cmd: x.cmd, exit: x.exit, active: x.active, file, since: 0, until: Infinity, extra: {}, fetched });
+    const STY = { bold, dim, red, green, yellow, cyan, magenta, gray: dim, 'bold red': (s) => bold(red(s)), 'bold green': (s) => bold(green(s)), 'bold yellow': (s) => bold(yellow(s)), 'bold cyan': (s) => bold(cyan(s)) };
+    const seg = (l) => l.map(([t, st]) => (st && STY[st] ? STY[st](t) : t)).join('');
+    L.push(`${bold('summary')}  ${sum.state.padEnd(8)} ${sum.line}`, dim(`         counts ${JSON.stringify(sum.counts).slice(0, W - 20)}`));
+    for (const d of sum.details) L.push(dim('         · ') + d);
+    L.push('', bold('view') + dim(liveKind(kind).view ? '' : '  (no view: the board shows the details)'), ...liveView(x, sum, { width: W, full: true, active: x.active }).map(seg));
+    const op = liveKind(kind).open ? liveKind(kind).open(sum, { cwd: x.cwd, cmd: x.cmd, file, exit: x.exit, extra: {} }) : null;
+    L.push('', `${bold('open')}     ${op?.url ? 'browser ' + op.url : op?.file ? 'file ' + op.file : dim(liveKind(kind).view ? 'L opens the viewer (atf live)' : 'L shows the output')}`);
+    out({ kind, match: FLAGS.cmd ? classify(FLAGS.cmd, x.cwd) : null, fetched, summary: sum, open: op }, L.join('\n'));
   },
 
   session(pos) {
@@ -1094,6 +1249,7 @@ const commands = {
     const which = pos[0] && pos[0] !== 'plan' ? requireTask(state, pos[0]).id : null;
     const b = brief(state, which);
     if (b.artifacts) b.files = fileStats(path.dirname(root), b.artifacts);
+    if (which) b.live = liveLines(state.tasks[which], activeRuns(root, planId), '    ');
     out(b, renderBrief(b));
   },
 
@@ -1176,6 +1332,7 @@ const commands = {
     const { root, planId } = ctx();
     const state = loadPlan(root, planId);
     const t = requireTask(state, pos[0]);
+    state.runs = activeRuns(root, planId);
     out(t, renderTask(t, state));
   },
 
@@ -1363,7 +1520,9 @@ try {
   }
   const handler = commands[cmd];
   if (!handler) die(`unknown command: ${cmd} (see atf help)`);
-  handler(pos);
+  // live kinds from plugins (docs/live-plugins.md) for the commands that show or record them
+  if (['show', 'brief', 'live', 'live-kinds', 'artifact'].includes(cmd)) await loadLiveKinds();
+  await handler(pos);
 } catch (e) {
   report(e.message);
 }

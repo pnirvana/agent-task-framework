@@ -20,6 +20,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ATF_BIN = path.resolve(HERE, '../../../bin');
 export { SKILL_DIR, buildPrompt, coordinatorPrompt };
 const WAKE_EXT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../pi/atf.ts');
+const LIVE_EXT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../pi/atf-live.ts');
 
 /**
  * Per agent kind: extra args to start fresh, args to resume a session, and whether the
@@ -29,7 +30,8 @@ const WAKE_EXT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 export const AGENT_KINDS = {
   // coordinator: extra args for the plan's coordinator only (the wake extension: it waits
   // for the plan in the background, so pi is idle and promptable while nothing needs it)
-  pi: { start: ['--skill', '{skill}'], resume: ['--session', '{session}', '--skill', '{skill}'], coordinator: ['-e', '{wake}'], nativeSkill: true },
+  // agent: extra args for subagents only (the live extension: what they run and wait for, §14)
+  pi: { start: ['--skill', '{skill}'], resume: ['--session', '{session}', '--skill', '{skill}'], coordinator: ['-e', '{wake}'], agent: ['-e', '{live}'], nativeSkill: true },
   claude: { start: [], resume: ['--resume', '{session}'] },
   // GitHub Copilot CLI: ATF picks the session id ({newsession}) and records it. The
   // coordinator is woken by the ATF Copilot extension (atf-copilot install), which reads
@@ -199,10 +201,10 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
   const pane = withPlacementLock(() => placeAgentPane({ cwd: path.dirname(root), env, refPane, direction, workspace, placement }));
   if (!pane) throw new Error('could not create a pane');
   const newSession = crypto.randomUUID();
-  const sub = (a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session ?? '').replace('{newsession}', newSession);
+  const sub = (a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session ?? '').replace('{newsession}', newSession).replace('{live}', LIVE_EXT);
   // an installed skill is discovered by the agent itself: don't pass it again
   const withoutSkill = (list) => (skillInstalled() ? list.filter((a, i) => a !== '{skill}' && list[i + 1] !== '{skill}') : list);
-  const kindArgs = withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []);
+  const kindArgs = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []), ...(kindCfg.agent || [])];
   const known = mode === 'resume' ? session : kindArgs.includes('{newsession}') ? newSession : null;
   const args = [...kindArgs.map(sub), ...agentArgs, ...extraArgs];
   const started = herdr(['agent', 'start', name, '--kind', kind, '--pane', pane, ...(args.length ? ['--', ...args] : [])], { timeout: 60_000 });
