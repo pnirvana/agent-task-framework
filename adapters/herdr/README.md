@@ -11,7 +11,7 @@ actionable inside herdr. Optional: ATF itself does not depend on any of this.
 | **Notifications** | herdr notification when a task becomes blocked, needs review, or fails, and when a plan finishes |
 | **Stall detection** | board flags `stale?` when a task is in progress but its herdr agent has been idle > 90s (an agent that stopped without reporting) |
 | **Overview** | tab `0`, where the board starts: what needs you (agents waiting for input, your reviews, finished plans; under a heading per plan when the scope holds several), then per plan only the tasks being worked on with their latest progress; a context panel for the selected row; approve, request changes, reply, open the review artifact or jump to the agent's terminal with one key |
-| **Spawn** | `s` on a ready task or package (or `atf-herdr spawn T3`) places a pane in a balanced grid, starts the agent (pi by default; the atf skill is discovered once installed with `atf skill install`), assigns the task and sends the kickoff prompt |
+| **Spawn** | `s` on a ready task or package (or `atf-herdr spawn T3`) places a pane in the workspace's `agents` tab (your tab with the coordinator and the board keeps its layout), starts the agent (pi by default; the atf skill is discovered once installed with `atf skill install`), assigns the task and sends the kickoff prompt |
 | **Reviews** | `a` / `x` / `n` on any task draft an approval, change request or note (`d` drops, `S` submits all at once: one write per plan, so the coordinator wakes once and each owner gets all its points). Tasks that ask you to test something show as `◎ for you` |
 | **Agent lifecycle** | the coordinator starts every subagent (fresh by default); finished subagents are closed; an idle coordinator is nudged when something needs it; `atf-herdr coordinate` starts or resumes a plan's coordinator, or replaces it with a fresh session |
 
@@ -80,7 +80,7 @@ Then `herdr server reload-config`.
    fresh one) or `atf-herdr coordinate [--plan ID] [--fresh]`. The coordinator starts
    subagents with `spawn`:
    ```sh
-   atf-herdr spawn T3 --name worker-1            # pi, placed in the tab's balanced grid
+   atf-herdr spawn T3 --name worker-1            # pi, placed in the workspace's agents tab
    atf-herdr spawn T2 --name backend             # a parent task: the whole work package
    atf-herdr spawn T4 --agent reviewer           # run it as a named agent definition
    atf-herdr spawn T7 --early                    # start before its dependencies are done
@@ -194,8 +194,11 @@ Elsewhere in the board use `j` / `k` or the arrow keys.
 `$(herdr plugin config-dir atf.herdr)/config.json`:
 
 ```json
-{ "agent_kind": "pi", "board_placement": "auto", "board_start": "overview" }
+{ "agent_kind": "pi", "agent_placement": "tab", "board_placement": "auto", "board_start": "overview" }
 ```
+
+`agent_placement`: `tab` (default) opens subagents in the workspace's `agents` tab, `split`
+beside the coordinator (see "Pane layout for agents").
 
 `board_placement`:
 - `auto` (default): a **full-height right-hand column** (about 38% of the tab, at least 50
@@ -217,8 +220,9 @@ Elsewhere in the board use `j` / `k` or the arrow keys.
 
 - **The coordinator** runs as long as its plan is active. `atf-herdr coordinate` (or `s`
   on the board) starts it in its own tab, labelled `plan: <title>`, with the plan's
-  identity (the subagents it spawns open next to it there; every agent pane is labelled
-  with the agent's name), resuming the plan's
+  identity (the subagents it spawns open in the workspace's `agents` tab, or next to it
+  with `"agent_placement": "split"`; every agent pane is labelled with the agent's name),
+  resuming the plan's
   coordinator session if one is recorded; `--fresh` (`S`) starts a new session, and a
   running coordinator is first asked for a plan checkpoint (`atf plan checkpoint`), then
   replaced. Its session is recorded on the plan (`plan.session`) at start and on its
@@ -297,12 +301,18 @@ supported for pi agents.
 
 ### Pane layout for agents
 
-`atf-herdr spawn` splits the **largest** pane in the tab, preferring its visually longer
-side and trying the other side if that leaves a pane too small; it never splits the board.
-Agents therefore form a balanced grid (side by side, then 2×2). When no split would leave
-both halves at least 60×12, it reuses an `agents` tab with room, or opens a new one.
-Placement is serialized, so agents spawned in parallel see each other's panes.
-`--direction` forces a plain split of the current pane; `--workspace` places the agent in
+By default (`"agent_placement": "tab"`) agents open in the workspace's **`agents` tab**,
+not in the tab you work in: the coordinator and the board stay where they are while
+agents come and go. The tab is created without focus when the first agent starts, and
+herdr removes it when the last agent pane closes. Inside it, `atf-herdr spawn` splits the
+**largest** pane, preferring its visually longer side and trying the other side if that
+leaves a pane too small, so agents form a balanced grid (side by side, then 2×2). When no
+split would leave both halves at least 60×12, it opens `agents-2`, and so on.
+
+`"agent_placement": "split"` (or `spawn --placement split`) places agents beside the
+coordinator instead, in its tab's grid (never splitting the board), overflowing into an
+`agents` tab. Placement is serialized, so agents spawned in parallel see each other's
+panes. `--direction` or `--target-pane` place the agent at that pane; `--workspace` in
 another workspace.
 
 ## How it works

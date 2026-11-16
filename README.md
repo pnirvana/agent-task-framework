@@ -205,7 +205,8 @@ atf-herdr spawn T5 --early                    # before its dependencies are done
 atf-herdr spawn T4 --name worker-2 --kind claude
 ```
 
-`spawn` places a pane next to the others (balanced grid, overflow into an `agents` tab),
+`spawn` places a pane in the workspace's `agents` tab, so the tab you work in keeps its
+layout (`"agent_placement": "split"` in the plugin config: beside the coordinator),
 starts the agent with `ATF_DIR/ATF_PLAN/ATF_ACTOR/ATF_ROLE` and `atf` on PATH, assigns the
 task or package and sends the kickoff prompt. With `atf skill install` agents discover the
 skill themselves; otherwise pi gets `--skill` and other kinds are told to read

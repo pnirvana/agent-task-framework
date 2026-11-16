@@ -11,7 +11,7 @@ import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isB
 import { sync, notifyForEvents } from './lib/sync.mjs';
 import { chooseBoardSplit, tabLayout, planRebuild, withPlacementLock } from './lib/layout.mjs';
 import { discoverAgents, resolveAgentDef, piArgsForAgent } from './lib/agents.mjs';
-import { agentKinds, launchAgent, launchCoordinator, lifecycle, lifecycleSweep, stateDir, recordSessionsForEvents } from './lib/launch.mjs';
+import { agentKinds, agentPlacement, launchAgent, launchCoordinator, lifecycle, lifecycleSweep, stateDir, recordSessionsForEvents } from './lib/launch.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SELF = path.join(HERE, 'atf-herdr.mjs');
@@ -19,11 +19,12 @@ const PLUGIN_ID = 'atf.herdr';
 
 const HELP = `atf-herdr — run and watch ATF agents inside herdr
 
-  atf-herdr spawn <task> [--name NAME] [--kind pi] [--direction right|down]
+  atf-herdr spawn <task> [--name NAME] [--kind pi] [--placement tab|split] [--direction right|down]
                   [--agent DEF] [--early] [--target-pane ID | --workspace WS] [--fresh|--resume]
                   [--dry-run] [-- <agent args>]
       (the coordinator's tool) start an agent for a task or work package: place a pane
-      (largest pane of the tab, split along its long side; an "agents" tab when full),
+      (default: in the workspace's "agents" tab, so your tab keeps its layout; --placement
+      split or "agent_placement": "split": beside the coordinator, an "agents" tab when full),
       assign it and send the kickoff prompt. A new agent starts fresh with the task,
       its checkpoint and the coordinator's instructions; --resume resumes the session
       that worked on the task before. Refused while an agent of that name still runs.
@@ -51,6 +52,7 @@ const HELP = `atf-herdr — run and watch ATF agents inside herdr
 Plugin config ($(herdr plugin config-dir atf.herdr)/config.json):
   lifecycle: "ephemeral" (default) | "persistent"
   agent_kind: "pi" (default) | "copilot" | "claude" | "codex"   (also --kind on spawn/coordinate)
+  agent_placement: "tab" (default: agents in their own tab) | "split" (beside the coordinator)
   agents: { "<kind>": { "start": [...], "resume": [..."{session}"...], "nativeSkill": bool } }
 
 Plugin actions (atf.herdr.*): board (this project; overview if none here),
@@ -133,6 +135,12 @@ function spawnAgent() {
   const force = flags.fresh ? 'fresh' : flags.resume ? 'resume' : undefined;
 
   if (flags['dry-run']) {
+    let placement;
+    try {
+      placement = flags.direction ? `split (--direction ${flags.direction})` : agentPlacement(flags.placement || (flags['target-pane'] ? 'split' : undefined));
+    } catch (e) {
+      fail(e.message);
+    }
     const lp = launchPlan(s, t.id, name);
     const kind = flags.kind || pluginConfig().agent_kind || 'pi';
     const cfg = agentKinds()[kind] || {};
@@ -149,7 +157,8 @@ function spawnAgent() {
     process.stdout.write(
       `${t.id} → ${name} (${kind}): ${force || lp.mode} (${lp.reason})\n` +
         `  args: ${JSON.stringify(used)}${skillInstalled() ? '  (skill installed: discovered by the agent)' : ''}${lp.session ? `  session: ${lp.session.ref}` : ''}\n` +
-        `  lifecycle: ${lifecycle()}\n`,
+        `  lifecycle: ${lifecycle()}\n` +
+        `  placement: ${placement}\n`,
     );
     return;
   }
@@ -164,6 +173,8 @@ function spawnAgent() {
       early: !!flags.early,
       refPane: flags['target-pane'] || workspacePane(flags.workspace) || process.env.HERDR_PANE_ID,
       direction: flags.direction,
+      // an explicit target pane means: place it there
+      placement: flags.placement || (flags['target-pane'] ? 'split' : undefined),
       force,
       extraArgs: agentArgs,
     });

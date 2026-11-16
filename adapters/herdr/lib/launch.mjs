@@ -93,17 +93,26 @@ export function updateRegistry(fn) {
 }
 
 // ---------- placement ----------
+/** Where new agent panes go: `tab` (default) an "agents" tab, `split` the coordinator's tab. */
+export const agentPlacement = (flag) => {
+  const p = flag || process.env.ATF_AGENT_PLACEMENT || pluginConfig().agent_placement || 'tab';
+  if (!['tab', 'split'].includes(p)) throw new Error(`agent placement must be tab or split (got ${p})`);
+  return p;
+};
+
 /**
- * Create a pane for a new agent: split the largest pane of the reference tab along its
- * longer side (never the board), else reuse/open an "agents" tab. `direction` forces a
- * plain split of the reference pane.
+ * Create a pane for a new agent. `tab` (default): in the workspace's "agents" tab (a
+ * balanced grid there; another "agents-N" tab when it is full), so the tab the human
+ * works in (coordinator, board) keeps its layout. `split`: split the largest pane of the
+ * reference tab along its longer side (never the board), overflowing into an "agents"
+ * tab. `direction` forces a plain split of the reference pane.
  */
-export function placeAgentPane({ cwd, env, refPane, direction, workspace }) {
+export function placeAgentPane({ cwd, env, refPane, direction, workspace, placement = 'tab' }) {
   const envArgs = Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
   const splitOf = (pane, dir) => herdr(['pane', 'split', '--pane', pane, '--direction', dir, '--cwd', cwd, '--no-focus', ...envArgs])?.pane?.pane_id;
   if (refPane && direction) return splitOf(refPane, direction);
   const exclude = boardPaneIds();
-  if (refPane) {
+  if (refPane && placement === 'split') {
     const c = chooseSplit(refPane, { exclude });
     if (c) return splitOf(c.pane, c.direction);
   }
@@ -144,7 +153,7 @@ export function recordSession(root, planId, taskIds, name, kind, pane = null, kn
  * Start an agent for `taskId` (a leaf or a work package). Mode comes from ATF's
  * launchPlan unless forced. Returns {name, pane, mode, kind}.
  */
-export function launchAgent({ root, planId, taskId, name, kind, agent, early = false, refPane, direction, workspace, force, extraArgs = [], assign = true }) {
+export function launchAgent({ root, planId, taskId, name, kind, agent, early = false, refPane, direction, workspace, placement, force, extraArgs = [], assign = true }) {
   const s = loadPlan(root, planId);
   const target = s.tasks[taskId];
   if (!target) throw new Error(`unknown task ${taskId}`);
@@ -186,7 +195,8 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
     ATF_LIFECYCLE: lifecycle(),
     PATH: `${ATF_BIN}:${process.env.PATH}`, // `atf` resolvable without a global install
   };
-  const pane = withPlacementLock(() => placeAgentPane({ cwd: path.dirname(root), env, refPane, direction, workspace }));
+  placement = agentPlacement(placement);
+  const pane = withPlacementLock(() => placeAgentPane({ cwd: path.dirname(root), env, refPane, direction, workspace, placement }));
   if (!pane) throw new Error('could not create a pane');
   const newSession = crypto.randomUUID();
   const sub = (a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session ?? '').replace('{newsession}', newSession);
