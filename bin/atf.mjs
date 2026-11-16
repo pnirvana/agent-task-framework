@@ -577,7 +577,8 @@ function renderBrief(b) {
     L.push(`${bold('plan')} ${bold(b.title)}`);
     if (b.goal) L.push(dim('goal: ') + b.goal);
     if (b.docs.length) L.push(dim('documents: ') + b.docs.join(', '));
-    if (!b.questions.length) L.push(dim('no open questions for the human'));
+    if (b.finished) L.push('', magenta('finished') + ': all tasks are finished; the plan can be closed (tell the coordinator)');
+    else if (!b.questions.length) L.push(dim('no open questions for the human'));
     for (const q of b.questions) L.push('', magenta('question for you') + dim(` (${q.actor ?? '?'}, ${ago(q.ts)})`), ind(q.message));
     return L.join('\n');
   }
@@ -597,6 +598,8 @@ function renderBrief(b) {
     if (r.assessment) L.push(green('  coordinator: ') + r.assessment);
   }
   if (b.failure) L.push('', red('  failed: ') + (b.failure.message ?? ''));
+  if (b.latest) L.push('', dim(`  latest${b.latest.percent != null ? ` (${b.latest.percent}%)` : ''}: `) + b.latest.message);
+  if (b.checkpoint) L.push(dim('  checkpoint: ') + b.checkpoint.message);
   if (t.acceptance.length) L.push('', dim('  acceptance:'), ...t.acceptance.map((a) => `    - ${a}`));
   else if (t.description) L.push('', dim('  goal: ') + t.description);
   if (b.files?.length) L.push('', dim('  files: ') + b.files.map((f) => `${f.path}${f.added != null ? ` (+${f.added}${f.removed ? ` -${f.removed}` : ''}${f.state === 'new' ? ', new' : ''})` : ` (${f.state})`}`).join('  '));

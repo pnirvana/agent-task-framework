@@ -8,7 +8,8 @@
 // 2. What waits for the human, next to the chat: a widget above the input lists the
 //    plan's requests for the human, one numbered line each. Typing a request's id at the
 //    start of the input (`T5`, `t5:`) expands it in place ("peek-on-type"); alt+1…9 (or
-//    `/atf [T5]`) opens a read-only peek with its full brief, the diff and the files. None
+//    `/atf [T5|plan]`) opens a read-only peek with its full brief, the diff and the files;
+//    `/atf tasks` (or `t` there) the plan's task list, any task opens from it. None
 //    of it is written to the transcript or the model's context; decisions go through the
 //    chat (the coordinator records them with `--relay`).
 //
@@ -159,14 +160,22 @@ export default function (pi: any) {
 			planState = null;
 		}
 		const its = planState ? driverInbox(planState).filter((i: any) => i.for === "human") : [];
-		items = its.slice(0, 9).map((i: any, k: number) => ({
-			n: k + 1,
-			id: i.task ?? "plan",
-			task: i.task ?? null,
-			kind: i.kind,
-			label: KIND_LABEL[i.kind] ?? i.kind,
-			text: firstSentence(i.message ?? (i.task ? planState.tasks[i.task]?.title : "")),
-		}));
+		// the plan's own requests (its questions, "finished") are one entry, `plan`: one reply
+		// in the chat answers all open plan questions
+		const planIts = its.filter((i: any) => !i.task);
+		const qs = planIts.filter((i: any) => i.kind === "plan-question");
+		const merged = its.filter((i: any, k: number) => i.task || k === its.indexOf(planIts[0]));
+		items = merged.slice(0, 9).map((i: any, k: number) => {
+			const head = i.task ? i : qs[0] ?? i;
+			return {
+				n: k + 1,
+				id: i.task ?? "plan",
+				task: i.task ?? null,
+				kind: head.kind,
+				label: KIND_LABEL[head.kind] ?? head.kind,
+				text: firstSentence(head.message ?? (i.task ? planState.tasks[i.task]?.title : "")) + (!i.task && qs.length > 1 ? ` (+${qs.length - 1} more)` : ""),
+			};
+		});
 		render();
 	};
 
@@ -180,6 +189,7 @@ export default function (pi: any) {
 				.slice(0, 3)
 				.map((l) => prefix + style(l));
 		if (b.kind === "plan") for (const q of b.questions) out.push(...wrap(q.message));
+		if (b.kind === "plan" && b.finished && !b.questions.length) out.push(...wrap("all tasks are finished; the plan can be closed"));
 		if (b.question) {
 			out.push(...wrap(b.question.message));
 			if (b.question.recommend) out.push(...wrap(`recommended: ${b.question.recommend}`, (x) => theme.fg("success", x)));
@@ -204,7 +214,7 @@ export default function (pi: any) {
 			const title = planState?.title ?? "";
 			u.setWidget("atf", (_tui: any, theme: any) => ({
 				render(width: number): string[] {
-					const lines = [theme.fg("warning", "⏳ for you") + theme.fg("dim", ` · ${title}`) + theme.fg("dim", `   alt+1…${items.length} details · type T5 to peek`)];
+					const lines = [theme.fg("warning", "⏳ for you") + theme.fg("dim", ` · ${title}`) + theme.fg("dim", `   alt+1…${items.length} details · type T5 to peek · /atf tasks`)];
 					for (const it of items) {
 						const id = it.id.padEnd(4);
 						const head = `  ${theme.fg("dim", String(it.n))} ${theme.fg("accent", id)} ${theme.fg(it.kind === "your-review" ? "success" : "warning", it.label.padEnd(9))} `;
@@ -242,16 +252,55 @@ export default function (pi: any) {
 			execFile("git", ["-C", cwd, ...args], { maxBuffer: 16 << 20 }, (e: any, stdout) => resolve({ code: e ? (e.code ?? 1) : 0, out: String(stdout ?? "") })),
 		);
 
+	/** The plan's tasks as a tree, in creation order: the rows of the task list (row 0: the plan). */
+	const taskRows = (): { id: string; depth: number; t: any }[] => {
+		if (!planState) return [];
+		const ts = Object.values(planState.tasks) as any[];
+		const num = (id: string) => Number(String(id).replace(/\D/g, "")) || 0;
+		const out: { id: string; depth: number; t: any }[] = [{ id: "plan", depth: 0, t: null }];
+		const walk = (parent: string | null, depth: number) => {
+			for (const t of ts.filter((x) => (x.parent ?? null) === parent).sort((a, b) => num(a.id) - num(b.id))) {
+				out.push({ id: t.id, depth, t });
+				walk(t.id, depth + 1);
+			}
+		};
+		walk(null, 0);
+		return out;
+	};
+	const GLYPH: Record<string, [string, string]> = {
+		todo: ["○", "dim"],
+		in_progress: ["◐", "warning"],
+		review: ["◎", "accent"],
+		done: ["✓", "success"],
+		blocked: ["⊘", "error"],
+		failed: ["✗", "error"],
+		cancelled: ["–", "dim"],
+	};
+
+	/**
+	 * The read-only peek: a request's brief (its question or review), its diff and files, and
+	 * the plan's task list. `/atf` opens the first request (the task list when none waits),
+	 * `/atf T5` / `/atf plan` that one, `/atf tasks` the list. Nothing is written: `r` puts
+	 * `T5: ` into the input, the human answers in the chat.
+	 */
 	const peek = async (ctx: any, startId?: string | null) => {
 		ctxRef = ctx ?? ctxRef;
 		const arm = readArm();
 		refresh();
-		if (!arm || !items.length) return ui()?.notify?.("Nothing waits for you in this plan.", "info");
-		let idx = Math.max(0, startId ? items.findIndex((i) => i.id.toLowerCase() === startId.toLowerCase()) : 0);
+		if (!arm || !planState) return ui()?.notify?.("No ATF plan yet (the coordinator has not run `atf wait`).", "info");
+		const want = String(startId ?? "").trim().toLowerCase();
+		const taskId = (id: string) => Object.keys(planState.tasks).find((k) => k.toLowerCase() === id) ?? null;
+		if (want && want !== "tasks" && want !== "plan" && !taskId(want)) return ui()?.notify?.(`No ${startId} in this plan (/atf tasks lists them).`, "warning");
 		const projectDir = path.dirname(arm.root);
 		const reply = await ui().custom(
 			(tui: any, theme: any, keybindings: any, done: (r: string | null) => void) => {
-				let mode: "brief" | "diff" | "file" = "brief";
+				// view: the task list, or one entry (brief) with its diff / files
+				let view: "list" | "brief" | "diff" | "file" = "brief";
+				// where the brief was opened from: ←/→ go to the next request, or the next task
+				let src: "requests" | "tasks" = "requests";
+				let cur = "plan";
+				let idx = 0; // in items
+				let sel = 0; // in taskRows()
 				let body: string[] = ["loading…"];
 				let files: string[] = [];
 				let fileIdx = 0;
@@ -265,11 +314,16 @@ export default function (pi: any) {
 					cache = undefined;
 					tui.requestRender();
 				};
-				const loadBrief = async () => {
-					const it = items[idx];
-					mode = "brief";
+				const showList = () => {
+					view = "list";
+					cache = undefined;
+					tui.requestRender();
+				};
+				const loadBrief = async (id = cur) => {
+					cur = id;
+					view = "brief";
 					update(["loading…"]);
-					const raw = await runCli(["brief", it.task ?? "plan", "--json"], arm);
+					const raw = await runCli(["brief", id, "--json"], arm);
 					let b: any = null;
 					try {
 						b = JSON.parse(raw);
@@ -280,7 +334,7 @@ export default function (pi: any) {
 					update(briefLines(b, theme));
 				};
 				const loadDiff = async () => {
-					mode = "diff";
+					view = "diff";
 					if (!files.length) return update([theme.fg("dim", "no file artifacts on this task")]);
 					update(["loading diff…"]);
 					const out: string[] = [];
@@ -296,30 +350,82 @@ export default function (pi: any) {
 					update(out);
 				};
 				const loadFile = () => {
-					mode = "file";
+					view = "file";
 					if (!files.length) return update([theme.fg("dim", "no file artifacts on this task")]);
 					const f = files[fileIdx % files.length];
 					update([theme.fg("accent", `── ${f}`) + theme.fg("dim", files.length > 1 ? `  (tab: next of ${files.length})` : ""), ...safeRead(path.resolve(projectDir, f)).split("\n")]);
 				};
-				loadBrief();
+				const listLines = (rows: ReturnType<typeof taskRows>, inner: number): string[] =>
+					rows.map((r, k) => {
+						const mine = items.find((i) => i.id === r.id);
+						const pointer = k === sel ? theme.fg("accent", "› ") : "  ";
+						if (!r.t) {
+							const n = rows.length - 1;
+							const fin = rows.filter((x) => x.t && ["done", "cancelled"].includes(x.t.status)).length;
+							return truncateToWidth(pointer + theme.fg("accent", "plan ") + (planState?.title ?? "") + theme.fg("dim", `  ${fin}/${n} finished`) + (mine ? theme.fg("warning", `  for you: ${mine.label}`) : ""), inner);
+						}
+						const t = r.t;
+						const st = t.rollup_status ?? t.status; // a parent: the combined status of its subtasks
+						const [g, color] = GLYPH[st] ?? ["?", "dim"];
+						const kids = t.children?.length ? `${t.children.filter((c: string) => ["done", "cancelled"].includes(planState.tasks[c]?.status)).length}/${t.children.length}` : "";
+						const meta = [t.owner ? `@${t.owner}` : "", st === "in_progress" && t.percent != null && !kids ? `${t.percent}%` : "", kids, t.ready && !t.owner ? "ready" : st.replace("_", " ")].filter(Boolean).join(" · ");
+						const title = k === sel ? theme.bold?.(t.title) ?? t.title : t.title;
+						return truncateToWidth(
+							pointer + "  ".repeat(r.depth) + theme.fg(color, g) + " " + theme.fg("accent", t.id.padEnd(4)) + title + theme.fg("dim", `  ${meta}`) + (mine ? theme.fg("warning", `  for you: ${mine.label}`) : ""),
+							inner,
+						);
+					});
+
+				// start: the request asked for, a task, the list
+				const rows0 = taskRows();
+				const asItem = items.findIndex((i) => i.id.toLowerCase() === want);
+				if (want === "tasks" || (!want && !items.length)) showList();
+				else if (!want || asItem >= 0) {
+					idx = Math.max(0, asItem);
+					loadBrief(items[idx].id);
+				} else {
+					src = "tasks";
+					sel = Math.max(0, rows0.findIndex((r) => r.id.toLowerCase() === want));
+					loadBrief(rows0[sel].id);
+				}
+
 				return {
 					render(width: number): string[] {
 						if (cache && cacheW === width) return cache;
 						const inner = width - 4;
-						const it = items[idx];
-						const wrapped = body.flatMap((l) => (l === "" ? [""] : wrapTextWithAnsi(l, inner)));
 						const h = height() - 3;
-						scroll = Math.max(0, Math.min(scroll, Math.max(0, wrapped.length - h)));
-						const view = wrapped.slice(scroll, scroll + h);
 						const border = (s: string) => theme.fg("border", s);
-						const title = ` ${it.id} · ${it.label}${items.length > 1 ? ` (${idx + 1}/${items.length})` : ""} `;
-						const keys =
-							mode === "brief"
-								? "esc close · r reply · d diff · o files · ←/→ other requests · ↑↓ scroll"
-								: `esc/b back${mode === "file" && files.length > 1 ? " · tab next file" : ""} · ↑↓ pgup/pgdn scroll`;
+						let title: string;
+						let keys: string;
+						let view_: string[];
+						let more = "";
+						if (view === "list") {
+							const rows = taskRows();
+							sel = Math.max(0, Math.min(sel, rows.length - 1));
+							const all = listLines(rows, inner);
+							scroll = Math.max(0, Math.min(Math.max(scroll, sel - h + 1), sel)); // keep the selection visible
+							view_ = all.slice(scroll, scroll + h);
+							if (all.length > h) more = `${scroll + 1}-${scroll + view_.length} of ${all.length}`;
+							title = ` tasks · ${planState?.title ?? arm.plan} `;
+							keys = `↑↓ select · ⏎ details · r reply${items.length ? " · w what waits for you" : ""} · esc close`;
+						} else {
+							const wrapped = body.flatMap((l) => (l === "" ? [""] : wrapTextWithAnsi(l, inner)));
+							scroll = Math.max(0, Math.min(scroll, Math.max(0, wrapped.length - h)));
+							view_ = wrapped.slice(scroll, scroll + h);
+							if (wrapped.length > h) more = `${scroll + 1}-${scroll + view_.length} of ${wrapped.length}`;
+							const it = items.find((i) => i.id === cur);
+							const pos = src === "requests" && items.length > 1 ? ` (${idx + 1}/${items.length})` : "";
+							title = ` ${cur}${it ? ` · ${it.label}` : cur === "plan" ? "" : ` · ${planState?.tasks[cur]?.title ?? ""}`}${pos} `;
+							keys =
+								view === "brief"
+									? src === "requests"
+										? `esc close · r reply${files.length ? " · d diff · o files" : ""} · ←/→ other requests · t all tasks · ↑↓ scroll`
+										: `esc back · r reply${files.length ? " · d diff · o files" : ""} · ←/→ other tasks · ↑↓ scroll`
+									: `esc/b back${view === "file" && files.length > 1 ? " · tab next file" : ""} · ↑↓ pgup/pgdn scroll`;
+						}
 						const lines = [border("┌─") + theme.fg("accent", title) + border("─".repeat(Math.max(0, width - 3 - title.length)) + "┐")];
-						for (const l of view) lines.push(border("│ ") + truncateToWidth(l, inner, "…", true) + border(" │"));
-						if (wrapped.length > h) lines.push(border("│ ") + truncateToWidth(theme.fg("dim", `${scroll + 1}-${scroll + view.length} of ${wrapped.length}`), inner, "…", true) + border(" │"));
+						for (const l of view_) lines.push(border("│ ") + truncateToWidth(l, inner, "…", true) + border(" │"));
+						if (more) lines.push(border("│ ") + truncateToWidth(theme.fg("dim", more), inner, "…", true) + border(" │"));
 						lines.push(border("└ ") + truncateToWidth(theme.fg("dim", keys), width - 4, "…", true) + border(" ┘"));
 						cache = lines;
 						cacheW = width;
@@ -327,20 +433,58 @@ export default function (pi: any) {
 					},
 					handleInput(data: string) {
 						const h = height() - 3;
-						if (matchesKey(data, "escape") || (mode !== "brief" && data === "b")) {
-							if (mode !== "brief") return void loadBrief();
+						const redraw = () => {
+							cache = undefined;
+							tui.requestRender();
+						};
+						if (view === "list") {
+							const rows = taskRows();
+							if (matchesKey(data, "escape") || data === "q") return done(null);
+							if (matchesKey(data, "enter") || matchesKey(data, "right") || data === "l") {
+								src = "tasks";
+								return void loadBrief(rows[sel]?.id ?? "plan");
+							}
+							if (data === "r") return done(rows[sel]?.id ?? "plan");
+							if (data === "w" && items.length) {
+								src = "requests";
+								idx = 0;
+								return void loadBrief(items[0].id);
+							}
+							if (matchesKey(data, "down") || data === "j") sel = Math.min(rows.length - 1, sel + 1);
+							else if (matchesKey(data, "up") || data === "k") sel = Math.max(0, sel - 1);
+							else if (matchesKey(data, "pageDown") || data === " ") sel = Math.min(rows.length - 1, sel + h);
+							else if (matchesKey(data, "pageUp")) sel = Math.max(0, sel - h);
+							else return;
+							return redraw();
+						}
+						if (matchesKey(data, "escape") || (view !== "brief" && data === "b")) {
+							if (view !== "brief") return void loadBrief();
+							if (src === "tasks") return showList();
 							return done(null);
 						}
-						if (mode === "brief" && data === "r") return done(items[idx].id);
-						if (mode === "brief" && data === "d") return void loadDiff();
-						if (mode === "brief" && data === "o") return void loadFile();
-						if (mode === "file" && matchesKey(data, "tab")) {
+						if (view === "brief" && data === "r") return done(cur);
+						if (view === "brief" && data === "d") return void loadDiff();
+						if (view === "brief" && data === "o") return void loadFile();
+						if (view === "brief" && data === "t") {
+							src = "tasks";
+							sel = Math.max(0, taskRows().findIndex((r) => r.id === cur));
+							scroll = 0;
+							return showList();
+						}
+						if (view === "file" && matchesKey(data, "tab")) {
 							fileIdx++;
 							return loadFile();
 						}
-						if (mode === "brief" && (matchesKey(data, "right") || matchesKey(data, "left"))) {
-							idx = (idx + (matchesKey(data, "right") ? 1 : items.length - 1)) % items.length;
-							return void loadBrief();
+						if (view === "brief" && (matchesKey(data, "right") || matchesKey(data, "left"))) {
+							const step = matchesKey(data, "right") ? 1 : -1;
+							if (src === "requests") {
+								if (!items.length) return;
+								idx = (idx + step + items.length) % items.length;
+								return void loadBrief(items[idx].id);
+							}
+							const rows = taskRows();
+							sel = (sel + step + rows.length) % rows.length;
+							return void loadBrief(rows[sel].id);
 						}
 						if (matchesKey(data, "down") || data === "j") scroll++;
 						else if (matchesKey(data, "up") || data === "k") scroll--;
@@ -348,8 +492,7 @@ export default function (pi: any) {
 						else if (matchesKey(data, "pageUp")) scroll -= h;
 						else return;
 						scroll = Math.max(0, scroll);
-						cache = undefined;
-						tui.requestRender();
+						redraw();
 					},
 					invalidate() {
 						cache = undefined;
@@ -382,6 +525,8 @@ export default function (pi: any) {
 			if (b.goal) L.push(dim("goal: ") + b.goal);
 			if (b.docs?.length) L.push(dim("documents: ") + b.docs.join(", "));
 			for (const q of b.questions ?? []) L.push("", theme.fg("warning", "question for you") + dim(` (${q.actor ?? "?"})`), q.message);
+			if (b.finished) L.push("", theme.fg("success", "finished") + ": all tasks are finished; the plan can be closed (tell the coordinator)");
+			if (b.checkpoint) L.push("", dim("coordinator's checkpoint:"), b.checkpoint);
 			return L;
 		}
 		const t = b.task;
@@ -398,6 +543,9 @@ export default function (pi: any) {
 			if (r.assessment) L.push("", theme.fg("success", "coordinator: ") + r.assessment);
 		}
 		if (b.failure) L.push("", theme.fg("error", "failed: ") + (b.failure.message ?? ""));
+		// a task that asks nothing of the human (opened from the task list): where it stands
+		if (b.latest) L.push("", dim(`latest${b.latest.percent != null ? ` (${b.latest.percent}%)` : ""}: `) + b.latest.message);
+		if (b.checkpoint) L.push("", dim("checkpoint: ") + b.checkpoint.message);
 		if (t.acceptance?.length) L.push("", dim("acceptance:"), ...t.acceptance.map((a: string) => `  - ${a}`));
 		else if (t.description) L.push("", dim("goal: ") + t.description);
 		if (b.files?.length)
@@ -415,7 +563,7 @@ export default function (pi: any) {
 			},
 		});
 	pi.registerCommand?.("atf", {
-		description: "ATF: what waits for you in this plan (/atf T5: its details)",
+		description: "ATF: what waits for you (/atf T5 · /atf plan: one request · /atf tasks: all tasks of the plan)",
 		handler: async (args: string, ctx: any) => peek(ctx, (args || "").trim() || null),
 	});
 
@@ -423,12 +571,12 @@ export default function (pi: any) {
 	const addAutocomplete = (u: any) =>
 		safe(() =>
 			u?.addAutocompleteProvider?.((current: any) => ({
-				triggerCharacters: ["T"],
+				triggerCharacters: ["T", "p"],
 				async getSuggestions(lines: string[], line: number, col: number, options: any) {
 					const before = (lines[line] ?? "").slice(0, col);
-					const m = line === 0 && before.match(/^(T\d*|t\d+)$/);
+					const m = line === 0 && before.match(/^(T\d*|t\d+|pl?a?n?)$/);
 					if (!m || !items.length) return current.getSuggestions(lines, line, col, options);
-					const hits = items.filter((i) => i.task && i.task.toLowerCase().startsWith(m[1].toLowerCase()));
+					const hits = items.filter((i) => i.id.toLowerCase().startsWith(m[1].toLowerCase()));
 					if (!hits.length) return current.getSuggestions(lines, line, col, options);
 					return { prefix: m[1], items: hits.map((i) => ({ value: `${i.id}: `, label: `${i.id} ${i.label}`, description: i.text })) };
 				},

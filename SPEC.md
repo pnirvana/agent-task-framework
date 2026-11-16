@@ -618,8 +618,8 @@ One harness-neutral command produces what a human needs to act on a request, so 
 frontend shows the same content:
 
 ```sh
-atf brief T1 [--json]       # a task waiting for the human
-atf brief plan [--json]    # the plan's open questions
+atf brief T1 [--json]       # a task waiting for the human (any task: where it stands)
+atf brief plan [--json]    # the plan's open questions, whether it is finished
 atf inbox --for human --json
 ```
 
@@ -630,7 +630,10 @@ Content per kind, from the plan's events and git only (no model call, instant):
 - **review:** the submission message, the acceptance criteria and how they are met (from
   the agent's notes), artifacts, changed files with line counts (`git diff --stat` of the
   task's work when known), the coordinator's assessment if it reviewed first;
-- **plan question:** the question, the plan goal and documents.
+- **plan question:** the question, the plan goal and documents;
+- **plan:** also `finished` when all tasks are finished (the plan waits to be closed);
+- **any other task** (frontends' task lists): its latest progress message and
+  percentage, and its last checkpoint.
 
 ### 13.6 pi: widget, peek and peek-on-type
 
@@ -639,18 +642,26 @@ or the model's context.
 
 - **Widget** (`ctx.ui.setWidget`, above the input): one numbered line per item waiting
   for the human in this coordinator's plan: `1 T5 question  approve the SQLite order
-  schema?`. Hidden when nothing waits. Kept current by watching the plan's events.
+  schema?`. The plan's own requests (its questions, "finished") are one line, id `plan`:
+  one reply in the chat (`plan: …`) answers all of them. Hidden when nothing waits. Kept
+  current by watching the plan's events.
 - **Peek** (`alt+1…9`, or `/atf [T5]`): a read-only overlay (`ctx.ui.custom`, overlay)
   with the item's `atf brief`. Keys: `esc` close (the typed input is untouched); `r` close
   and put `T5: ` into the input; `d` diff, `o` open a file (scrollable view or `$EDITOR`);
-  `←/→` other items. No approve key: decisions go through the chat (§13.3).
+  `←/→` other items; `t` the task list. No approve key: decisions go through the chat
+  (§13.3).
+- **Task list** (`/atf tasks`, `t` in the peek, or `/atf` when nothing waits): the plan
+  as a tree, a first row for the plan itself, each task with status (a parent's combined
+  status), owner, progress and `for you` on the requests. `⏎` opens a row's brief in the
+  same overlay (`←/→` next task, `esc` back to the list), `r` replies to it, `w` goes to
+  what waits. `/atf T3` opens any task, not only requests.
 - **Peek-on-type**: when the input starts with a waiting item's id (`T5`, `t5`, `T5:`),
   the widget expands that item in place to a few lines of its brief (question,
   recommendation, original asker; for reviews the summary and file counts); it collapses
   when the prefix changes or the message is sent. Implemented with
   `ctx.ui.onTerminalInput` (observing only, never consuming keys) plus
   `ctx.ui.getEditorText()`, debounced. An autocomplete provider suggests the waiting
-  items after `T` at the start of the input.
+  items after `T` (and `plan` after `p`) at the start of the input.
 
 ### 13.7 GitHub Copilot CLI adapter
 
@@ -673,7 +684,8 @@ herdr as one more agent kind.
   - **What waits for the human:** no widget; after each turn one transient line
     `for you: T5 question · T1 review   (/peek <id> for details)` (`session.log(…,
     {ephemeral: true})`, only when it changed). `/peek` lists the items with their first
-    sentence, `/peek T5` prints `atf brief T5` (not `/atf`: Copilot makes every skill a
+    sentence, `/peek T5` or `/peek plan` prints `atf brief`, `/peek tasks` (also `/peek`
+    when nothing waits) prints `atf list` (not `/atf`: Copilot makes every skill a
     slash command, and the atf skill already is `/atf`). Answers go through the chat (§13.3)
     or Copilot's question form (`ask_user`), which the coordinator may use for a
     question with clear options; either way it records the answer with `--relay`.

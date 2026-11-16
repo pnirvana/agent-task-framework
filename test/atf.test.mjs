@@ -1107,6 +1107,22 @@ test('§13: relayed human decisions, --recommend, brief, inbox --for', () => {
   run(['plan', 'note', '--relay', 'local demo for now']);
   assert.equal(run(['brief', 'plan']).questions.length, 0);
   assert.deepEqual(run(['inbox', '--for', 'human']).filter((i) => i.kind === 'plan-question'), []);
+
+  // a task that asks nothing (opened from a frontend's task list): where it stands
+  run(['add', 'Search']); // T4
+  run(['assign', 'T4', 'w1']);
+  run(['start', 'T4'], w1);
+  run(['progress', 'T4', 'index built', '--pct', '40'], w1);
+  b = run(['brief', 'T4']);
+  assert.equal(b.kind, 'task');
+  assert.deepEqual(b.latest, { message: 'index built', percent: 40 });
+  assert.equal(run(['brief', 'T1']).latest, undefined, 'a request shows the request, not the progress');
+  // a finished plan: its brief says so
+  assert.equal(run(['brief', 'plan']).finished, false);
+  run(['done', 'T4', '-m', 'search works'], w1);
+  run(['cancel', 'T1', '-m', 'dropped']);
+  run(['cancel', 'T3', '-m', 'dropped']);
+  assert.equal(run(['brief', 'plan']).finished, true);
 });
 
 test('§13.7: atf dispatch for subagents in the coordinator\'s harness (--as)', () => {

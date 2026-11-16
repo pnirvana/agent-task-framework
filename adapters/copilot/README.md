@@ -30,6 +30,9 @@ In the coordinator's chat:
 - after each turn a transient line says what waits for you: `for you: T5 question · T1 review`;
 - `/peek` lists those requests, `/peek T5` shows one in full (question, recommendation,
   who asked originally; for reviews the submission, acceptance criteria and changed files);
+  `/peek plan` shows the coordinator's own questions about the plan (answer `plan: …`);
+- `/peek tasks` lists all tasks of the plan (also `/peek` when nothing waits); `/peek T3`
+  shows any task, with its latest progress;
 - answer in the chat: `T5: yes, SQLite`, `T1: looks good` — the coordinator records it as
   your decision (`--relay`). For a question with clear options it may also ask with
   Copilot's question form; your choice is recorded the same way;

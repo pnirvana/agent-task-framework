@@ -547,7 +547,7 @@ export function findCycles(plan) {
  */
 export function brief(plan, taskId = null) {
   if (!taskId)
-    return { kind: 'plan', plan: plan.id, title: plan.title, goal: plan.goal ?? null, docs: plan.docs ?? [], questions: (plan.questions ?? []).map((q) => ({ ts: q.ts, actor: q.actor, message: q.message })), checkpoint: plan.checkpoint?.message ?? null };
+    return { kind: 'plan', plan: plan.id, title: plan.title, goal: plan.goal ?? null, docs: plan.docs ?? [], questions: (plan.questions ?? []).map((q) => ({ ts: q.ts, actor: q.actor, message: q.message })), finished: driverInbox(plan).some((i) => i.kind === 'finished'), checkpoint: plan.checkpoint?.message ?? null };
   const t = plan.tasks[taskId];
   if (!t) return null;
   const item = driverInbox(plan).find((i) => i.task === taskId) ?? null;
@@ -576,5 +576,10 @@ export function brief(plan, taskId = null) {
     };
   }
   if (t.status === 'failed') out.failure = { message: lastTo('failed')?.message ?? t.last_message ?? null, actor: lastTo('failed')?.actor ?? null };
+  // a task that asks nothing of anyone (frontends' task lists): where it stands
+  if (!out.question && !out.review && !out.failure) {
+    if (t.last_message) out.latest = { message: t.last_message, percent: t.status === 'in_progress' ? (t.percent ?? null) : null };
+    if (t.checkpoint?.message && t.checkpoint.message !== t.last_message) out.checkpoint = { message: t.checkpoint.message, actor: t.checkpoint.actor ?? null };
+  }
   return out;
 }

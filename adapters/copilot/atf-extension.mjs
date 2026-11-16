@@ -61,9 +61,18 @@ export default async function run({ joinSession }) {
     if (!arm) return { arm, items: [] };
     try {
       const s = loadPlan(arm.root, arm.plan);
-      const items = driverInbox(s)
-        .filter((i) => i.for === 'human')
-        .map((i) => ({ id: i.task ?? 'plan', label: KIND_LABEL[i.kind] ?? i.kind, text: firstSentence(i.message ?? (i.task ? s.tasks[i.task]?.title : '')) }));
+      const all = driverInbox(s).filter((i) => i.for === 'human');
+      // the plan's own requests (its questions, "finished") are one entry, `plan`: one reply
+      // in the chat answers all open plan questions
+      const planIts = all.filter((i) => !i.task);
+      const qs = planIts.filter((i) => i.kind === 'plan-question');
+      const items = all
+        .filter((i, k) => i.task || k === all.indexOf(planIts[0]))
+        .map((i) => {
+          const head = i.task ? i : qs[0] ?? i;
+          const more = !i.task && qs.length > 1 ? ` (+${qs.length - 1} more)` : '';
+          return { id: i.task ?? 'plan', label: KIND_LABEL[head.kind] ?? head.kind, text: firstSentence(head.message ?? (i.task ? s.tasks[i.task]?.title : '')) + more };
+        });
       return { arm, title: s.title, items };
     } catch (e) {
       log('inbox failed', e?.message);
@@ -77,15 +86,24 @@ export default async function run({ joinSession }) {
   const commands = [
     {
       name: 'peek',
-      description: 'ATF: what waits for you in this plan; /peek T5 shows one request in full',
+      description: 'ATF: what waits for you; /peek T5 or /peek plan: one request in full; /peek tasks: all tasks',
       handler: async ({ args }) => {
         const id = String(args ?? '').trim();
         const { arm, title, items } = forHuman();
         if (!arm) return say('atf: no plan yet (the coordinator has not run `atf wait`)');
-        if (!id) {
-          if (!items.length) return say(`atf · ${title}: nothing waits for you`);
-          return say([`atf · for you in ${title}:`, ...items.map((i) => `  ${i.id.padEnd(5)} ${i.label.padEnd(9)} ${i.text}`), '  /peek <id> shows one in full; answer in the chat ("T5: …")'].join('\n'));
+        const tasks = () => execFileSync(NODE, [ATF_CLI, 'list', '--plan', arm.plan], { env: { ...atfEnv(arm), NO_COLOR: '1' }, encoding: 'utf8' }).trimEnd();
+        if (id.toLowerCase() === 'tasks' || (!id && !items.length)) {
+          try {
+            const head = items.length ? `atf · tasks of ${title}` : `atf · ${title}: nothing waits for you. Tasks:`;
+            return say(`${head}\n${tasks()}\n  /peek T5 shows one task in full`);
+          } catch (e) {
+            return say(`atf list: ${String(e.stderr || e.message).trim()}`, { level: 'warning' });
+          }
         }
+        if (!id)
+          return say(
+            [`atf · for you in ${title}:`, ...items.map((i) => `  ${i.id.padEnd(5)} ${i.label.padEnd(9)} ${i.text}`), '  /peek <id> shows one in full (/peek plan: the plan\'s own questions; /peek tasks: all tasks); answer in the chat ("T5: …", "plan: …")'].join('\n'),
+          );
         try {
           const text = execFileSync(NODE, [ATF_CLI, 'brief', id, '--plan', arm.plan], { env: atfEnv(arm), encoding: 'utf8' });
           say(text.trimEnd());

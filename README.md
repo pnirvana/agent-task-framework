@@ -187,7 +187,9 @@ what you decide there it records as yours (`--relay`). Above the input, a widget
 what waits for you in the plan (questions, reviews), one line each; type a request's id
 at the start of the input (`T5`) to expand it in place, press `alt+1…9` (or `/atf T5`)
 for a read-only peek with its full brief, the diff (`d`) and the files (`o`); `r` there
-puts `T5: ` into the input to answer. Nothing of this goes into the chat or the model's
+puts `T5: ` into the input to answer. The coordinator's own questions about the plan are
+the entry `plan` (`/atf plan`, answer with `plan: …`). `/atf tasks` (or `t` in the peek)
+lists all tasks of the plan; `⏎` opens one. Nothing of this goes into the chat or the model's
 context. `atf-herdr coordinate` loads the extension; for a pi you start yourself use
 `pi -e <repo>/adapters/pi/atf.ts`, or install the repo as a pi package
 (`pi install git:github.com/pnirvana/agent-task-framework`).
@@ -239,9 +241,9 @@ The coordinator is Copilot with the atf skill. It starts subagents as Copilot's 
 background subagents: `atf dispatch T2 --name backend` assigns the task and prints the
 prompt it gives the subagent, which records its work as `backend` (`--as backend`). The
 extension wakes the idle coordinator when something needs it, prints one line after each
-turn with what waits for you (`for you: T5 question · T1 review`) and adds `/peek` (list)
-and `/peek T5` (the full request). Answer in the chat (`T5: yes, SQLite`); the coordinator
-records it as your decision. Copilot's experimental mode is required (`atf-copilot`
+turn with what waits for you (`for you: T5 question · T1 review`) and adds `/peek` (list),
+`/peek T5` or `/peek plan` (the full request) and `/peek tasks` (all tasks). Answer in
+the chat (`T5: yes, SQLite`); the coordinator records it as your decision. Copilot's experimental mode is required (`atf-copilot`
 passes `--experimental`). Without herdr, `atf-herdr tui` in a second terminal shows the
 board. In herdr, use the agent kind `copilot` (`atf-herdr coordinate
 --kind copilot`, or `"agent_kind": "copilot"` in the plugin config). Details:
