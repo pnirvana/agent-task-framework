@@ -53,10 +53,12 @@ function firstSentence(s: string | null | undefined, max = 110): string {
 const KIND_LABEL: Record<string, string> = { question: "question", "your-review": "review", review: "review", "plan-question": "question", finished: "finished", failed: "failed" };
 
 export default function (pi: any) {
-	// loaded twice (installed package and -e)? one instance is enough
+	// loaded twice (installed package and -e)? one instance is enough. Released on
+	// session_shutdown: /reload loads the extensions again in the same process
 	const g = globalThis as any;
 	if (g.__atfPiLoaded) return;
-	g.__atfPiLoaded = true;
+	const me = Symbol("atf");
+	g.__atfPiLoaded = me;
 
 	// `atf wait` writes the plan, actor and project it waits for here (the "arm" file)
 	const armFile = process.env.ATF_WAKE || path.join(os.tmpdir(), `atf-wake-${process.pid}.json`);
@@ -626,11 +628,14 @@ export default function (pi: any) {
 		refresh();
 		startWait();
 	});
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (e: any) => {
 		stopWait();
 		unInput?.();
 		clearInterval(tick);
 		if (watched) fs.unwatchFile(watched);
-		fs.rmSync(armFile, { force: true });
+		watched = null;
+		if (g.__atfPiLoaded === me) g.__atfPiLoaded = undefined;
+		// a reload keeps the coordinator's plan (the reloaded extension reads the same arm file)
+		if (e?.reason !== "reload") fs.rmSync(armFile, { force: true });
 	});
 }
