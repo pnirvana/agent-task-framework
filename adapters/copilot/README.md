@@ -31,9 +31,16 @@ In the coordinator's chat:
 - `/peek` lists those requests, `/peek T5` shows one in full (question, recommendation,
   who asked originally; for reviews the submission, acceptance criteria and changed files);
 - answer in the chat: `T5: yes, SQLite`, `T1: looks good` — the coordinator records it as
-  your decision (`--relay`);
+  your decision (`--relay`). For a question with clear options it may also ask with
+  Copilot's question form; your choice is recorded the same way;
 - the coordinator idles between decisions (you can always prompt it) and is woken by the
   extension when something needs it.
+
+## Board
+
+The ATF board runs in any terminal, also without herdr: `atf-herdr tui` (in a second
+terminal beside Copilot). It shows what needs you across plans and lets you approve,
+request changes and answer; starting agents and jumping to their panes need herdr.
 
 ## Subagents
 

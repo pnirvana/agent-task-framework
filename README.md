@@ -242,7 +242,8 @@ extension wakes the idle coordinator when something needs it, prints one line af
 turn with what waits for you (`for you: T5 question · T1 review`) and adds `/peek` (list)
 and `/peek T5` (the full request). Answer in the chat (`T5: yes, SQLite`); the coordinator
 records it as your decision. Copilot's experimental mode is required (`atf-copilot`
-passes `--experimental`). In herdr, use the agent kind `copilot` (`atf-herdr coordinate
+passes `--experimental`). Without herdr, `atf-herdr tui` in a second terminal shows the
+board. In herdr, use the agent kind `copilot` (`atf-herdr coordinate
 --kind copilot`, or `"agent_kind": "copilot"` in the plugin config). Details:
 [adapters/copilot/README.md](adapters/copilot/README.md).
 

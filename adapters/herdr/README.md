@@ -10,10 +10,19 @@ actionable inside herdr. Optional: ATF itself does not depend on any of this.
 | **Sidebar progress** | workspace tokens `$atf_plan`, `$atf_progress` (`3/5 ✓ 1 ◐ 1 ⊘`) for the Spaces sidebar |
 | **Notifications** | herdr notification when a task becomes blocked, needs review, or fails, and when a plan finishes |
 | **Stall detection** | board flags `stale?` when a task is in progress but its herdr agent has been idle > 90s (an agent that stopped without reporting) |
-| **Overview** | tab `0`, where the board starts: what needs you (agents waiting for input, your reviews, finished plans), then per plan only the tasks being worked on with their latest progress; a context panel for the selected row; approve, request changes, reply, open the review artifact or jump to the agent's terminal with one key |
+| **Overview** | tab `0`, where the board starts: what needs you (agents waiting for input, your reviews, finished plans; under a heading per plan when the scope holds several), then per plan only the tasks being worked on with their latest progress; a context panel for the selected row; approve, request changes, reply, open the review artifact or jump to the agent's terminal with one key |
 | **Spawn** | `s` on a ready task or package (or `atf-herdr spawn T3`) places a pane in a balanced grid, starts the agent (pi by default; the atf skill is discovered once installed with `atf skill install`), assigns the task and sends the kickoff prompt |
 | **Reviews** | `a` / `x` / `n` on any task draft an approval, change request or note (`d` drops, `S` submits all at once: one write per plan, so the coordinator wakes once and each owner gets all its points). Tasks that ask you to test something show as `◎ for you` |
 | **Agent lifecycle** | the coordinator starts every subagent (fresh by default); finished subagents are closed; an idle coordinator is nudged when something needs it; `atf-herdr coordinate` starts or resumes a plan's coordinator, or replaces it with a fresh session |
+
+## Without herdr
+
+`atf-herdr tui` runs the board in any terminal (no plugin needed), e.g. beside
+`atf-copilot`. Reading, approving, requesting changes, replying and answering work as in
+herdr; the scope "all projects" lists the projects in `~/.config/atf/roots.json`. What
+needs herdr is unavailable: agent state and stall flags, `g` (go to the agent), `s`/`S`
+(start a coordinator); `o` still opens PRs and URLs in the browser, but for a branch,
+commit or file it prints the command instead of opening a herdr tab.
 
 ## Install
 

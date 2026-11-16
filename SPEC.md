@@ -674,7 +674,9 @@ herdr as one more agent kind.
     `for you: T5 question · T1 review   (/peek <id> for details)` (`session.log(…,
     {ephemeral: true})`, only when it changed). `/peek` lists the items with their first
     sentence, `/peek T5` prints `atf brief T5` (not `/atf`: Copilot makes every skill a
-    slash command, and the atf skill already is `/atf`). Answers go through the chat (§13.3).
+    slash command, and the atf skill already is `/atf`). Answers go through the chat (§13.3)
+    or Copilot's question form (`ask_user`), which the coordinator may use for a
+    question with clear options; either way it records the answer with `--relay`.
 - **`atf-copilot`** starts a plan's coordinator in the current terminal: sets the
   environment, picks the session id (`copilot --session-id <uuid>`, recorded as
   `plan.session` with kind `copilot`), resumes it next time (`--resume <id>`, `--fresh`
@@ -715,6 +717,8 @@ to blocked. New CLI: `--relay`, `--recommend`, `atf brief`, `atf inbox --for`, `
    (`adapters/pi/atf.ts`).
 4. Copilot adapter: extension (wake, end-of-turn line, `/peek`), `atf-copilot`,
    `atf dispatch` + `--as`, herdr kind `copilot`, session ids. **Implemented**
-   (`adapters/copilot/`); a live run with Copilot's background subagents is pending.
+   (`adapters/copilot/`). Live runs: plans completed with Copilot's background
+   subagents (`atf dispatch`, `--as`), escalated questions answered in the question form
+   and reviews approved in the chat, both recorded with `--relay`.
 5. Later (the board is not changed now): show relayed decisions as "human (via
    coordinator)" there too.

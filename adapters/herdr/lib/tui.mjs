@@ -1375,7 +1375,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       K('?  q  ctrl+c', 'this help · close details or quit · quit'),
       [],
       H('0 Overview: what needs you, and what is being worked on'),
-      T('NEEDS YOU, most urgent first:'),
+      T('NEEDS YOU, most urgent first (under a heading per plan when the scope has several):'),
       lab('! prompt', 'red bold', 'an agent waits at a dialog in its terminal (g opens it)'),
       lab('⚠ no coord', 'red bold', 'no coordinator runs for an active plan (s resumes it, S fresh)'),
       lab('⊘ question', 'red bold', 'the coordinator asks you, on that task (r answers)'),
@@ -1469,6 +1469,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       lab('1 question queued', 'dim', 'items waiting for the running coordinator'),
       lab('↺ T4', 'magenta', 'being reworked after changes were requested'),
       lab('✎2', 'magenta', 'plan row: tasks with your input the coordinator has not acted on yet'),
+      [],
+      H('Without herdr (atf-herdr tui in any terminal)'),
+      T('Reading, approving, change requests, answers and messages work the same. Not available:'),
+      T('agent state and stale? flags, g, s / S; o opens PRs and URLs, for a branch, commit or'),
+      T('file it shows the command to run. "All projects" are those in ~/.config/atf/roots.json.'),
     ];
   }
 

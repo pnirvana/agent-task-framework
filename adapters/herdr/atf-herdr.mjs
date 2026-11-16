@@ -42,13 +42,15 @@ const HELP = `atf-herdr — run and watch ATF agents inside herdr
                                .pi/agents/*.md, agents.json); a task's --agent picks one by default
   atf-herdr discover           register ATF projects found in any herdr pane
   atf-herdr recover            repair an interrupted board rearrangement (parked panes)
-  atf-herdr tui                run the board in the current terminal
+  atf-herdr tui                run the board in the current terminal (also outside herdr,
+                               e.g. beside atf-copilot; without agent state, g, s/S)
   atf-herdr sync               push labels/progress to herdr and run a sweep now
   atf-herdr enable-sync        install the ATF post-write hook for this project
   atf-herdr disable-sync       remove it
 
 Plugin config ($(herdr plugin config-dir atf.herdr)/config.json):
-  lifecycle: "ephemeral" (default) | "persistent"   agent_kind: "pi"
+  lifecycle: "ephemeral" (default) | "persistent"
+  agent_kind: "pi" (default) | "copilot" | "claude" | "codex"   (also --kind on spawn/coordinate)
   agents: { "<kind>": { "start": [...], "resume": [..."{session}"...], "nativeSkill": bool } }
 
 Plugin actions (atf.herdr.*): board (this project; overview if none here),

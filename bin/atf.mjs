@@ -158,7 +158,8 @@ Viewing
 
 Global flags
   --plan ID     plan to act on      (default: $ATF_PLAN, then .atf/current)
-  --as WHO      actor id            (default: $ATF_ACTOR, then $USER)
+  --as WHO      actor id            (default: $ATF_ACTOR, then $USER); a subagent in its
+                coordinator's shell (atf dispatch) adds it to every command
   --role R      actor role          (default: $ATF_ROLE, e.g. coordinator|subagent)
   --json        machine-readable output
   --force       bypass transition/ownership checks

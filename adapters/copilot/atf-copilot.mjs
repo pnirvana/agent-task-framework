@@ -33,7 +33,8 @@ const HELP = `atf-copilot: run an ATF plan's coordinator in GitHub Copilot CLI
 
 The extension wakes the idle coordinator when something needs it, prints what waits for
 you after each turn, and adds /peek [T5]. It needs Copilot's experimental mode (passed as
---experimental) and is approved once in Copilot.`;
+--experimental) and is approved once in Copilot. The board, without herdr: atf-herdr tui
+(in a second terminal).`;
 
 function parse(argv) {
   const flags = {};
