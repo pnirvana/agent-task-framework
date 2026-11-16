@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
 import { TERMINAL, driverInbox, planSummary, HUMAN } from '../../../src/core.mjs';
-import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, reviewEvents } from '../../../src/store.mjs';
+import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, reviewEvents, hasLiveWaiter } from '../../../src/store.mjs';
 import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject } from './herdr.mjs';
 import { progressText } from './sync.mjs';
 
@@ -947,7 +947,9 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (inHerdr() && st.status === 'active' && openWork && !coord.live && !coord.away)
       mine.push(at({ kind: 'no-coordinator', actor: null, task: null, ts: st.updated_at }));
     const finished = st.order.some((id) => !st.tasks[id].children.length) && st.order.every((id) => st.tasks[id].children.length || TERMINAL.has(st.tasks[id].status));
-    if (st.status === 'active' && !finished && coord.live && ['idle', 'done'].includes(coord.live.agent_status) && Date.now() - coord.live.since > WAITING_MS)
+    // an idle coordinator waits for the human, unless its harness wakes it (a live `atf wait
+    // --new` waiter: the pi extension, Copilot): then idling is how it waits for the plan
+    if (st.status === 'active' && !finished && coord.live && ['idle', 'done'].includes(coord.live.agent_status) && Date.now() - coord.live.since > WAITING_MS && !hasLiveWaiter(p.root, p.id, coord.id))
       mine.push(at({ kind: 'coordinator', actor: coord.id, pane: coord.live.pane_id, task: null, ts: new Date(coord.live.since).toISOString() }));
     for (const it of inboxOf(p)) {
       // items for the human, and the coordinator's own when no coordinator handles them
@@ -1381,7 +1383,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       lab('⊘ question', 'red bold', 'the coordinator asks you, on that task (r answers)'),
       lab('? plan', 'red bold', 'the coordinator asks you about the whole plan (r answers)'),
       lab('◎ review', 'magenta bold', 'a task asks you to review it (a approve, x change request)'),
-      lab('? input', 'yellow bold', 'a coordinator waits in its prompt (it should ask through ATF)'),
+      lab('? input', 'yellow bold', 'a coordinator waits in its prompt (not shown for one its harness wakes: pi, Copilot)'),
       lab('● finished', 'green', 'all tasks of a plan are finished (c closes the plan)'),
       T('Questions, failed or stalled tasks and the coordinator’s reviews are listed here only'),
       T('when no coordinator is running for the plan; otherwise the plan row says "N queued".'),
