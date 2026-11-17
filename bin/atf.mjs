@@ -220,7 +220,7 @@ function parseArgs(argv) {
 // ---------- output helpers ----------
 const tty = process.stdout.isTTY && !process.env.NO_COLOR;
 const c = (code) => (s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : String(s));
-const dim = c(2), bold = c(1), red = c(31), green = c(32), yellow = c(33), blue = c(34), magenta = c(35), cyan = c(36);
+const dim = c(2), bold = c(1), inverse = c(7), red = c(31), green = c(32), yellow = c(33), blue = c(34), magenta = c(35), cyan = c(36);
 const STATUS_STYLE = {
   todo: [dim, '○'],
   in_progress: [blue, '◐'],
@@ -1069,8 +1069,20 @@ const commands = {
       const L = [`${bold(t.id)} ${t.title}  ${dim(t.status)}`];
       const pick = FLAGS.run ? live.all.find((a) => a.ref === path.resolve(FLAGS.run)) : null;
       const runs = pick ? [] : live.now;
+      // every run is headed by its kind and whether it runs now or already ran: finished
+      // runs stay in view, so it must be clear which is which
+      const tag = (k, col) => col(inverse(` ${k} `.padEnd(Math.max(...[...live.now, ...live.recorded].map((a) => a.kind.length), 0) + 2)));
+      const STATE = { ok: [green, '✓'], failed: [red, '✗'], waiting: [yellow, '⧖'], running: [cyan, '⚙'], gone: [dim, '–'], unknown: [String, '·'] };
+      const ranHead = (a) => {
+        const s = a.summary;
+        const [col, g] = STATE[s.state] || STATE.unknown;
+        const when = a.exit != null ? `finished ${ago(a.ts)} · took ${elapsed(0, a.duration_ms || 0)} · exit ${a.exit}` : a.live ? `live file${s.mtime ? `, written ${ago(new Date(s.mtime).toISOString())}` : ''}` : '';
+        return `${col(g)} ${tag(a.kind, col)} ${dim(when)}\n  ${col(s.line)}`;
+      };
+      if (runs.length) L.push('', bold('now'));
       for (const r of runs) {
-        L.push('', `${(r.waiting ? yellow : cyan)(r.waiting ? '⧖ waiting' : '⚙ running')} ${dim(elapsed(r.since))}  ${r.kind}: ${r.summary.line}`, dim('  $ ' + String(r.cmd).split('\n')[0].slice(0, W - 6)));
+        const col = r.waiting ? yellow : cyan;
+        L.push(`${col(r.waiting ? '⧖' : '⚙')} ${tag(r.kind, col)} ${dim(`${r.approval ? 'waiting for your approval' : r.waiting ? 'waiting' : 'running'} ${elapsed(r.since)}`)}`, `  ${r.summary.line}`, dim('  $ ' + String(r.cmd).split('\n')[0].slice(0, W - 6)));
         if (liveKind(r.kind)?.view) L.push(...liveView(r, r.summary, { width: W, full: true, active: true }).map(seg));
         else L.push(...(readTail(r.out, 16384) || '').split('\n').filter((x) => x.trim()).slice(-15).map((x) => dim('  │ ') + x.slice(0, W - 4)));
       }
@@ -1078,7 +1090,7 @@ const commands = {
       const rec = pick || (!runs.length && (live.recorded.find((a) => a.kind !== 'log' && !a.live) || live.recorded[0])); // the newest build/tests/pipeline run (newest first), else the newest of all
       if (rec) {
         const s = rec.summary;
-        L.push('', `${(s.state === 'failed' ? red : s.state === 'ok' ? green : String)(rec.kind)} ${s.line}${rec.exit != null ? dim(`  exit ${rec.exit} · ${elapsed(0, rec.duration_ms || 0)} · ${ago(rec.ts)}`) : ''}`);
+        L.push('', bold(rec.exit != null ? 'last run' : 'watched'), ranHead(rec));
         if (rec.cmd) L.push(dim('  $ ' + String(rec.cmd).split('\n')[0].slice(0, W - 6)));
         if (liveKind(rec.kind)?.view) L.push(...liveView(rec, s, { width: W, full: true }).map(seg));
         else L.push(...(readTail(rec.ref, 16384) || '').split('\n').filter((x) => x.trim()).slice(-15).map((x) => dim('  │ ') + x.slice(0, W - 4)));
@@ -1086,9 +1098,12 @@ const commands = {
       }
       if (!runs.length && !rec) L.push('', dim('nothing live on this task yet: builds, tests and pipelines its agent runs show here'));
       // the other current runs, then (--all) the history: one line each
-      const line = (a) => `  ${(a.summary.state === 'failed' ? red : a.summary.state === 'ok' ? green : String)(a.kind)} ${a.summary.line}${a.exit != null ? dim(`  exit ${a.exit} · ${ago(a.ts)}`) : ''}${dim('  --run ' + path.relative(process.cwd(), a.ref))}`;
+      const line = (a) => {
+        const [col, g] = STATE[a.summary.state] || STATE.unknown;
+        return `${col(g)} ${tag(a.kind, col)} ${a.summary.line}${a.exit != null ? dim(`  exit ${a.exit} · ${ago(a.ts)}`) : a.live ? dim('  live file') : ''}${dim('  --run ' + path.relative(process.cwd(), a.ref))}`;
+      };
       const others = live.recorded.filter((a) => a !== rec);
-      if (others.length) L.push('', bold('also current'), ...others.map(line));
+      if (others.length) L.push('', bold('other runs and files'), ...others.map(line));
       if (FLAGS.all && live.earlier.length) L.push('', bold('earlier runs') + dim('  replaced by newer ones'), ...live.earlier.map(line));
       else if (live.earlier.length) L.push('', dim(`${earlierText(live)} (--all lists them)`));
       return L.join('\n');
