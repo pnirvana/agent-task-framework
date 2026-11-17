@@ -24,14 +24,26 @@ export const unquote = (cmd) => String(cmd).replace(/'[^']*'|"(?:\\.|[^"\\])*"/g
  * first, by priority, then the built-in pipeline, maven, tests, wait, build), or null (an
  * ordinary command). See docs/live-plugins.md.
  */
-export function classify(cmd, cwd = process.cwd()) {
+export function classify(cmd, cwd = process.cwd(), depth = 0) {
   const unquoted = unquote(cmd);
   for (const def of matchOrder()) {
     try {
       if (def.match(String(cmd), { unquoted, cwd })) return def.kind;
     } catch {} // a broken plugin never stops the others
   }
+  // nothing matched the whole command: the script it hands to a shell
+  // (`docker exec app bash -c './mvnw verify'`, `ssh host sh -c "…"`)
+  if (depth < 2) for (const s of shellScripts(cmd)) {
+    const k = classify(s, cwd, depth + 1);
+    if (k) return k;
+  }
   return null;
+}
+
+/** The scripts a command runs through `bash|sh|zsh|dash|ksh [-opts] -c '…'` (quoted). */
+export function shellScripts(cmd) {
+  const re = /(?:^|[\s;&|(])(?:\S*\/)?(?:ba|z|da|k)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+('([^']*)'|"((?:\\.|[^"\\])*)")/g;
+  return [...String(cmd).matchAll(re)].map((m) => m[2] ?? m[3].replace(/\\(["\\$`])/g, '$1'));
 }
 
 /** The directory a command runs in: a leading `cd <dir> &&` changes it. */
@@ -44,7 +56,8 @@ export function cwdOf(cmd, base) {
 
 /**
  * Files a command writes in the background, or to watch later: `> f &`, `nohup … > f`,
- * `| tee f`, `>> f`. Returns [{file, background}]; /dev/* and redirects into `$VAR`s are ignored.
+ * `| tee f`, `>> f`. Returns [{file, background, seg}] (`seg`: the command writing it, to
+ * classify on its own); /dev/* and redirects into `$VAR`s are ignored.
  */
 export function outputFiles(cmd, base) {
   const c = String(cmd);
@@ -59,7 +72,7 @@ export function outputFiles(cmd, base) {
       if (!f || f.startsWith('/dev/') || f.startsWith('&') || f.includes('$')) continue;
       const tee = m[0].includes('tee');
       if (!bg && !tee) continue; // a plain foreground `> f` is the command's own output, captured anyway
-      out.push({ file: path.resolve(cwdOf(c, base), f.replace(/^~(?=\/|$)/, process.env.HOME || '~')), background: bg });
+      out.push({ file: path.resolve(cwdOf(c, base), f.replace(/^~(?=\/|$)/, process.env.HOME || '~')), background: bg, seg: seg.trim() });
     }
   }
   return [...new Map(out.map((x) => [x.file, x])).values()];
@@ -415,7 +428,31 @@ function summarizeTests(text) {
 
 const PIPE_URL = /https?:\/\/[^\s'"<>)]+\/(?:-\/pipelines|actions\/runs|pipelines)\/\d+/g;
 
+/**
+ * `glab ci get` (text): a "# Pipeline:" block of `key: value` lines (id, status, …), then
+ * "# Jobs:" with `name: status` lines. The latest block of a polling loop counts.
+ */
+function glabGet(text) {
+  const at = text.lastIndexOf('# Pipeline:');
+  if (at < 0) return null;
+  const block = text.slice(at);
+  const status = block.match(/^status:\s*(\w+)/m)?.[1]?.toLowerCase();
+  if (!status) return null;
+  const jobsAt = block.indexOf('# Jobs:');
+  const jobs = jobsAt < 0 ? [] : [...block.slice(jobsAt + 7).matchAll(/^\s*([^:\n#][^:\n]*?):\s+([a-z_]+)\s*$/gm)].map((m) => ({ name: m[1].trim(), status: m[2] }));
+  const web = block.match(PIPE_URL)?.[0] ?? null;
+  return { id: block.match(/^id:\s*(\d+)/m)?.[1] ?? null, status, jobs, url: web };
+}
+
 function summarizePipeline(text) {
+  const g = glabGet(text);
+  if (g) {
+    const st = /^(success|passed)$/.test(g.status) ? 'ok' : /^(failed|canceled|cancelled)$/.test(g.status) ? 'failed' : 'waiting';
+    const done = g.jobs.filter((j) => /^(success|failed|canceled|skipped|manual)$/.test(j.status)).length;
+    const failed = g.jobs.filter((j) => j.status === 'failed');
+    const line = [`pipeline${g.id ? ' #' + g.id : ''} ${g.status}`, g.jobs.length ? `${done}/${g.jobs.length} jobs` : '', failed.length ? `${failed.length} ✗` : ''].filter(Boolean).join(' · ');
+    return { state: st, line: clip(line), counts: { id: g.id, status: g.status, url: g.url, jobs: g.jobs }, details: failed.map((j) => `✗ ${j.name}`) };
+  }
   const lines = text.split('\n');
   const urls = [...new Set(text.match(PIPE_URL) || [])];
   const id = urls.length ? urls[urls.length - 1].match(/(\d+)$/)[1] : text.match(/[Pp]ipeline\s*#?(\d{3,})/)?.[1] ?? null;
@@ -518,6 +555,9 @@ export function summarize(x) {
   try {
     st = fs.statSync(file);
   } catch {
+    // registered when its command started: the file may not be written yet
+    const age = x.since ? Date.now() - Date.parse(x.since) : Infinity;
+    if (age < 120_000) return { state: 'unknown', line: `waiting for ${path.basename(file)}`, counts: {}, details: [], mtime: null };
     return { state: 'gone', line: 'file is gone', counts: {}, details: [], mtime: null };
   }
   if (def.refresh && autoRefresh) refreshLive(x).catch(() => {});
@@ -610,7 +650,7 @@ export function activeRuns(root, planId) {
     try {
       const s = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
       if (!s.pid || !alive(s.pid)) continue;
-      for (const r of s.runs || []) out.push({ ...r, actor: s.actor, waiting: isWaiting(r.kind) });
+      for (const r of s.runs || []) out.push({ ...r, actor: s.actor, waiting: isWaiting(r.kind) || !!r.approval });
     } catch {}
   }
   return out;
@@ -642,7 +682,9 @@ export function supersedeKey(a) {
  * replaced (history: `atf live --all`), `all` both. `runs` from activeRuns().
  */
 export function taskLive(task, runs = []) {
-  const now = runs.filter((r) => r.task === task.id).map((r) => ({ ...r, active: true, summary: summarize(r) }));
+  // a command the harness holds until the human allows it: waits for them, does not run yet
+  const asking = { state: 'waiting', line: 'waiting for your approval', counts: {}, details: [], mtime: null };
+  const now = runs.filter((r) => r.task === task.id).map((r) => ({ ...r, active: true, summary: r.approval ? asking : summarize(r) }));
   const all = (task.artifacts || [])
     .map((a, i) => ({ ...a, i }))
     .filter((a) => !(a.live && /^[a-z]+:\/\//.test(a.ref))) // a URL registered as live: not a file

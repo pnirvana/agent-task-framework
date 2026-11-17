@@ -36,6 +36,8 @@ plans, break them into tasks, and report progress, in a format any frontend can 
 | `adapters/herdr/` | herdr plugin: board TUI, pane labels, sidebar progress, notifications, spawn, agent lifecycle |
 | `adapters/pi/atf.ts` | pi extension: wakes the idle coordinator; what waits for you next to the chat |
 | `adapters/pi/atf-live.ts` | pi extension for subagents: observes their builds, tests and pipeline watches (SPEC §14) |
+| `adapters/opencode/atf.mjs` | opencode plugin: the same for opencode agents (`atf-herdr spawn --kind opencode`) |
+| `src/live-observer.mjs` | the harness-independent part of those hooks (pi, Copilot, opencode) |
 | `adapters/copilot/` | GitHub Copilot CLI: `atf-copilot` launcher and extension (wake, `/peek`) |
 | `test/` | `npm test` (fold semantics, transitions, a 12-way concurrent-claim race, wait) |
 
@@ -222,8 +224,10 @@ session that worked on the task before) and their panes are closed once they fin
 They are never relaunched: the coordinator starts a new agent when a task comes back.
 Details: [adapters/herdr/README.md](adapters/herdr/README.md).
 
-**What agents run and wait for** (SPEC §14): pi subagents started by `spawn` load
-`adapters/pi/atf-live.ts`, which observes their shell commands without changing them.
+**What agents run and wait for** (SPEC §14): agents observe their own shell commands
+without changing them: pi (`adapters/pi/atf-live.ts`) and opencode (`adapters/opencode/`)
+agents started by `spawn`, and Copilot sessions with the ATF extension, also the
+coordinator's background subagents.
 The board shows what an agent runs right now (`⚙ 2/5 core · 40 tests`), what it waits for
 (`⧖ pipeline #555 running`), and the result of each build, test run and pipeline watch
 (exit code, summary, failing tests, the full output: `L` opens it). Agents can register

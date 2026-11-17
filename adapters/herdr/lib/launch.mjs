@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TERMINAL, attentionFor, launchPlan } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, transact, skillInstalled, resolveActor, hasLiveWaiter } from '../../../src/store.mjs';
-import { herdr, notify, pluginConfig, sameServer, currentSocket, liveAgents, inProject, boardPaneIds, pluginStateDir } from './herdr.mjs';
+import { herdr, paneText, startFailure, notify, pluginConfig, sameServer, currentSocket, liveAgents, inProject, boardPaneIds, pluginStateDir } from './herdr.mjs';
 import { chooseSplit, tabLayout, withPlacementLock } from './layout.mjs';
 import { resolveAgentDef, piArgsForAgent } from './agents.mjs';
 import { SKILL_DIR, buildPrompt, coordinatorPrompt } from '../../../src/prompts.mjs';
@@ -21,6 +21,22 @@ export const ATF_BIN = path.resolve(HERE, '../../../bin');
 export { SKILL_DIR, buildPrompt, coordinatorPrompt };
 const WAKE_EXT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../pi/atf.ts');
 const LIVE_EXT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../pi/atf-live.ts');
+const OPENCODE_PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../opencode/atf.mjs');
+
+/**
+ * opencode's extra config for agents ATF starts: the ATF plugin (live view, SPEC §14),
+ * merged into an OPENCODE_CONFIG_CONTENT the user may already have.
+ */
+function opencodeConfig() {
+  let cfg = {};
+  try {
+    cfg = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}') || {};
+  } catch {}
+  const plugin = `file://${OPENCODE_PLUGIN}`;
+  return JSON.stringify({ ...cfg, plugin: [...new Set([...(Array.isArray(cfg.plugin) ? cfg.plugin : []), plugin])] });
+}
+/** A kind's extra environment (`env` in its config), placeholders filled in. */
+const kindEnv = (kindCfg) => Object.fromEntries(Object.entries(kindCfg.env || {}).map(([k, v]) => [k, String(v).replace('{opencodeConfig}', () => opencodeConfig())]));
 
 /**
  * Per agent kind: extra args to start fresh, args to resume a session, and whether the
@@ -38,6 +54,9 @@ export const AGENT_KINDS = {
   // ATF_WAKE from the environment (wakeEnv): an extension cannot set the agent's env.
   copilot: { start: ['--experimental', '--session-id', '{newsession}'], resume: ['--experimental', '--resume', '{session}'], wakeEnv: true, nativeSkill: true },
   codex: { start: [], resume: ['resume', '{session}'] },
+  // opencode: the ATF plugin (live view) through its config env; sessions are opencode's
+  // own ids (not known at start): agents start fresh from the task's checkpoint
+  opencode: { start: [], env: { OPENCODE_CONFIG_CONTENT: '{opencodeConfig}' }, nativeSkill: true },
 };
 
 export function agentKinds() {
@@ -196,6 +215,7 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
     ATF_HARNESS: 'herdr',
     ATF_LIFECYCLE: lifecycle(),
     PATH: `${ATF_BIN}:${process.env.PATH}`, // `atf` resolvable without a global install
+    ...kindEnv(kindCfg),
   };
   placement = agentPlacement(placement);
   const pane = withPlacementLock(() => placeAgentPane({ cwd: path.dirname(root), env, refPane, direction, workspace, placement }));
@@ -209,8 +229,9 @@ export function launchAgent({ root, planId, taskId, name, kind, agent, early = f
   const args = [...kindArgs.map(sub), ...agentArgs, ...extraArgs];
   const started = herdr(['agent', 'start', name, '--kind', kind, '--pane', pane, ...(args.length ? ['--', ...args] : [])], { timeout: 60_000 });
   if (!started) {
+    const why = startFailure(kind, paneText(pane), path.dirname(root));
     herdr(['pane', 'close', pane]);
-    throw new Error(`herdr could not start ${kind} agent "${name}"`);
+    throw new Error(`herdr could not start ${kind} agent "${name}"${why ? `: ${why}` : ''}`);
   }
   herdr(['pane', 'rename', pane, name]); // the pane shows who works in it, not the tab it sits in
   // register before anything writes to the plan: hooks fired by the assignment below
@@ -272,7 +293,7 @@ export function launchCoordinator({ root, planId, fresh = false, kind, handoffMs
     sleepMs(2000); // let it end its turn
     herdr(['pane', 'close', running.pane_id]);
   }
-  const env = { ATF_DIR: root, ATF_PLAN: planId, ATF_ACTOR: name, ATF_ROLE: 'coordinator', ATF_HARNESS: 'herdr', PATH: `${ATF_BIN}:${process.env.PATH}` };
+  const env = { ATF_DIR: root, ATF_PLAN: planId, ATF_ACTOR: name, ATF_ROLE: 'coordinator', ATF_HARNESS: 'herdr', PATH: `${ATF_BIN}:${process.env.PATH}`, ...kindEnv(kindCfg) };
   // a harness whose wake extension cannot set the agent's env (Copilot): the arm file is set here
   if (kindCfg.wakeEnv) env.ATF_WAKE = path.join(stateDir(), `wake-${planId}.json`);
   const envArgs = Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
@@ -287,8 +308,9 @@ export function launchCoordinator({ root, planId, fresh = false, kind, handoffMs
   const kindArgs = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []), ...(kindCfg.coordinator || [])];
   const args = kindArgs.map((a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session).replace('{newsession}', newSession).replace('{wake}', WAKE_EXT));
   if (!herdr(['agent', 'start', hname, '--kind', kind, '--pane', pane, ...(args.length ? ['--', ...args] : [])], { timeout: 60_000 })) {
+    const why = startFailure(kind, paneText(pane), path.dirname(root));
     herdr(['pane', 'close', pane]);
-    throw new Error(`herdr could not start ${kind} agent "${hname}"`);
+    throw new Error(`herdr could not start ${kind} agent "${hname}"${why ? `: ${why}` : ''}`);
   }
   herdr(['pane', 'rename', pane, name]);
   updateRegistry((reg) => {

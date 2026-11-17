@@ -9,10 +9,14 @@
 //   2. refresh(): the GitLab API, from the machine the board runs on:
 //        GET <api>/projects/<project>/pipelines/<id>        the pipeline
 //        GET <api>/projects/<project>/pipelines/<id>/jobs   its jobs (stage, status, duration)
-//      <api> and <project> come from the URLs in the output; configure with
+//      <api> and <project> come from the URLs in the output. Authentication, the first
+//      that applies:
 //        GITLAB_TOKEN    a token with read_api (sent as PRIVATE-TOKEN), or the file
 //                        ~/.config/atf/live/gitlab.token (the board may not run with your
-//                        shell's environment); without one only public projects answer
+//                        shell's environment)
+//        glab            `glab api …` with glab's own login (`glab auth login`): no token
+//                        to manage, if glab is installed where the board runs
+//        neither         plain requests: only public projects answer
 //        GITLAB_API_URL  e.g. https://gitlab.example.com/api/v4 (when the output has none)
 //        GITLAB_PROJECT  project id or path (when the output has none)
 //
@@ -22,6 +26,26 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+
+/** `glab api <path>` against the API's host, with glab's login; null if glab is not there. */
+function glabApi(api, rel) {
+  return new Promise((resolve, reject) => {
+    const host = new URL(api).host;
+    execFile('glab', ['api', '--hostname', host, rel], { timeout: 8000, maxBuffer: 8 << 20 }, (err, out, errOut) => {
+      if (err?.code === 'ENOENT') return resolve(null);
+      if (err) return reject(new Error(`glab api: ${String(errOut || err.message).trim().split('\n')[0]}`));
+      try {
+        resolve(JSON.parse(out));
+      } catch {
+        reject(new Error('glab api: not JSON'));
+      }
+    });
+  });
+}
+
+/** Jobs in pipeline order: by id (the API lists newest first; output may list them any way). */
+const inOrder = (jobs) => (jobs.every((j) => j.id != null) ? [...jobs].sort((a, b) => a.id - b.id) : jobs);
 
 /** The token: $GITLAB_TOKEN, else ~/.config/atf/live/gitlab.token (never logged or shown). */
 function token() {
@@ -65,7 +89,7 @@ function parse(text, cmd = '') {
   for (const m of text.matchAll(/\{[^{}]*"stage"\s*:\s*"([^"]+)"[^{}]*\}/g)) {
     const o = m[0];
     const get = (k) => o.match(new RegExp(`"${k}"\\s*:\\s*"?([^",}]*)"?`))?.[1];
-    const job = { name: get('name'), stage: m[1], status: get('status'), duration: Number(get('duration')) || null };
+    const job = { id: Number(o.match(/"id"\s*:\s*(\d+)/)?.[1]) || null, name: get('name'), stage: m[1], status: get('status'), duration: Number(get('duration')) || null };
     if (job.name && job.status) p.jobs = [...p.jobs.filter((j) => j.name !== job.name), job];
   }
   // … or as glab-like lines: "(running) • 00m 12s   test   unit"  (adjust to your glab version)
@@ -95,7 +119,7 @@ export default {
     const p = parse(text, ctx.cmd || '');
     const f = ctx.fetched; // {pipeline, jobs} from refresh(), when it ran
     const status = f?.pipeline?.status ?? p.status;
-    const jobs = (f?.jobs?.length ? f.jobs : p.jobs).map((j) => ({ name: j.name, stage: j.stage, status: j.status, duration: j.duration ?? null, failure_reason: j.failure_reason ?? null, allow_failure: !!j.allow_failure }));
+    const jobs = inOrder(f?.jobs?.length ? f.jobs : p.jobs).map((j) => ({ name: j.name, stage: j.stage, status: j.status, duration: j.duration ?? null, failure_reason: j.failure_reason ?? null, allow_failure: !!j.allow_failure }));
     const stages = [...new Set(jobs.map((j) => j.stage))];
     const done = jobs.filter((j) => TERMINAL.has(j.status)).length;
     const current = stages.find((s) => jobs.some((j) => j.stage === s && !TERMINAL.has(j.status)));
@@ -117,14 +141,21 @@ export default {
     if (!p.api || !p.project || !p.id) return ctx.previous; // nothing to ask yet
     const t = token();
     const headers = t ? { 'PRIVATE-TOKEN': t } : {};
-    const base = `${p.api.replace(/\/$/, '')}/projects/${encodeURIComponent(p.project)}/pipelines/${p.id}`;
-    const get = async (u) => {
-      const r = await fetch(u, { headers, signal: AbortSignal.timeout(8000) });
-      if (!r.ok) throw new Error(`GitLab ${r.status} for ${u.replace(/\?.*/, '')}`);
-      return r.json();
+    const api = p.api.replace(/\/$/, '');
+    const rel = `projects/${encodeURIComponent(p.project)}/pipelines/${p.id}`;
+    const fetchJson = async (r) => {
+      const res = await fetch(`${api}/${r}`, { headers, signal: AbortSignal.timeout(8000) });
+      if (!res.ok) throw new Error(`GitLab ${res.status} for ${api}/${r.replace(/\?.*/, '')}`);
+      return res.json();
     };
-    const [pipeline, jobs] = await Promise.all([get(base), get(`${base}/jobs?per_page=100`)]);
-    return { pipeline, jobs: jobs.reverse(), final: TERMINAL.has(pipeline.status) }; // the API lists newest first
+    // a token if there is one, else glab's login, else a plain request (public projects)
+    const get = async (r) => {
+      if (t) return fetchJson(r);
+      const viaGlab = await glabApi(api, r).catch(() => null); // not logged in to this host: a plain request
+      return viaGlab ?? fetchJson(r);
+    };
+    const [pipeline, jobs] = await Promise.all([get(rel), get(`${rel}/jobs?per_page=100`)]);
+    return { pipeline, jobs: inOrder(jobs), final: TERMINAL.has(pipeline.status) };
   },
 
   // board details and `atf live`: one line per stage (full: one per job)

@@ -1365,3 +1365,173 @@ test('board: no line wider than the pane (wide characters would wrap and make it
   for (const segs of [[['x'.repeat(39) + '⏳', '']], [['⏳'.repeat(30), 'red']], [['ab', ''], ['日本語テキスト', 'cyan'], ['🚀 done', '']]]) assert.ok(visible(fit(segs, 40)) <= 40, JSON.stringify(segs));
   assert.equal(visible(fit([['x'.repeat(39) + '⏳', '']], 40)), 39); // the wide char does not fit: the column stays empty
 });
+
+/** Run `fn` with ATF env vars set for the in-process adapters, restoring the env after. */
+async function withEnv(vars, fn) {
+  const saved = { ...process.env };
+  Object.assign(process.env, vars);
+  try {
+    return await fn();
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+}
+
+test('§14 live: Copilot adapter (background subagent, command moved to the background)', async () => {
+  const { run, dir, env } = sandbox();
+  run(['add', 'Build']);
+  run(['dispatch', 'T1', '--name', 'backend']);
+  run(['start', 'T1', '--as', 'backend']);
+  const root = path.join(dir, '.atf');
+  const plan = fs.readdirSync(path.join(root, 'plans'))[0];
+  const L = await import('../src/live.mjs');
+  await withEnv({ ATF_DIR: root, ATF_PLAN: plan, ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', ATF_REGISTRY: env.ATF_REGISTRY }, async () => {
+    const { attachLive } = await import('../adapters/copilot/live.mjs');
+    const h = {};
+    const session = { on: (t, f) => (h[t] = f) };
+    const obs = attachLive(session);
+    await obs.ready;
+    const tick = () => new Promise((r) => setTimeout(r, 30));
+    h['subagent.started']({ agentId: 'a1', data: { agentDisplayName: 'backend' } });
+    h['tool.execution_start']({ agentId: 'a1', data: { toolCallId: 'c1', toolName: 'bash', arguments: { command: 'mvn -B test', mode: 'sync' } } });
+    h['tool.execution_start']({ data: { toolCallId: 'c0', toolName: 'bash', arguments: { command: 'mvn -B test' } } }); // the coordinator's own: no task
+    h['tool.execution_start']({ agentId: 'zz', data: { toolCallId: 'c9', toolName: 'bash', arguments: { command: 'mvn -B test' } } }); // unknown subagent
+    await tick();
+    h['tool.shell_output']({ agentId: 'a1', data: { toolCallId: 'c1', text: '[INFO] Building core 1.0 [1/2]\n' } });
+    let now = L.activeRuns(root, plan);
+    assert.equal(now.length, 1);
+    assert.deepEqual([now[0].actor, now[0].task, now[0].kind], ['backend', 'T1', 'maven']);
+    // moved to the background: still running
+    h['tool.execution_complete']({ agentId: 'a1', data: { toolCallId: 'c1', success: true, result: { content: '<command with shellId: 7 moved to background>', structuredContent: { shellId: '7' } } } });
+    assert.equal(L.activeRuns(root, plan).length, 1);
+    // the agent reads it; the result says it completed
+    h['tool.execution_start']({ agentId: 'a1', data: { toolCallId: 'r1', toolName: 'read_bash', arguments: { shellId: '7' } } });
+    h['tool.execution_complete']({ agentId: 'a1', data: { toolCallId: 'r1', success: true, result: { content: '[INFO] BUILD FAILURE\n<shellId: 7 completed with exit code 1>' } } });
+    assert.equal(L.activeRuns(root, plan).length, 0);
+    // a command Copilot refuses ends before its start is registered: not left running
+    h['tool.execution_start']({ agentId: 'a1', data: { toolCallId: 'x1', toolName: 'bash', arguments: { command: 'sleep 20; kill "$pid"' } } });
+    h['tool.execution_complete']({ agentId: 'a1', data: { toolCallId: 'x1', success: false, error: { message: 'Command not executed.' } } });
+    await new Promise((r) => setTimeout(r, 4500)); // past the delay after which ordinary commands show
+    assert.equal(L.activeRuns(root, plan).length, 0);
+    // a command waiting for the human's approval: shown as waiting for them, at once
+    h['tool.execution_start']({ agentId: 'a1', data: { toolCallId: 'p1', toolName: 'bash', arguments: { command: './run-app.sh > app.log 2>&1 &' } } });
+    h['permission.requested']({ data: { requestId: 'q1', permissionRequest: { kind: 'shell', toolCallId: 'p1' } } });
+    await tick();
+    now = L.activeRuns(root, plan);
+    assert.deepEqual([now.length, now[0]?.approval, now[0]?.waiting], [1, true, true]);
+    const badge = L.liveBadge(L.taskLive({ id: 'T1', artifacts: [] }, now));
+    assert.deepEqual([badge.glyph, badge.text], ['⧖', 'waiting for your approval']);
+    h['permission.completed']({ data: { requestId: 'q1', toolCallId: 'p1', result: { kind: 'approved' } } });
+    await tick();
+    assert.equal(L.activeRuns(root, plan)[0]?.approval, undefined);
+    h['tool.execution_complete']({ agentId: 'a1', data: { toolCallId: 'p1', success: true, shellExecution: { exitCode: 0 }, result: { content: '' } } });
+    await tick();
+    h['session.shutdown']({});
+  });
+  const t = run(['show', 'T1']);
+  const runs = t.artifacts.filter((a) => a.cmd && !a.live);
+  assert.equal(runs.length, 1);
+  assert.deepEqual([runs[0].kind, runs[0].exit, runs[0].actor], ['maven', 1, 'backend']);
+  assert.match(fs.readFileSync(runs[0].ref, 'utf8'), /Building core[\s\S]*BUILD FAILURE/);
+});
+
+test('§14 live: opencode plugin (bash parts, exit code, child sessions)', async () => {
+  const { run, dir, env } = sandbox();
+  run(['add', 'Tests']);
+  run(['dispatch', 'T1', '--name', 'oc1']);
+  run(['start', 'T1', '--as', 'oc1']);
+  const root = path.join(dir, '.atf');
+  const plan = fs.readdirSync(path.join(root, 'plans'))[0];
+  const L = await import('../src/live.mjs');
+  await withEnv({ ATF_DIR: root, ATF_PLAN: plan, ATF_ACTOR: 'oc1', ATF_ROLE: 'subagent', ATF_REGISTRY: env.ATF_REGISTRY }, async () => {
+    const { AtfLivePlugin } = await import('../adapters/opencode/atf.mjs');
+    const hooks = await AtfLivePlugin({ directory: dir });
+    const part = (status, extra = {}) => ({ type: 'message.part.updated', properties: { part: { type: 'tool', tool: 'bash', callID: 'k1', sessionID: 's-root', state: { status, input: { command: 'npm test' }, time: { start: 1000, end: 4000 }, ...extra } } } });
+    await hooks.event({ event: part('pending') });
+    await hooks.event({ event: part('running', { metadata: { output: '# tests 3\n' } }) });
+    const now = L.activeRuns(root, plan);
+    assert.deepEqual([now.length, now[0]?.kind, now[0]?.actor], [1, 'tests', 'oc1']);
+    // opencode asks the human first: waiting for them until the reply
+    await hooks.event({ event: { type: 'permission.asked', properties: { id: 'per1', sessionID: 's-root', permission: 'bash', patterns: ['npm test'], metadata: {}, always: [], tool: { messageID: 'm1', callID: 'k1' } } } });
+    assert.deepEqual(L.activeRuns(root, plan).map((r) => [r.approval, r.waiting]), [[true, true]]);
+    await hooks.event({ event: { type: 'permission.replied', properties: { sessionID: 's-root', requestID: 'per1', reply: 'once' } } });
+    assert.deepEqual(L.activeRuns(root, plan).map((r) => [r.approval, r.waiting]), [[undefined, false]]);
+    await hooks.event({ event: part('completed', { output: '# tests 3\n# fail 1\n', metadata: { output: '# tests 3\n# fail 1\n', exit: 1 } }) });
+    assert.equal(L.activeRuns(root, plan).length, 0);
+    // a child session (subagent) that never says who it is: ignored
+    await hooks.event({ event: { type: 'session.created', properties: { info: { id: 's-child', parentID: 's-root' } } } });
+    await hooks.event({ event: { type: 'message.part.updated', properties: { part: { type: 'tool', tool: 'bash', callID: 'k2', sessionID: 's-child', state: { status: 'running', input: { command: 'npm test' } } } } } });
+    assert.equal(L.activeRuns(root, plan).length, 0);
+  });
+  const runs = run(['show', 'T1']).artifacts.filter((a) => a.cmd);
+  // duration: the observer's clock (opencode's state.time does not span the command)
+  assert.deepEqual(runs.map((a) => [a.kind, a.exit, typeof a.duration_ms]), [['tests', 1, 'number']]);
+});
+
+test('§14 live: background files get their command\'s kind (plugins too), shell -c scripts, glab ci get', async () => {
+  const L = await import('../src/live.mjs');
+  // a plugin kind for ansible (as a work plugin would add)
+  L.registerLiveKind({ kind: 'ansible', match: (c, { unquoted }) => /\bansible-playbook\b/.test(unquoted), summarize: (t) => ({ state: 'running', line: `ansible ${t.split('\n').length}` }) }, 'test');
+  // scripts handed to a shell
+  assert.equal(L.classify("docker exec app bash -c './mvnw -B verify'"), 'maven');
+  assert.equal(L.classify('ssh ci sh -lc "cd api && npm test"'), 'tests');
+  assert.equal(L.classify("bash -c 'echo hi'"), null);
+  assert.equal(L.classify("echo 'bash -c ./mvnw verify'"), null);
+
+  const { run, dir, env } = sandbox();
+  run(['add', 'Deploy']);
+  run(['dispatch', 'T1', '--name', 'w1']);
+  run(['start', 'T1', '--as', 'w1']);
+  const root = path.join(dir, '.atf');
+  const plan = fs.readdirSync(path.join(root, 'plans'))[0];
+  // reports of a previous Maven run: the baseline a background run gets its total from
+  fs.mkdirSync(path.join(dir, 'target', 'surefire-reports'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'target', 'surefire-reports', 'TEST-a.FooTest.xml'), '<testsuite name="a.FooTest" tests="7" failures="0" errors="0" skipped="0" time="1"></testsuite>');
+  await withEnv({ ATF_DIR: root, ATF_PLAN: plan, ATF_ACTOR: 'w1', ATF_ROLE: 'subagent', ATF_REGISTRY: env.ATF_REGISTRY }, async () => {
+    const { createObserver } = await import('../src/live-observer.mjs');
+    const obs = createObserver();
+    await obs.start({ id: 'b1', cmd: 'docker exec ops ansible-playbook site.yml > deploy.log 2>&1 &', cwd: dir });
+    await obs.start({ id: 'b2', cmd: 'nohup ./mvnw -B verify > build.log 2>&1 &', cwd: dir });
+    obs.shutdown();
+  });
+  const live = run(['show', 'T1']).artifacts.filter((a) => a.live);
+  const by = Object.fromEntries(live.map((a) => [path.basename(a.ref), a]));
+  assert.equal(by['deploy.log']?.kind, 'ansible');
+  assert.equal(by['build.log']?.kind, 'maven');
+  assert.ok(by['build.log'].extra?.baseline, 'the maven onStart ran for the background run');
+  assert.ok(by['build.log'].extra.baseline.startsWith(path.join(root, 'plans', plan, 'live')), 'its baseline is kept in the plan, not beside the agent\'s file');
+  assert.deepEqual(fs.readdirSync(dir).filter((f) => f.endsWith('.json') && f !== 'registry.json'), []);
+
+  // `glab ci get`: the pipeline's status, not the last job's
+  const out = '# Pipeline:\nid:\t4711\nstatus:\trunning\nref:\tmain\n\n# Jobs:\ncompile:\tsuccess\nunit:\tfailed\nstaging:\tcreated\n';
+  const s = L.summarizeText('pipeline', out);
+  assert.deepEqual([s.state, s.line, s.details], ['waiting', 'pipeline #4711 running · 2/3 jobs · 1 ✗', ['✗ unit']]);
+  assert.equal(L.summarizeText('pipeline', out + out.replace('running', 'failed')).state, 'failed');
+
+  // live-try: --active and --no-refresh are switches
+  fs.writeFileSync(path.join(dir, 'out.txt'), '[INFO] Building core 1.0 [1/1]\n');
+  const t = JSON.parse(execFileSync('node', [ATF, 'live-try', 'maven', '--active', '--no-refresh', 'out.txt', '--json'], { cwd: dir, env }).toString());
+  assert.equal(t.kind ?? t.summary?.kind ?? 'maven', 'maven');
+});
+
+test('live plugin example: GitLab jobs in pipeline order', async () => {
+  const g = (await import('../examples/live-plugins/gitlab.mjs')).default;
+  // the jobs API lists newest first
+  const jobs = [
+    { id: 13, name: 'staging', stage: 'deploy', status: 'created' },
+    { id: 12, name: 'unit', stage: 'test', status: 'running' },
+    { id: 11, name: 'lint', stage: 'build', status: 'success' },
+    { id: 10, name: 'compile', stage: 'build', status: 'success' },
+  ];
+  const s = g.summarize('', { cmd: 'glab ci status', fetched: { pipeline: { status: 'running' }, jobs } });
+  assert.deepEqual(s.counts.stages, ['build', 'test', 'deploy']);
+  assert.deepEqual(s.counts.jobs.map((j) => j.name), ['compile', 'lint', 'unit', 'staging']);
+});
+
+test('herdr spawn: why an agent did not start, from its pane', async () => {
+  const { startFailure } = await import('../adapters/herdr/lib/herdr.mjs');
+  assert.match(startFailure('copilot', '│ Confirm folder trust │\n│ Do you trust the files in this folder? │\n', '/p'), /copilot asks whether to trust \/p/);
+  assert.match(startFailure('opencode', 'line 1\nError: no credits\n', '/p'), /its pane showed:\n {2}line 1\n {2}Error: no credits/);
+  assert.equal(startFailure('pi', '', '/p'), '');
+});

@@ -51,7 +51,7 @@ const HELP = `atf-herdr — run and watch ATF agents inside herdr
 
 Plugin config ($(herdr plugin config-dir atf.herdr)/config.json):
   lifecycle: "ephemeral" (default) | "persistent"
-  agent_kind: "pi" (default) | "copilot" | "claude" | "codex"   (also --kind on spawn/coordinate)
+  agent_kind: "pi" (default) | "copilot" | "opencode" | "claude" | "codex"   (also --kind on spawn/coordinate)
   agent_placement: "tab" (default: agents in their own tab) | "split" (beside the coordinator)
   agents: { "<kind>": { "start": [...], "resume": [..."{session}"...], "nativeSkill": bool } }
 
@@ -157,6 +157,7 @@ function spawnAgent() {
     process.stdout.write(
       `${t.id} → ${name} (${kind}): ${force || lp.mode} (${lp.reason})\n` +
         `  args: ${JSON.stringify(used)}${skillInstalled() ? '  (skill installed: discovered by the agent)' : ''}${lp.session ? `  session: ${lp.session.ref}` : ''}\n` +
+        (cfg.env ? `  env: ${Object.keys(cfg.env).join(', ')} (opencode: the ATF plugin, live view)\n` : '') +
         `  lifecycle: ${lifecycle()}\n` +
         `  placement: ${placement}\n`,
     );

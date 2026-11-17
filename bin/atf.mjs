@@ -178,7 +178,7 @@ Global flags
 `;
 
 // ---------- args ----------
-const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early', 'review', 'new', 'live']);
+const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early', 'review', 'new', 'live', 'active', 'no-refresh']);
 const MULTI = new Set(['accept', 'dep', 'label', 'doc']);
 const SHORT = { m: 'message', n: 'limit', h: 'help', j: 'json' };
 
@@ -1075,7 +1075,7 @@ const commands = {
         else L.push(...(readTail(r.out, 16384) || '').split('\n').filter((x) => x.trim()).slice(-15).map((x) => dim('  │ ') + x.slice(0, W - 4)));
       }
       // nothing running: the chosen run, else the latest maven run, else the latest run
-      const rec = pick || (!runs.length && (live.recorded.find((a) => a.kind === 'maven') || live.recorded[0]));
+      const rec = pick || (!runs.length && (live.recorded.find((a) => a.kind !== 'log' && !a.live) || live.recorded[0])); // the newest build/tests/pipeline run (newest first), else the newest of all
       if (rec) {
         const s = rec.summary;
         L.push('', `${(s.state === 'failed' ? red : s.state === 'ok' ? green : String)(rec.kind)} ${s.line}${rec.exit != null ? dim(`  exit ${rec.exit} · ${elapsed(0, rec.duration_ms || 0)} · ${ago(rec.ts)}`) : ''}`);

@@ -22,6 +22,29 @@ export function herdr(args, { timeout = 10_000 } = {}) {
   }
 }
 
+/** What a pane shows (its plain text), or '' (e.g. the screen of an agent that did not start). */
+export function paneText(pane) {
+  try {
+    return execFileSync(herdrBin(), ['pane', 'read', pane], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).toString();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Why an agent did not get ready in its pane, from what the pane shows: a question the
+ * harness asks first (Copilot: trust this folder?), else its last lines.
+ */
+export function startFailure(kind, screen, cwd) {
+  const lines = String(screen)
+    .split('\n')
+    .map((l) => l.replace(/[│┃╹▀]+/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (/trust/i.test(screen) && /folder|director|files/i.test(screen))
+    return `${kind} asks whether to trust ${cwd}: start ${kind} there once yourself, accept, then spawn again`;
+  return lines.length ? `its pane showed:\n  ${lines.slice(-4).join('\n  ')}` : '';
+}
+
 /** Run a herdr command asynchronously; resolves to parsed `.result` or null. */
 export function herdrAsync(args) {
   return new Promise((resolve) => {

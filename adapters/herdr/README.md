@@ -192,8 +192,10 @@ Elsewhere in the board use `j` / `k` or the arrow keys.
 
 ### Live: builds, tests, pipelines (SPEC §14)
 
-Every pi agent `spawn` starts loads `adapters/pi/atf-live.ts`. It observes the agent's
-shell commands (it never wraps or changes them) and records what they are about:
+Agents `spawn` starts observe their own shell commands for the board: pi through
+`adapters/pi/atf-live.ts`, opencode through the plugin `adapters/opencode/atf.mjs` (both
+loaded by `spawn`), Copilot through the ATF extension (`atf-copilot install`). The hook
+never wraps or changes a command; it records what the commands are about:
 
 - **While a command runs**, the task row shows a badge: `⚙ 2/5 core · 40 tests` for a
   Maven build, `⧖ pipeline #555 running` while the agent waits on `glab ci status`,
@@ -208,8 +210,8 @@ shell commands (it never wraps or changes them) and records what they are about:
 
 `L` opens the selected task's: a pipeline in the browser (when its URL appeared in the
 output), a running output followed (`tail -F`) in a new tab, a finished one in `less`.
-Agents can add what the hook cannot see with `atf artifact T3 <file> --live`. Other kinds
-(claude, codex, copilot) have no hook yet: only registered files show.
+Agents can add what the hook cannot see with `atf artifact T3 <file> --live`. claude and
+codex have no hook yet: only registered files show.
 
 A newer run of the same kind in the same directory replaces the older one on the board
 (the green build after a fix hides the failed one; `atf live T3 --all` keeps the history).

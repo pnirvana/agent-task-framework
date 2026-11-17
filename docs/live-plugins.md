@@ -21,7 +21,7 @@ agent asked to write one, read it to the end. The checklist in
 ## How it fits together
 
 ```
-agent's harness (pi + atf-live)          .atf/plans/<plan>/live/            board / atf live / atf show
+agent's harness (pi/Copilot/opencode)    .atf/plans/<plan>/live/            board / atf live / atf show
 ──────────────────────────────           ──────────────────────             ───────────────────────────
 command starts ─ match(cmd) → kind ──▶   <actor>.json  (running now)  ──▶   summarize(output) every second
                ─ onStart() → extra                                          view()   details, `atf live`
@@ -32,8 +32,8 @@ command ends   ─ summarize() → line                                         
                                           description: the line}
 ```
 
-1. **Recognize.** For every shell command the agent runs, the hook (`adapters/pi/atf-live.ts`)
-   asks the kinds in turn whether the command is theirs (`match`). The first match wins:
+1. **Recognize.** For every shell command the agent runs, the hook (pi, Copilot or
+   opencode; shared code in `src/live-observer.mjs`) asks the kinds in turn whether the command is theirs (`match`). The first match wins:
    plugins first (higher `priority` first), then the built-ins in the order pipeline,
    maven, tests, wait, build. No match: an ordinary command (shown only after it runs 4 s,
    recorded only after 30 s, as a `log`).
@@ -186,6 +186,9 @@ for finished runs until the data says `final: true`.
 - Throwing (or exceeding `refreshTimeout`) keeps the previous data; `ctx.fetchError` and
   `atf live-try` show the message.
 - Use the global `fetch` with `signal: AbortSignal.timeout(…)`.
+- **No token at all** is best: if the service has a CLI with its own login (`glab api
+  <path>`, `gh api <path>`), call it (`child_process.execFile`, with a timeout) and use
+  its JSON. Nothing to store, and its login is already where the human works.
 - **Secrets**: read tokens from the environment or a file under `~/.config/atf/live/`
   (only `.mjs`/`.js` files there are loaded as plugins). Never put a token into the
   summary, an error message or a log. The board may not run with your shell's
@@ -200,6 +203,15 @@ keep them quick. `onStart`'s return value is stored with the run (and the record
 artifact) and passed to every function as `ctx.extra`. Maven uses this to save the
 previous run's test classes before `mvn clean` deletes them (the expected total for
 progress). Most plugins don't need either.
+
+A command that writes to a file in the background (`nohup ./mvnw verify > build.log &`,
+`docker exec … ansible-playbook … > deploy.log &`) becomes a live file of the kind that
+matches that command, yours included, and your `onStart` runs for it too (`file`: the
+agent's file; `runFile`: a path under the plan's runs to write next to). There is no
+`onEnd` for it: the hook does not see a background command end.
+
+Commands handed to a shell (`docker exec app bash -c './mvnw verify'`, `sh -c "…"`) are
+matched as a whole first, then by the script inside the quotes.
 
 ## Testing a plugin
 
@@ -277,8 +289,10 @@ pipeline the agent waits for, with its jobs per stage:
   `ctx.fetched`.
 - `refresh`: `GET <api>/projects/<project>/pipelines/<id>` and `…/jobs?per_page=100`,
   where `<api>` and `<project>` come from the `web_url` or API URL in the output (or
-  `GITLAB_API_URL`, `GITLAB_PROJECT`), with `PRIVATE-TOKEN` from `GITLAB_TOKEN` or
-  `~/.config/atf/live/gitlab.token`. `final: true` once the pipeline is finished.
+  `GITLAB_API_URL`, `GITLAB_PROJECT`): with `PRIVATE-TOKEN` from `GITLAB_TOKEN` or
+  `~/.config/atf/live/gitlab.token` if there is one, else through `glab api` (glab's own
+  login), else a plain request. Jobs are sorted by id (pipeline order: the API lists
+  newest first). `final: true` once the pipeline is finished.
 - `view`: one line per stage (compact) or one per job with status, duration and failure
   reason (`full`).
 - `open`: the pipeline page.
@@ -286,8 +300,12 @@ pipeline the agent waits for, with its jobs per stage:
 **Adapting it at work**: save the output of the commands your agents use (`glab ci
 status`, `glab ci view`, your `curl` calls) and run `atf live-try gitlab.mjs <file>
 --cmd '<command>'`. Adjust `parse()` where your glab version prints jobs differently.
-Put a token with `read_api` into `~/.config/atf/live/gitlab.token` (`chmod 600`).
+For the API, `glab auth login` on the machine the board runs on is enough; otherwise put
+a token with `read_api` into `~/.config/atf/live/gitlab.token` (`chmod 600`).
 `atf live-try … ` then shows `refresh ok` with the jobs.
+
+The built-in `pipeline` kind (no plugin) reads `glab ci get` output too: the pipeline's
+`status:` (not the last job's), its jobs with failed ones in the details.
 
 Without GitLab at hand: [`examples/live-plugins/fake-gitlab.mjs`](../examples/live-plugins/fake-gitlab.mjs)
 serves the two endpoints on `localhost:8765` (a pipeline takes about 70 s):

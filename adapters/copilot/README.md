@@ -60,6 +60,20 @@ Its tool approvals are asked in the coordinator's chat. It has no session of its
 task that comes back gets a fresh subagent, which continues from the task's checkpoint
 and notes.
 
+## Live view
+
+The extension also shows on the board what Copilot agents run and wait for (SPEC §14):
+builds, tests, pipeline watches, with progress, exit code and output, without changing
+any command. It works for a Copilot agent started by `atf-herdr spawn --kind copilot`, and
+in a coordinator session for its background subagents: a subagent counts as the ATF name
+it was dispatched under (`atf dispatch --name`). Commands Copilot moves to the background
+stay "running" until they finish; a command waiting for your approval shows as
+"⧖ waiting for your approval".
+
+Copilot asks once per folder whether to trust it. In a folder it does not trust yet, an
+agent started by `atf-herdr spawn` cannot get past that question: spawn says so; start
+`copilot` there once yourself, accept, and spawn again.
+
 ## In herdr
 
 The agent kind `copilot` works for the coordinator and for subagents:

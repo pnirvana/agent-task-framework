@@ -764,9 +764,23 @@ without asking the agent and without spending its tokens.
 
 ### 14.3 Sources
 
-1. **Harness hook** (pi: `adapters/pi/atf-live.ts`, loaded into every pi agent
-   atf-herdr starts; installed as a pi package it loads with the ATF extension). For an
-   agent with `ATF_DIR`, `ATF_PLAN`, `ATF_ACTOR` and a leaf task of its own in progress:
+1. **Harness hook.** The logic is shared (`src/live-observer.mjs`); a small adapter per
+   harness translates its tool events:
+   - pi: `adapters/pi/atf-live.ts` (`tool_execution_start/update/end`), loaded into every
+     pi agent atf-herdr starts; installed as a pi package it loads with the ATF extension;
+   - GitHub Copilot CLI: `adapters/copilot/live.mjs` in the ATF extension
+     (`tool.execution_start`, `tool.shell_output`, `tool.execution_complete`; a command
+     moved to the background ends with its `shell_completed` notification or a
+     `read_bash` result);
+   - opencode: the plugin `adapters/opencode/atf.mjs` (`message.part.updated` tool parts:
+     `metadata.output` while running, `metadata.exit` and `outputPath` at the end), loaded
+     into the opencode agents atf-herdr starts through `OPENCODE_CONFIG_CONTENT`.
+
+   Subagents inside one agent process (Copilot's background subagents, opencode's child
+   sessions) are attributed by the ATF name they use: Copilot's subagent display name
+   (the `--name` of `atf dispatch`), else `--as NAME` in their atf commands. Commands of a
+   subagent whose name is unknown are ignored. For an agent (or subagent) with a leaf task
+   of its own in progress:
    - each shell command is classified: `maven`, `tests` (npm/jest/vitest/pytest/go/cargo/
      node --test/unittest), `pipeline` (`glab ci|pipeline`, `gh run watch|view`, `gh pr
      checks`, `curl …/pipelines`), `wait` (`while/until … sleep` loops, `watch -n`),
@@ -774,13 +788,19 @@ without asking the agent and without spending its tokens.
    - **while it runs** it is listed in `<plan>/live/<actor>.json` (ephemeral, not in the
      log: `{actor, pid, runs: [{id, task, kind, cmd, cwd, since, out}]}`; `out` is the
      output so far). Frontends ignore it once the agent's process is gone. Ordinary
-     commands appear after 4 s;
+     commands appear after 4 s. A command the harness holds until the human allows it
+     (Copilot `permission.requested`, opencode `permission.asked`) carries `approval:
+     true` and shows at once as waiting for the human (⧖), not as running;
    - **when it ends**, a classified command, or any command that ran 30 s or more, is
      recorded: its full output is kept under `<plan>/live/runs/`, and a `task.artifact`
      is written with `cmd`, `cwd`, `since`, `exit`, `duration_ms` and the summary line as
      `description`. Quick ordinary commands leave nothing;
+   - a command that matches no kind as a whole is classified by the script it hands to
+     a shell (`docker exec app bash -c './mvnw verify'`: maven);
    - a file the command writes in the background (`… > build.log &`, `nohup`, `| tee
-     f`), or a `.log` file the agent reads twice or more, is registered as a live artifact.
+     f`), or a `.log` file the agent reads twice or more, is registered as a live artifact:
+     of the kind of the command writing it (plugin kinds included; build and wait: a log),
+     with that kind's `onStart` (Maven: the expected test total).
 2. **Explicit registration** for what the hook cannot see: `atf artifact T3 <file>
    --live [--kind log|maven|tests|pipeline] [--cwd DIR]` (a build started elsewhere, a
    server log). The skill mentions it in one line; it is never required.
@@ -845,6 +865,7 @@ GitLab server for trying it).
 
 ### 14.7 Not yet
 
-- A Copilot CLI hook (its extension API has tool events; the same `src/live.mjs`).
+- Hooks for claude and codex (their own hook mechanisms; the same observer).
+- An opencode coordinator adapter (wake, peek); opencode works as a subagent kind today.
 - Retention: run outputs stay under `<plan>/live/runs/` until the plan directory is removed.
 - More built-in kinds (gradle test reports, coverage).
