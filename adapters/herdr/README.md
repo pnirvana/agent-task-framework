@@ -250,6 +250,16 @@ beside the coordinator (see "Pane layout for agents").
 `board_start`: `overview` (default) opens the board on the Overview of all projects;
 `plan` opens the focused project's plan in the Tasks view.
 
+`vi_mode`: `true` gives the board's text fields (replies, change requests, notes, the log
+search) vi keys (or `ATF_VI_MODE=1` in the board's environment, which wins over the file).
+The field starts in insert mode, where ⏎ starts a new line; esc goes to normal mode, where
+⏎ sends and esc cancels (in visual mode ⏎ sends too; in the one-line log search ⏎ sends in
+every mode). Normal mode: motions `h j k l w W b B e E ge 0 ^ $ gg G f F t T ; , %`
+(arrows move by screen rows, `gj gk` too), counts, operators `d c y` with motions or text
+objects (`iw aw iW aW i" a" i' a' i( a( i[ a[ i{ a{ i< a<`, also `ib iB`), `dd cc yy`,
+`x X D C s S Y r ~ J p P`, `i a I A o O`, `u` / ctrl+r, `.`; visual `v` / `V` with `o`,
+`d c y ~ u U J p` and text objects. Pasted text goes in at the cursor in any mode.
+
 `prefix+t` toggles it per workspace either way; `prefix+alt+t` is the overview popup.
 
 ### Agent lifecycle (SPEC §12: the coordinator decides)

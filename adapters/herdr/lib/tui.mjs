@@ -5,14 +5,15 @@ import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
 import { TERMINAL, driverInbox, planSummary, HUMAN } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, reviewEvents, hasLiveWaiter } from '../../../src/store.mjs';
-import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject } from './herdr.mjs';
+import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject, pluginConfig } from './herdr.mjs';
 import { progressText } from './sync.mjs';
+import { textField, keyField, fieldText, fieldRows, fieldMode } from './textfield.mjs';
 import { activeRuns, taskLive, liveBadge, elapsed, readTail, earlierText, liveView, hasView, liveOpen, loadLiveKinds, enableAutoRefresh } from '../../../src/live.mjs';
 import { fileURLToPath } from 'node:url';
 const ATF_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../bin/atf.mjs');
 
 const ESC = '\x1b[';
-const STYLE = { reset: 0, bold: 1, dim: 2, inverse: 7, red: 31, green: 32, yellow: 33, blue: 34, magenta: 35, cyan: 36, gray: 90 };
+const STYLE = { reset: 0, bold: 1, dim: 2, inverse: 7, selected: '44;97', red: 31, green: 32, yellow: 33, blue: 34, magenta: 35, cyan: 36, gray: 90 };
 const sty = (names) => (names ? names.split(' ').map((n) => `${ESC}${STYLE[n]}m`).join('') : '');
 const STATUS = {
   todo: ['○', 'gray'],
@@ -1524,7 +1525,17 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       K('x', 'change request on a task, for the coordinator'),
       K('r / n', 'answer a question, or a message on the task (on a plan: a plan note), for'),
       T('                the coordinator; to a coordinator waiting for input: into its prompt'),
-      T('In the text field ⏎ sends; alt+⏎ or ctrl+j starts a new line (pasted text keeps its lines).', 'dim'),
+      [],
+      H('The text field (r, n, x, log search)'),
+      K('⏎ / esc', 'send / cancel'),
+      K('alt+⏎ ctrl+j', 'new line (shift+⏎ where the terminal sends it); pasted text keeps its lines'),
+      K('← → ↑ ↓', 'move (↑↓ follow wrapped lines); PgUp/PgDn by a screen'),
+      K('alt+← →', 'a word back / forward (also ctrl+← →, alt+b / alt+f)'),
+      K('Home End', 'start / end of the line (also ctrl+a / ctrl+e); alt+< alt+> whole text'),
+      K('⌫ Del', 'delete before / at the cursor; ctrl+w or alt+⌫ the word before, alt+d the next'),
+      K('ctrl+u ctrl+k', 'cut to the line’s start / end; ctrl+y pastes it back'),
+      K('ctrl+z', 'undo; alt+z redo'),
+      T(viMode() ? 'vi mode is on: insert mode first (⏎ new line); esc → normal mode: ⏎ sends, vi keys, esc cancels.' : 'vi keys: "vi_mode": true in the plugin config, or ATF_VI_MODE=1.', 'dim'),
       K('o', 'open the task’s artifact (PR/URL, branch diff, commit, file) or the plan’s documents'),
       [],
       H('The coordinator (one per plan, always running)'),
@@ -1600,16 +1611,32 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
 
   function footer() {
     if (ui.picker) return [[]]; // its keys are in the box
-    if (ui.input && !ui.input.multiline) return [[[' ' + ui.input.label, 'bold yellow'], [ui.input.value + '█', ''], [`   ${ui.input.hint ?? '⏎ send'} · esc cancel`, 'dim']]];
     if (ui.input) {
-      // a text field: the label, then the text wrapped, growing up to a few lines (the end shown)
       const W = out.columns || 80;
-      const rows = wrapText(ui.input.value + '█', Math.max(10, W - 4));
+      const f = inputField();
+      // vi mode: the mode, and what esc does in it
+      const mode = fieldMode(f);
+      const viMode = mode ? [[` -- ${mode} --`, mode.startsWith('INSERT') ? 'bold green' : mode.startsWith('VISUAL') ? 'bold magenta' : 'bold cyan']] : [];
+      const esc = !mode ? 'esc cancel' : mode.startsWith('NORMAL') ? 'esc cancel · i insert' : 'esc normal';
+      if (!ui.input.multiline) {
+        const hint = `   ${ui.input.hint ?? '⏎ send'} · ${esc}`;
+        const room = Math.max(10, W - strWidth(ui.input.label) - strWidth(hint) - strWidth(viMode[0]?.[0] ?? '') - 1);
+        return [[[' ' + ui.input.label, 'bold yellow'], ...fieldRows(f, room, 1, charWidth).rows[0], ...viMode, [hint, 'dim']]];
+      }
+      // a text field: the label, then the text wrapped, growing up to 10 rows, scrolled to the cursor
       const max = Math.max(1, Math.min(10, (out.rows || 24) - 12));
-      const shown = rows.slice(-max);
+      const { rows, above, below } = fieldRows(f, Math.max(10, W - 3), max, charWidth);
+      const send = ui.input.hint ?? '⏎ send';
+      const keys = !mode
+        ? `${send} · alt+⏎ new line · ctrl+z undo · esc cancel`
+        : mode.startsWith('INSERT')
+          ? `⏎ new line · ${esc} (⏎ there sends)`
+          : mode.startsWith('VISUAL')
+            ? `${send} · d c y on the selection · ${esc}`
+            : `${send} · u undo · ${esc}`;
       return [
-        [[' ' + ui.input.label, 'bold yellow'], [`   ${ui.input.hint ?? '⏎ send'} · alt+⏎ or ctrl+j new line · esc cancel`, 'dim']],
-        ...shown.map((l, i) => [[i === 0 && rows.length > max ? ' … ' : ' │ ', 'gray'], [l, '']]),
+        [[' ' + ui.input.label, 'bold yellow'], ...viMode, [`   ${keys}`, 'dim']],
+        ...rows.map((segs, i) => [[(i === 0 && above) || (i === rows.length - 1 && below) ? ' ⋮ ' : ' │ ', 'gray'], ...segs]),
       ];
     }
     if (ui.flash && ui.flash.until > Date.now()) return [[[' ' + ui.flash.msg, ui.flash.style]]];
@@ -1625,15 +1652,15 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     return [[[' ' + keys, 'dim']]];
   }
 
-  /** Lines of a text, each cut to `w` characters. */
-  function wrapText(text, w) {
-    const rows = [];
-    for (const line of text.split('\n')) {
-      const cs = [...line];
-      if (!cs.length) rows.push('');
-      for (let i = 0; i < cs.length; i += w) rows.push(cs.slice(i, i + w).join(''));
-    }
-    return rows;
+  /** The text field of the open input (made from its starting value). */
+  function inputField() {
+    return (ui.input.field ??= textField(ui.input.value ?? '', { multiline: !!ui.input.multiline, vi: viMode() }));
+  }
+  /** vi keys in text fields: ATF_VI_MODE=1, or "vi_mode": true in the plugin config. */
+  function viMode() {
+    const env = process.env.ATF_VI_MODE;
+    if (env !== undefined && env !== '') return !['0', 'false', 'no', 'off'].includes(env.toLowerCase());
+    return pluginConfig().vi_mode === true;
   }
 
   function scrolled(lines, all, key, bodyH) {
@@ -2090,19 +2117,19 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (k === '\x1b[201~') return ((ui.pasting = false), ui.input && draw());
     if (ui.pasting && !ui.input) return;
     if (ui.input) {
-      // a text input; multiline: ⏎ sends, alt+⏎ / ctrl+j (and pasted line breaks) start a new line
-      const newline = k === '\n' || k === '\x1b\r' || k === '\x1b\n' || (ui.pasting && k === '\r');
-      if (newline) ui.input.value += ui.input.multiline ? '\n' : ui.pasting ? ' ' : '';
-      else if (k === '\r') {
+      // a text field (textfield.mjs): ⏎ sends, esc cancels, everything else edits
+      const f = inputField();
+      const res = keyField(f, k, { pasting: ui.pasting });
+      const before = ui.input.value;
+      ui.input.value = fieldText(f);
+      if (res === 'submit') {
         const inp = ui.input;
         ui.input = null;
         inp.onSubmit(inp.value);
-      } else if (k === '\x1b' && !ui.pasting) {
+      } else if (res === 'cancel') {
         ui.input.onCancel?.();
         ui.input = null;
-      } else if (k === '\x7f' || k === '\b') ui.input.value = [...ui.input.value].slice(0, -1).join('');
-      else if (k.length >= 1 && !k.startsWith('\x1b') && k >= ' ') ui.input.value += k;
-      ui.input?.onChange?.(ui.input.value);
+      } else if (ui.input.value !== before) ui.input.onChange?.(ui.input.value);
       return draw();
     }
     if (v === 'log') {
@@ -2261,7 +2288,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (d) => {
-    const keys = d.replace(/\r\n/g, '\r').match(/\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-Za-z]|\x1b[\r\n]|\x1b|[\s\S]/g) || [];
+    const keys = d.replace(/\r\n/g, '\r').match(/\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-Za-z]|\x1b[\r\n\x7f\bbfdz<>]|\x1b|[\s\S]/g) || [];
     for (const k of keys) onKey(k);
   });
 

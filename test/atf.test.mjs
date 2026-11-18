@@ -11,7 +11,8 @@ const ATF = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin',
 
 function sandbox() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-test-'));
-  const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', NO_COLOR: '1', ATF_REGISTRY: path.join(dir, 'registry.json') };
+  const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', NO_COLOR: '1', ATF_REGISTRY: path.join(dir, 'registry.json'), HERDR_PLUGIN_CONFIG_DIR: path.join(dir, 'herdr-config') };
+  delete env.ATF_VI_MODE; // the user's own board settings stay out of the tests
   delete env.HERDR_PANE_ID;
   const run = (args, extraEnv = {}) =>
     JSON.parse(execFileSync('node', [ATF, ...args, '--json'], { cwd: dir, env: { ...env, ...extraEnv } }).toString());
@@ -1364,6 +1365,111 @@ test('board: no line wider than the pane (wide characters would wrap and make it
   assert.equal(strWidth('é'), 1); // combining accent
   for (const segs of [[['x'.repeat(39) + '⏳', '']], [['⏳'.repeat(30), 'red']], [['ab', ''], ['日本語テキスト', 'cyan'], ['🚀 done', '']]]) assert.ok(visible(fit(segs, 40)) <= 40, JSON.stringify(segs));
   assert.equal(visible(fit([['x'.repeat(39) + '⏳', '']], 40)), 39); // the wide char does not fit: the column stays empty
+});
+
+test('board text field: cursor moves, edits, wrapped rows, undo, paste', async () => {
+  const { textField, keyField, fieldText, fieldRows } = await import('../adapters/herdr/lib/textfield.mjs');
+  const f = textField();
+  const type = (s) => [...s].forEach((ch) => keyField(f, ch));
+  type('hello world');
+  keyField(f, '\x1b\r'); // alt+⏎: a new line
+  type('second');
+  assert.equal(fieldText(f), 'hello world\nsecond');
+  keyField(f, '\x1b[A'); // up: same column on the line above
+  assert.equal(f.pos, 6);
+  type('!');
+  assert.equal(fieldText(f), 'hello !world\nsecond');
+  keyField(f, '\x1bb'); // alt+b: a word back
+  assert.equal(f.pos, 0);
+  keyField(f, '\x05'); // ctrl+e: end of the line
+  assert.equal(f.pos, 12);
+  keyField(f, '\x1b[D');
+  keyField(f, '\x7f'); // backspace in the middle
+  assert.equal(fieldText(f), 'hello !word\nsecond');
+  keyField(f, '\x1b[3~'); // delete forward
+  assert.equal(fieldText(f), 'hello !wor\nsecond');
+  keyField(f, '\x17'); // ctrl+w: the word before
+  assert.equal(fieldText(f), 'hello !\nsecond');
+  keyField(f, '\x1a'); // ctrl+z undoes it
+  assert.equal(fieldText(f), 'hello !wor\nsecond');
+  keyField(f, '\x1b[B'); // down to the second line
+  keyField(f, '\x01'); // ctrl+a: its start
+  keyField(f, '\x0b'); // ctrl+k: kill to its end, ctrl+y yanks it back
+  assert.equal(fieldText(f), 'hello !wor\n');
+  keyField(f, '\x19');
+  assert.equal(fieldText(f), 'hello !wor\nsecond');
+  // a paste keeps its line breaks; ⏎ outside a paste submits, esc cancels
+  for (const ch of 'a\rb') keyField(f, ch, { pasting: true });
+  assert.equal(fieldText(f), 'hello !wor\nseconda\nb');
+  assert.equal(keyField(f, '\r'), 'submit');
+  assert.equal(keyField(f, '\x1b'), 'cancel');
+  // wrapped rows: the cursor's row stays visible, up/down follow the wrapped rows
+  const g = textField('abcdefghij'.repeat(3));
+  const { rows, above } = fieldRows(g, 11, 2); // 10 characters a row (one column for the cursor)
+  assert.equal(rows.length, 2);
+  assert.ok(above);
+  assert.deepEqual(rows[1].at(-1), [' ', 'inverse']); // the cursor at the end
+  keyField(g, '\x1b[A');
+  assert.equal(g.pos, 19); // the row above ends one short: its end is the next row's start
+  // single-line fields turn pasted line breaks into spaces and ignore alt+⏎
+  const s = textField('x', { multiline: false });
+  keyField(s, '\x1b\r');
+  keyField(s, '\r', { pasting: true });
+  assert.equal(fieldText(s), 'x ');
+});
+
+test('board text field, vi mode: motions, operators, text objects, visual, undo, repeat', async () => {
+  const { textField, keyField, fieldText, fieldMode, fieldRows } = await import('../adapters/herdr/lib/textfield.mjs');
+  const vi = (start, keys) => {
+    const f = textField(start, { vi: true });
+    assert.equal(fieldMode(f), 'INSERT'); // starts in insert mode: typing works at once
+    keyField(f, '\x1b');
+    for (const k of keys.match(/<esc>|<cr>|<c-r>|[\s\S]/g)) keyField(f, { '<esc>': '\x1b', '<cr>': '\r', '<c-r>': '\x12' }[k] ?? k);
+    return f;
+  };
+  const cases = [
+    ['hello world foo', '0dw', 'world foo'],
+    ['hello world foo', '0cwXY<esc>', 'XY world foo'],
+    ['hello world foo', '02dw', 'foo'],
+    ['hello world foo', '0wde', 'hello  foo'],
+    ['a\nb\nc', 'ggdd', 'b\nc'],
+    ['a\nb\nc', 'gg2dd', 'c'],
+    ['a\nb\nc', 'ggdj', 'c'],
+    ['a\nb\nc', 'ggyyp', 'a\na\nb\nc'],
+    ['foo(bar, baz)', '0fbci(x<esc>', 'foo(x)'],
+    ['say "hi there" ok', '0fhda"', 'say ok'],
+    ['one two three', '0wdaw', 'one three'],
+    ['one two three', '0wved', 'one  three'],
+    ['a\nb\nc', 'ggVjd', 'c'],
+    ['abc', '0x.', 'c'],
+    ['abc', '0xu<c-r>', 'bc'],
+    ['abc', '0ixy<esc>u', 'abc'], // an insert is one undo step
+    ['abc def', '0cwX<esc>w.', 'X X'],
+    ['a b', 'onew<esc>', 'a b\nnew'],
+    ['a\nb', 'ggJ', 'a b'],
+    ['abc def', '0dtf', 'f'],
+    ['hello world', '0viwU', 'HELLO world'],
+    ['abc', '0rZl~', 'ZBc'],
+  ];
+  for (const [start, keys, want] of cases) assert.equal(fieldText(vi(start, keys)), want, `${JSON.stringify(start)} ${keys}`);
+  // ⏎ in insert mode is a new line; it sends from normal and visual mode (a one-line field: always)
+  const ins = textField('a', { vi: true });
+  assert.equal(keyField(ins, '\r'), null);
+  assert.equal(fieldText(ins), 'a\n');
+  assert.equal(keyField(textField('a', { vi: true, multiline: false }), '\r'), 'submit');
+  assert.equal(keyField(vi('x', '0'), '\r'), 'submit');
+  // esc: insert → normal → cancel
+  const f = textField('x', { vi: true });
+  assert.equal(keyField(f, '\x1b'), null);
+  assert.equal(fieldMode(f), 'NORMAL');
+  keyField(f, 'd');
+  assert.equal(fieldMode(f), 'NORMAL d'); // a pending operator shows
+  assert.equal(keyField(f, '\x1b'), null); // esc drops it first
+  assert.equal(keyField(f, '\x1b'), 'cancel');
+  assert.equal(keyField(vi('x', 'v'), '\r'), 'submit');
+  // visual mode highlights the selection
+  const g = vi('hello world', '0vl');
+  assert.deepEqual(fieldRows(g, 40, 1).rows[0].slice(0, 2), [['h', 'selected'], ['e', 'inverse']]);
 });
 
 /** Run `fn` with ATF env vars set for the in-process adapters, restoring the env after. */
