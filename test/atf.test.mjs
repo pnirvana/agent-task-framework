@@ -1014,6 +1014,29 @@ test('herdr board (v2): an escalated question is for the human; the answer goes 
   assert.deepEqual(run(['wait', '--timeout', '1500']).attention, [{ task: 'T1', reason: 'human' }]);
 });
 
+test('herdr board: a plan note goes to the plan in scope; N writes one from every view', () => {
+  const { dir, env, run } = sandbox();
+  const a = run(['plan', 'new', 'Alpha']).plan;
+  const b = run(['plan', 'new', 'Beta']).plan;
+  const board = (keys) =>
+    JSON.parse(
+      execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '120', '40', JSON.stringify(keys)], {
+        cwd: dir,
+        env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
+      }).toString(),
+    );
+  const notes = (id) => run(['plan', 'show', '--plan', id]).notes.filter((n) => n.actor === 'human').map((n) => n.message);
+  // the Plan tab of all plans selects "Beta" (the newest); then "Alpha" alone, on its Plan tab:
+  // r there was sent to the plan selected before (rows of the wider scope)
+  const f = board(['2', 'p', ...'Alpha', '\r', 'r', ...'for alpha', '\r']);
+  assert.match(f.at(-2), /note on plan "Alpha", for its coordinator:/);
+  assert.deepEqual([notes(a), notes(b)], [['for alpha'], []]);
+  // N in the Log view, at all-projects scope with two plans: you pick the plan
+  const g = board(['3', 'N', ...'Beta', '\r', ...'from the log', '\r']);
+  assert.match(g[2], /note on plan/); // the picker
+  assert.deepEqual(notes(b), ['from the log']);
+});
+
 test('wait with a waking harness: does not block, arms it; --new wakes once per new item', () => {
   const { dir, run, runFail } = sandbox();
   const arm = path.join(dir, 'arm.json');

@@ -1439,6 +1439,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (t.owner) k.push('g agent');
       k.push('⏎ details');
     }
+    if (r.type !== 'plan' && r.kind !== 'plan-question') k.push('N plan note');
     return k.join('  ') + '  ? help  esc ' + (ui.scope.level === 'all' ? 'quit' : 'back');
   }
 
@@ -1525,6 +1526,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       K('x', 'change request on a task, for the coordinator'),
       K('r / n', 'answer a question, or a message on the task (on a plan: a plan note), for'),
       T('                the coordinator; to a coordinator waiting for input: into its prompt'),
+      K('N', 'a note on a plan, for its coordinator, from every view: the plan in scope or of'),
+      T('                the selected row (in Log: the plan filter); else you pick the plan'),
       [],
       H('The text field (r, n, x, log search)'),
       K('⏎ / esc', 'send / cancel'),
@@ -1643,10 +1646,10 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const esc = ui.scope.level === 'all' ? 'esc quit' : 'esc widen';
     const keys = {
       overview: overviewKeys(ui.rows.overview[ui.sel.overview]),
-      tasks: `↑↓ move  ←→ fold  v ${ui.byAgent ? 'tree' : 'by agent'}  ⏎ details  a approve  x changes  r message  o open  L live  g agent  s/S coordinator  p plan  ${esc}`,
-      plan: multi() ? `↑↓ select  ←→ fold  ⏎ open plan  o docs  r note  s/S coordinator  g jump  c close  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}` : `↑↓ scroll  o docs  r note  s/S coordinator  ${esc}  ? help`,
-      log: `↑↓ scroll  / search  ${multi() ? 'p plan  ' : ''}${ui.log.plan || ui.log.query ? 'esc clear filter  ' : esc + '  '}tab views  ? help`,
-      detail: '↑↓ scroll  ⏎/esc back  a approve  x changes  r message  o open  L live  g agent  s/S coordinator',
+      tasks: `↑↓ move  ←→ fold  v ${ui.byAgent ? 'tree' : 'by agent'}  ⏎ details  a approve  x changes  r message  N plan note  o open  L live  g agent  s/S coordinator  p plan  ${esc}`,
+      plan: multi() ? `↑↓ select  ←→ fold  ⏎ open plan  o docs  r note  N plan note  s/S coordinator  g jump  c close  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}` : `↑↓ scroll  o docs  r / N note  s/S coordinator  ${esc}  ? help`,
+      log: `↑↓ scroll  / search  N plan note  ${multi() ? 'p plan  ' : ''}${ui.log.plan || ui.log.query ? 'esc clear filter  ' : esc + '  '}tab views  ? help`,
+      detail: '↑↓ scroll  ⏎/esc back  a approve  x changes  r message  N plan note  o open  L live  g agent  s/S coordinator',
       help: '↑↓ scroll  any other key: back',
     }[view()];
     return [[[' ' + keys, 'dim']]];
@@ -1753,6 +1756,9 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   // ---------- actions ----------
   const selectedRow = () => {
     const v = view() === 'detail' ? 'tasks' : view();
+    // one plan's Plan tab has no rows to select (it scrolls the plan): rows left from a wider
+    // scope there belong to other plans
+    if (v === 'plan' && !multi()) return null;
     return ui.rows[v]?.[ui.sel[v]];
   };
 
@@ -1819,6 +1825,49 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   /**
+   * The plan a plan note is for: the one in scope, else the selected row's (or the log's
+   * plan filter), else the only plan in scope; null when that leaves a choice.
+   */
+  function planTarget() {
+    const of = (root, plan) => {
+      const st = cachedPlan(root, plan);
+      return st ? { root, plan, st } : null;
+    };
+    if (ui.scope.level === 'plan') return of(ui.scope.root, ui.scope.plan);
+    const v = view();
+    if (v === 'log') {
+      const p = ui.log.plan && scopePlans().find((x) => x.key === ui.log.plan);
+      if (p) return of(p.root, p.id);
+    } else if (v !== 'help') {
+      const r = selectedRow();
+      if (r?.root && r?.plan) return of(r.root, r.plan);
+    }
+    const ps = scopePlans();
+    return ps.length === 1 ? of(ps[0].root, ps[0].id) : null;
+  }
+
+  /** The text field for a note on plan `pr` (an answer when the plan asks a question). */
+  function askPlanNote(pr) {
+    const q = pr.st.questions?.length;
+    ui.input = {
+      label: `${q ? 'answer' : 'note'} on plan "${pr.st.title}", for its coordinator: `,
+      value: '',
+      hint: '⏎ send',
+      multiline: true,
+      onSubmit: (text) => text.trim() && writeAsHuman(pr, [{ type: 'plan.note', data: { message: text.trim(), kind: 'info' } }], `sent to the coordinator of "${pr.st.title}"`),
+    };
+  }
+
+  /** N, in every view: a note on a plan, for its coordinator (picked when it is not clear which). */
+  function planNote() {
+    const pr = planTarget();
+    if (pr) return askPlanNote(pr);
+    const plans = scopePlans();
+    if (!plans.length) return flash('no plan in scope');
+    openPicker({ title: 'note on plan', plans, onPick: (p) => p && askPlanNote({ root: p.root, plan: p.id, st: p.st }) });
+  }
+
+  /**
    * r: reply. To the coordinator waiting for input: typed into its prompt. On a task: a
    * note, which answers a question (its agent is woken) or reaches the owner's wait.
    */
@@ -1840,16 +1889,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const tr = selectedTask();
     if (!tr) {
       // a plan row: a plan-level note (answers the plan's question), for the coordinator
-      const pr = r?.root && r?.plan ? r : ui.scope.level === 'plan' ? { root: ui.scope.root, plan: ui.scope.plan, st: cachedPlan(ui.scope.root, ui.scope.plan) } : null;
-      if (!pr) return flash('select a task or a plan');
-      const q = pr.st.questions?.length;
-      ui.input = {
-        label: `${q ? 'answer' : 'note'} on the plan, for the coordinator: `,
-        value: '',
-        hint: '⏎ send', multiline: true,
-        onSubmit: (text) => text.trim() && writeAsHuman(pr, [{ type: 'plan.note', data: { message: text.trim(), kind: 'info' } }], `sent to the coordinator of "${pr.st.title}"`),
-      };
-      return;
+      const pr = planTarget();
+      return pr ? askPlanNote(pr) : flash('select a task or a plan (N: a note on a plan, from any view)');
     }
     const t = tr.st.tasks[tr.task];
     const question = t.status === 'blocked' && !t.blocked_on.length;
@@ -2161,6 +2202,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
         return draw();
       }
     }
+    if (k === 'N' && v !== 'help') return planNote(), draw(); // a plan note, from every view
     if (['overview', 'tasks', 'detail', 'plan'].includes(v)) {
       // acting takes effect at once; the human's words go to the coordinator (§12.5)
       if (v !== 'plan' && k === 'a') return reviewNow('approve');
