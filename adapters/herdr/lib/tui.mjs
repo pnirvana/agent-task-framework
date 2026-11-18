@@ -5,7 +5,7 @@ import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
 import { TERMINAL, driverInbox, planSummary, HUMAN } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, reviewEvents, hasLiveWaiter } from '../../../src/store.mjs';
-import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject, pluginConfig } from './herdr.mjs';
+import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject, pluginConfig, focusPane } from './herdr.mjs';
 import { progressText } from './sync.mjs';
 import { textField, keyField, fieldText, fieldRows, fieldMode } from './textfield.mjs';
 import { activeRuns, taskLive, liveBadge, elapsed, readTail, earlierText, liveView, hasView, liveOpen, loadLiveKinds, enableAutoRefresh } from '../../../src/live.mjs';
@@ -1764,16 +1764,18 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
 
   async function focusAgent(st, who) {
     if (elsewhere(st, who)) return flash(`${who} runs in another herdr session`, 'red');
-    const pane = liveAgent(st, who)?.pane_id;
-    if (!((pane && (await herdrAsync(['agent', 'focus', pane]))) || (await herdrAsync(['agent', 'focus', who])))) return flash(`no live herdr agent for ${who}`, 'red');
+    // its workspace, its tab, then its pane (focusPane); by name only when its pane is unknown
+    const pane = liveAgent(st, who)?.pane_id || ui.agents.get(`name:${who}`)?.pane_id;
+    if (!(await focusPane(pane))) return flash(`no live herdr agent for ${who}`, 'red');
     if (popup) quit();
   }
 
   /** g on a plan: its coordinator, else one of its agents (working first), else a pane in the project. */
   async function focusPlan(r, st) {
-    const local = Object.values(st.actors).filter((a) => !elsewhere(st, a.id) && ui.agents.get(`name:${a.id}`));
-    const order = [...local.filter((a) => a.role === 'coordinator'), ...local.filter((a) => a.role !== 'coordinator' && ui.agents.get(`name:${a.id}`)?.agent_status === 'working'), ...local.filter((a) => a.role !== 'coordinator')];
-    for (const a of order) if (await herdrAsync(['agent', 'focus', a.id])) return popup ? quit() : draw();
+    // this plan's agents (names repeat across projects: liveAgent checks the directory)
+    const local = Object.values(st.actors).filter((a) => !elsewhere(st, a.id) && liveAgent(st, a.id));
+    const order = [...local.filter((a) => a.role === 'coordinator'), ...local.filter((a) => a.role !== 'coordinator' && liveAgent(st, a.id)?.agent_status === 'working'), ...local.filter((a) => a.role !== 'coordinator')];
+    for (const a of order) if (await focusPane(liveAgent(st, a.id)?.pane_id)) return popup ? quit() : draw();
     const projDir = path.dirname(r);
     const inside = (d) => d && (d === projDir || d.startsWith(projDir + path.sep));
     const pane = ((await herdrAsync(['pane', 'list']))?.panes || []).find((p) => !p.label && (inside(p.foreground_cwd) || inside(p.cwd)));
@@ -1951,6 +1953,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const pane = tab?.root_pane?.pane_id;
     if (!pane) return flash('could not open a herdr tab', 'red');
     if (ws) await herdrAsync(['workspace', 'focus', ws]);
+    if (tab.root_pane.tab_id) await herdrAsync(['tab', 'focus', tab.root_pane.tab_id]); // the workspace shows its last tab otherwise
     await herdrText(['pane', 'run', pane, cmd]);
     if (popup) quit();
     else flash(`opened ${path.basename(file)} in tab "${label}"`, 'green');
@@ -2005,6 +2008,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const pane = tab?.root_pane?.pane_id;
     if (!pane) return flash('could not open a herdr tab', 'red');
     if (ws) await herdrAsync(['workspace', 'focus', ws]);
+    if (tab.root_pane.tab_id) await herdrAsync(['tab', 'focus', tab.root_pane.tab_id]); // the workspace shows its last tab otherwise
     await herdrText(['pane', 'run', pane, cmd]);
     if (popup) quit();
     else flash(`opened ${x.ref} in tab "${label}"${docs.length > 1 ? ` (also: ${docs.slice(1).join(', ')})` : ''}`, 'green');

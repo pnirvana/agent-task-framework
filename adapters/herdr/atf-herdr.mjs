@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchPlan } from '../../src/core.mjs';
 import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig, skillInstalled, readEvents } from '../../src/store.mjs';
-import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isBoardPane, isLiveBoard } from './lib/herdr.mjs';
+import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isBoardPane, isLiveBoard, focusPaneSync } from './lib/herdr.mjs';
 import { sync, notifyForEvents } from './lib/sync.mjs';
 import { chooseBoardSplit, tabLayout, planRebuild, withPlacementLock } from './lib/layout.mjs';
 import { discoverAgents, resolveAgentDef, piArgsForAgent } from './lib/agents.mjs';
@@ -212,7 +212,7 @@ function coordinateCmd() {
     const say = (m) => process.stdout.write(m + '\n');
     const r = launchCoordinator({ root, planId, fresh: !!flags.fresh, kind: flags.kind, dryRun: !!flags['dry-run'], say, handoffMs: flags.timeout ? Number(flags.timeout) * 1000 : undefined });
     if (r.mode === 'running') {
-      if (!flags['dry-run']) herdr(['agent', 'focus', r.pane]);
+      if (!flags['dry-run']) focusPaneSync(r.pane);
       return say(`coordinator ${r.name} is already running in pane ${r.pane} (--fresh replaces it with a new session)`);
     }
     if (flags['dry-run']) return say(`coordinator ${r.name}: would start ${r.mode}${r.session ? ` (session ${r.session})` : ''}${r.pane ? `, replacing the one in pane ${r.pane}` : ''}`);

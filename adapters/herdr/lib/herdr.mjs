@@ -45,6 +45,30 @@ export function startFailure(kind, screen, cwd) {
   return lines.length ? `its pane showed:\n  ${lines.slice(-4).join('\n  ')}` : '';
 }
 
+/**
+ * Bring a pane to the front: its workspace, its tab, then the pane. `agent focus` alone
+ * switches to the workspace but leaves it on its current tab, so an agent in another
+ * workspace's second tab stayed hidden. Where the pane is now comes from herdr (panes move
+ * between tabs). Resolves to true when the pane was focused.
+ */
+export async function focusPane(paneId) {
+  if (!paneId) return false;
+  const pane = (await herdrAsync(['pane', 'get', paneId]))?.pane;
+  if (!pane) return false;
+  if (pane.workspace_id) await herdrAsync(['workspace', 'focus', pane.workspace_id]);
+  if (pane.tab_id) await herdrAsync(['tab', 'focus', pane.tab_id]);
+  return !!((await herdrAsync(['agent', 'focus', paneId])) || pane.tab_id);
+}
+
+/** focusPane, synchronously (for CLI commands). */
+export function focusPaneSync(paneId) {
+  const pane = paneId && herdr(['pane', 'get', paneId])?.pane;
+  if (!pane) return false;
+  if (pane.workspace_id) herdr(['workspace', 'focus', pane.workspace_id]);
+  if (pane.tab_id) herdr(['tab', 'focus', pane.tab_id]);
+  return !!(herdr(['agent', 'focus', paneId]) || pane.tab_id);
+}
+
 /** Run a herdr command asynchronously; resolves to parsed `.result` or null. */
 export function herdrAsync(args) {
   return new Promise((resolve) => {
