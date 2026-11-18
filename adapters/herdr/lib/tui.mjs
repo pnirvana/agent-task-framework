@@ -1524,6 +1524,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       K('x', 'change request on a task, for the coordinator'),
       K('r / n', 'answer a question, or a message on the task (on a plan: a plan note), for'),
       T('                the coordinator; to a coordinator waiting for input: into its prompt'),
+      T('In the text field ⏎ sends; alt+⏎ or ctrl+j starts a new line (pasted text keeps its lines).', 'dim'),
       K('o', 'open the task’s artifact (PR/URL, branch diff, commit, file) or the plan’s documents'),
       [],
       H('The coordinator (one per plan, always running)'),
@@ -1598,9 +1599,20 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   function footer() {
-    if (ui.picker) return []; // its keys are in the box
-    if (ui.input) return [[' ' + ui.input.label, 'bold yellow'], [ui.input.value + '█', ''], [`   ${ui.input.hint ?? '⏎ send'} · esc cancel`, 'dim']];
-    if (ui.flash && ui.flash.until > Date.now()) return [[' ' + ui.flash.msg, ui.flash.style]];
+    if (ui.picker) return [[]]; // its keys are in the box
+    if (ui.input && !ui.input.multiline) return [[[' ' + ui.input.label, 'bold yellow'], [ui.input.value + '█', ''], [`   ${ui.input.hint ?? '⏎ send'} · esc cancel`, 'dim']]];
+    if (ui.input) {
+      // a text field: the label, then the text wrapped, growing up to a few lines (the end shown)
+      const W = out.columns || 80;
+      const rows = wrapText(ui.input.value + '█', Math.max(10, W - 4));
+      const max = Math.max(1, Math.min(10, (out.rows || 24) - 12));
+      const shown = rows.slice(-max);
+      return [
+        [[' ' + ui.input.label, 'bold yellow'], [`   ${ui.input.hint ?? '⏎ send'} · alt+⏎ or ctrl+j new line · esc cancel`, 'dim']],
+        ...shown.map((l, i) => [[i === 0 && rows.length > max ? ' … ' : ' │ ', 'gray'], [l, '']]),
+      ];
+    }
+    if (ui.flash && ui.flash.until > Date.now()) return [[[' ' + ui.flash.msg, ui.flash.style]]];
     const esc = ui.scope.level === 'all' ? 'esc quit' : 'esc widen';
     const keys = {
       overview: overviewKeys(ui.rows.overview[ui.sel.overview]),
@@ -1610,7 +1622,18 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       detail: '↑↓ scroll  ⏎/esc back  a approve  x changes  r message  o open  L live  g agent  s/S coordinator',
       help: '↑↓ scroll  any other key: back',
     }[view()];
-    return [[' ' + keys, 'dim']];
+    return [[[' ' + keys, 'dim']]];
+  }
+
+  /** Lines of a text, each cut to `w` characters. */
+  function wrapText(text, w) {
+    const rows = [];
+    for (const line of text.split('\n')) {
+      const cs = [...line];
+      if (!cs.length) rows.push('');
+      for (let i = 0; i < cs.length; i += w) rows.push(cs.slice(i, i + w).join(''));
+    }
+    return rows;
   }
 
   function scrolled(lines, all, key, bodyH) {
@@ -1633,7 +1656,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const H = out.rows || 24;
     const plans = scopePlans();
     const lines = [...header(W, plans), [['─'.repeat(W), 'gray']]];
-    const bodyH = H - lines.length - 1;
+    const foot = footer();
+    const bodyH = H - lines.length - foot.length;
     const v = view();
 
     if (v === 'help') scrolled(lines, helpLines(), 'help', bodyH);
@@ -1685,8 +1709,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
         }
       }
     }
-    while (lines.length < H - 1) lines.push([]);
-    lines.length = H - 1;
+    while (lines.length < H - foot.length) lines.push([]);
+    lines.length = H - foot.length;
     if (ui.picker) {
       // the picker floats over the view, below the header
       const top = 4;
@@ -1695,7 +1719,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       const x = Math.floor((W - bw) / 2);
       box.forEach((b, i) => (lines[top + i] = overlay(lines[top + i] || [], b, x, W)));
     }
-    lines.push(footer());
+    lines.push(...foot);
     out.write(`${ESC}H` + lines.map((l) => fit(l, W) + `${ESC}K`).join('\r\n'));
   }
 
@@ -1777,7 +1801,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       return (ui.input = {
         label: `to ${r.actor}: `,
         value: '',
-        hint: '⏎ send',
+        hint: '⏎ send', multiline: true,
         onSubmit: async (text) => {
           if (!text.trim()) return;
           const res = await herdrAsync(['agent', 'prompt', r.pane, text.trim()]);
@@ -1795,7 +1819,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       ui.input = {
         label: `${q ? 'answer' : 'note'} on the plan, for the coordinator: `,
         value: '',
-        hint: '⏎ send',
+        hint: '⏎ send', multiline: true,
         onSubmit: (text) => text.trim() && writeAsHuman(pr, [{ type: 'plan.note', data: { message: text.trim(), kind: 'info' } }], `sent to the coordinator of "${pr.st.title}"`),
       };
       return;
@@ -1805,7 +1829,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     ui.input = {
       label: `${question ? 'answer' : 'message'} on ${t.id}, for the coordinator: `,
       value: '',
-      hint: '⏎ send',
+      hint: '⏎ send', multiline: true,
       // v2: the coordinator reads it and decides (starts an agent with its instructions, …)
       onSubmit: (text) => text.trim() && writeAsHuman(tr, [{ type: 'task.note', task: t.id, data: { message: text.trim(), kind: 'info' } }], `${question ? 'answer' : 'message'} on ${t.id} sent to the coordinator`),
     };
@@ -1815,7 +1839,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   function changeNow() {
     const r = selectedTask();
     if (!r) return flash('select a task');
-    ui.input = { label: `change request for ${r.task}, for the coordinator: `, value: '', hint: '⏎ send', onSubmit: (text) => text.trim() && reviewNow('change', text.trim()) };
+    ui.input = { label: `change request for ${r.task}, for the coordinator: `, value: '', hint: '⏎ send', multiline: true, onSubmit: (text) => text.trim() && reviewNow('change', text.trim()) };
   }
 
   /**
@@ -2050,7 +2074,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   function quit() {
-    out.write(`${ESC}?25h${ESC}?1049l`);
+    out.write(`${ESC}?2004l${ESC}?25h${ESC}?1049l`);
     process.exit(0);
   }
 
@@ -2061,13 +2085,19 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const v = view();
     if (k === '\x03') return quit();
     if (ui.picker) return pickerKey(k);
+    // bracketed paste: a pasted text arrives between these, its line breaks are text
+    if (k === '\x1b[200~') return void (ui.pasting = true);
+    if (k === '\x1b[201~') return ((ui.pasting = false), ui.input && draw());
+    if (ui.pasting && !ui.input) return;
     if (ui.input) {
-      // one-line text input
-      if (k === '\r') {
+      // a text input; multiline: ⏎ sends, alt+⏎ / ctrl+j (and pasted line breaks) start a new line
+      const newline = k === '\n' || k === '\x1b\r' || k === '\x1b\n' || (ui.pasting && k === '\r');
+      if (newline) ui.input.value += ui.input.multiline ? '\n' : ui.pasting ? ' ' : '';
+      else if (k === '\r') {
         const inp = ui.input;
         ui.input = null;
         inp.onSubmit(inp.value);
-      } else if (k === '\x1b') {
+      } else if (k === '\x1b' && !ui.pasting) {
         ui.input.onCancel?.();
         ui.input = null;
       } else if (k === '\x7f' || k === '\b') ui.input.value = [...ui.input.value].slice(0, -1).join('');
@@ -2224,14 +2254,14 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   loadLiveKinds()
     .then(({ errors }) => (errors.length ? flash(`live plugin failed: ${errors[0].file}: ${errors[0].error}`, 'red') : draw()))
     .catch(() => {});
-  out.write(`${ESC}?1049h${ESC}?25l${ESC}2J`);
+  out.write(`${ESC}?1049h${ESC}?25l${ESC}?2004h${ESC}2J`);
   process.on('SIGTERM', quit);
   process.on('SIGHUP', quit);
   out.on('resize', draw);
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (d) => {
-    const keys = d.match(/\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-Za-z]|\x1b|[\s\S]/g) || [];
+    const keys = d.replace(/\r\n/g, '\r').match(/\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-Za-z]|\x1b[\r\n]|\x1b|[\s\S]/g) || [];
     for (const k of keys) onKey(k);
   });
 
