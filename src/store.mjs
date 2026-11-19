@@ -5,6 +5,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { fold, PROTOCOL_VERSION, reviewRefusal } from './core.mjs';
+import { snapshotDrafts } from './changes.mjs';
 
 export const ROOT_NAME = '.atf';
 
@@ -129,7 +130,8 @@ export function transact(root, planId, actor, fn) {
   const res = withLock(root, planId, () => {
     const events = readEvents(root, planId);
     const state = fold(events);
-    const drafts = fn(state) || [];
+    // §15: snapshots of the project's repos when a leaf task starts or leaves in_progress
+    const drafts = snapshotDrafts({ root, planId, state, drafts: fn(state) || [], cfg: readConfig(root) });
     let seq = state.last_seq;
     const written = drafts.map((d) => {
       const ev = {

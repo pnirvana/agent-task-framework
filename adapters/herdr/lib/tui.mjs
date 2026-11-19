@@ -10,6 +10,7 @@ import { progressText } from './sync.mjs';
 import { textField, keyField, fieldText, fieldRows, fieldMode } from './textfield.mjs';
 import { activeRuns, taskLive, liveBadge, elapsed, readTail, earlierText, liveView, hasView, liveOpen, loadLiveKinds, enableAutoRefresh } from '../../../src/live.mjs';
 import { fileURLToPath } from 'node:url';
+import { planChanges, levelSets, totals, projectPath, changeMode, diffTool } from '../../../src/changes.mjs';
 const ATF_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../bin/atf.mjs');
 
 const ESC = '\x1b[';
@@ -102,6 +103,7 @@ const TABS = [
   ['tasks', 'Tasks'],
   ['plan', 'Plan'],
   ['log', 'Log'],
+  ['changes', 'Changes'],
 ];
 
 /**
@@ -118,7 +120,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     scope: null, // {level: 'all'|'project'|'plan', root?, plan?}
     tab: 'overview',
     overlay: null, // detail | help
-    sel: { overview: 0, tasks: 0, plan: 0 },
+    sel: { overview: 0, tasks: 0, plan: 0, changes: 0 },
+    changes: new Map(), // plan key -> {seq, at, data, pending}: changesets (§15)
     scrolls: {},
     open: new Map(), // plan key -> expanded? (multi-plan Tasks view)
     collapsed: new Set(), // task keys collapsed in the tree
@@ -128,7 +131,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     agentsSince: new Map(),
     flash: null,
     lastSeq: new Map(), // plan key -> last seq seen (board notifications)
-    rows: { overview: [], tasks: [], plan: [] }, // selectable rows of the current draw
+    rows: { overview: [], tasks: [], plan: [], changes: [] }, // selectable rows of the current draw
     back: null, // {scope, sel}: where esc returns to after ⏎ on the Overview
     log: { plan: null, query: '' }, // Log tab filter: plan key, search words
     picker: null, // plan picker: {title, query, sel, items(), onPick(item)}
@@ -215,7 +218,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (tab) ui.tab = tab;
     ui.overlay = null;
     ui.scrolls = {};
-    ui.sel = { overview: 0, tasks: 0, plan: 0 };
+    ui.sel = { overview: 0, tasks: 0, plan: 0, changes: 0 };
     if (task) {
       const st = cachedPlan(scope.root, scope.plan);
       for (const pid of st.tasks[task]?.path || []) ui.collapsed.delete(`${keyOf(scope.root, scope.plan)}#${pid}`);
@@ -615,6 +618,17 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (outputs.length) {
       L.push([], [['artifacts', 'bold']]);
       for (const x of outputs) L.push([[`  ${x.kind} `, 'dim'], [x.ref, 'cyan'], [x.description ? ' — ' + x.description : '', 'dim']]);
+    }
+    // §15: the files it changed (its subtree's, for a parent); d opens their diff
+    const ch = st.root ? changesOf({ root: st.root, id: st.id, st, key: keyOf(st.root, st.id) }) : null;
+    const sets = ch ? levelSets(ch, id) : [];
+    if (sets.length) {
+      const tot = totals(sets);
+      const overlap = [...new Set(sets.flatMap((x) => x.overlap || []))];
+      L.push([], [['changes', 'bold'], [`  ${statStr(tot)} · d diff · 4 Changes`, 'dim'], [overlap.length ? `  ⚠ overlaps ${overlap.join(',')} in time` : '', 'yellow']]);
+      const files = sets.flatMap((x) => x.files.map((f) => [x, f]));
+      for (const [x, f] of files.slice(0, 12)) L.push([[`  ${f.status} `, FILE_STYLE[f.status] || ''], [projectPath(x, f), ''], [f.binary ? '  binary' : `  +${f.added} -${f.removed}`, 'dim']]);
+      if (files.length > 12) L.push([[`  … ${files.length - 12} more`, 'dim']]);
     }
     if (t.notes.length) {
       L.push([], [['notes', 'bold']]);
@@ -1477,7 +1491,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       K('p', 'plan picker: a popup of all plans by project (goal, state); type to filter,'),
       T('                ↑↓ or ctrl+j/ctrl+k select, ⏎ goes to the plan;'),
       T('                in the Log it filters the log to the picked plan (or all plans)'),
-      K('Tab / 0-3', 'switch view: 0 Overview · 1 Tasks · 2 Plan · 3 Log'),
+      K('Tab / 0-4', 'switch view: 0 Overview · 1 Tasks · 2 Plan · 3 Log · 4 Changes'),
       K('f', 'show / hide closed plans (all views)'),
       K('?  q  ctrl+c', 'this help · close details or quit · quit'),
       [],
@@ -1519,6 +1533,19 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       T('g jump, c close. Log: events of all plans in scope, newest first; / searches'),
       T('(every word must match; matches highlighted), p picks a plan to filter by, esc clears.'),
       [],
+      H('4 Changes: the files the plan’s tasks changed'),
+      T('Per plan the tasks that changed files (work packages hold their subtasks), each with'),
+      T('its files and line counts. Where they come from: .atf/config.json "changes":'),
+      T('"snapshots" (default: the working tree when a task starts and when it is finished;'),
+      T('tasks running at the same time in one repo ⚠ overlap, narrowed to the files they'),
+      T('reported) or "artifacts" (only the file, commit and branch artifacts agents record).'),
+      K('⏎ / d', 'the combined diff of the row in your diff viewer, in a herdr tab: a file, a'),
+      T('                task, a work package (its subtree) or the plan'),
+      K('D', 'the diff of the whole plan'),
+      K('←→ h/l space z', 'fold a task or plan / all tasks (← on a file: to its task)'),
+      T('The viewer: "diff": {"tool": "git" | "diffview" | "difftool" | "<command with {repo}', 'dim'),
+      T('{base} {target} {range} {files}>"} in ~/.config/atf/config.json, or $ATF_DIFF_TOOL.', 'dim'),
+      [],
       H('Acting (Overview, Tasks, details): takes effect at once'),
       T('The coordinator makes the decisions: what you write goes to it, and it decides what'),
       T('happens (starts an agent with its instructions, a follow-up task, a plan change, …).'),
@@ -1540,6 +1567,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       K('ctrl+z', 'undo; alt+z redo'),
       T(viMode() ? 'vi mode is on: insert mode first (⏎ new line); esc → normal mode: ⏎ sends, vi keys, esc cancels.' : 'vi keys: "vi_mode": true in the plugin config, or ATF_VI_MODE=1.', 'dim'),
       K('o', 'open the task’s artifact (PR/URL, branch diff, commit, file) or the plan’s documents'),
+      K('d', 'the combined diff of the task (a parent: its subtree) or the plan (see 4 Changes)'),
       [],
       H('The coordinator (one per plan, always running)'),
       K('s', 'start the coordinator of the selected plan, resuming its last session (if one'),
@@ -1646,10 +1674,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const esc = ui.scope.level === 'all' ? 'esc quit' : 'esc widen';
     const keys = {
       overview: overviewKeys(ui.rows.overview[ui.sel.overview]),
-      tasks: `↑↓ move  ←→ fold  v ${ui.byAgent ? 'tree' : 'by agent'}  ⏎ details  a approve  x changes  r message  N plan note  o open  L live  g agent  s/S coordinator  p plan  ${esc}`,
+      tasks: `↑↓ move  ←→ fold  v ${ui.byAgent ? 'tree' : 'by agent'}  ⏎ details  a approve  x changes  r message  N plan note  o open  d diff  L live  g agent  s/S coordinator  p plan  ${esc}`,
       plan: multi() ? `↑↓ select  ←→ fold  ⏎ open plan  o docs  r note  N plan note  s/S coordinator  g jump  c close  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}` : `↑↓ scroll  o docs  r / N note  s/S coordinator  ${esc}  ? help`,
+      changes: `↑↓ move  ←→ fold  z fold all  ⏎/d diff of the row (file, task, package, plan)  D plan diff  g agent  ${esc}  ? help`,
       log: `↑↓ scroll  / search  N plan note  ${multi() ? 'p plan  ' : ''}${ui.log.plan || ui.log.query ? 'esc clear filter  ' : esc + '  '}tab views  ? help`,
-      detail: '↑↓ scroll  ⏎/esc back  a approve  x changes  r message  N plan note  o open  L live  g agent  s/S coordinator',
+      detail: '↑↓ scroll  ⏎/esc back  a approve  x changes  r message  N plan note  o open  d diff  L live  g agent  s/S coordinator',
       help: '↑↓ scroll  any other key: back',
     }[view()];
     return [[[' ' + keys, 'dim']]];
@@ -1711,7 +1740,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       const { lines: all, selLine } = planCardsLines(W, plans);
       list(lines, all, selLine, 'plan', bodyH);
     } else if (v === 'plan') scrolled(lines, planTabLines(W, plans), 'plan', bodyH);
-    else if (v === 'log') {
+    else if (v === 'changes') {
+      const rows = buildChangeRows();
+      if (!rows.length) lines.push([[' No active plans in scope.', 'dim']]);
+      list(lines, rows.map((r, i) => changeRowLine(r, W, i === ui.sel.changes)), ui.sel.changes, 'changes', bodyH);
+    } else if (v === 'log') {
       const [bar, rule, ...rest] = logTabLines(W, plans);
       lines.push(bar, rule); // the filter bar stays put while the events scroll
       scrolled(lines, rest, 'log', bodyH - 2);
@@ -2001,17 +2034,140 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     else if (x.kind === 'file') cmd = `${process.env.EDITOR || 'less'} ${q(x.ref)}`;
     else return flash(`${x.kind}: ${x.ref}`);
     if (!inHerdr()) return flash(`run in ${proj}: ${cmd}`);
+    const label = r.task ? `review ${r.task}` : path.basename(x.ref);
+    if (await openInTab(r, label, cmd)) flash(`opened ${x.ref} in tab "${label}"${docs.length > 1 ? ` (also: ${docs.slice(1).join(', ')})` : ''}`, 'green');
+  }
+
+  /**
+   * Run a command in a new herdr tab in the project, in the workspace of the plan's
+   * coordinator (else the board's), and bring it to the front. The popup board closes.
+   */
+  async function openInTab(r, label, cmd) {
+    const proj = path.dirname(r.root);
     const coord = coordinatorOf(r.st);
     const ws = (coord.id && !coord.away && r.st.actors[coord.id]?.ctx?.herdr_workspace) || process.env.HERDR_WORKSPACE_ID;
-    const label = r.task ? `review ${r.task}` : path.basename(x.ref);
     const tab = await herdrAsync(['tab', 'create', ...(ws ? ['--workspace', ws] : []), '--cwd', proj, '--label', label, '--focus']);
     const pane = tab?.root_pane?.pane_id;
-    if (!pane) return flash('could not open a herdr tab', 'red');
+    if (!pane) return flash('could not open a herdr tab', 'red'), false;
     if (ws) await herdrAsync(['workspace', 'focus', ws]);
     if (tab.root_pane.tab_id) await herdrAsync(['tab', 'focus', tab.root_pane.tab_id]); // the workspace shows its last tab otherwise
     await herdrText(['pane', 'run', pane, cmd]);
     if (popup) quit();
-    else flash(`opened ${x.ref} in tab "${label}"${docs.length > 1 ? ` (also: ${docs.slice(1).join(', ')})` : ''}`, 'green');
+    return true;
+  }
+
+  // ---------- changes (§15) ----------
+  /**
+   * The changes of a plan (src/changes.mjs), computed in the background: recomputed when
+   * the plan changed, and every few seconds while a changeset runs to the working tree.
+   * null until the first result is there (the view says "reading…").
+   */
+  function changesOf(p) {
+    const hit = ui.changes.get(p.key);
+    const live = hit?.data && Object.values(hit.data.tasks).flat().some((s) => !s.target);
+    const stale = !hit || hit.seq !== p.st.last_seq || (live && Date.now() - hit.at > 5000);
+    if (stale && !hit?.pending) {
+      const entry = { ...(hit || {}), pending: true };
+      ui.changes.set(p.key, entry);
+      const seq = p.st.last_seq;
+      planChanges(path.dirname(p.root), p.st, { mode: changeMode(readConfig(p.root)) })
+        .then((data) => ui.changes.set(p.key, { seq, at: Date.now(), data, pending: false }))
+        .catch((e) => ui.changes.set(p.key, { seq, at: Date.now(), data: hit?.data ?? null, error: e.message, pending: false }))
+        .finally(draw);
+    }
+    return ui.changes.get(p.key)?.data ?? null;
+  }
+
+  const statStr = (t) => `${t.files} file${t.files === 1 ? '' : 's'} +${t.added} -${t.removed}`;
+  const FILE_STYLE = { A: 'green', M: 'yellow', D: 'red', T: 'yellow' };
+
+  /** Rows of the Changes tab: per plan, the tasks that changed files, and their files. */
+  function buildChangeRows() {
+    const rows = [];
+    for (const p of scopePlans()) {
+      const data = changesOf(p);
+      const base = { root: p.root, plan: p.id, st: p.st, key: p.key };
+      const open = !multi() || (ui.open.has('chg#' + p.key) ? ui.open.get('chg#' + p.key) : !data || data.plan.length > 0); // plans without changes start folded
+      rows.push({ ...base, type: 'plan', k: 'chg#' + p.key, open, sets: data?.plan ?? [], mode: data?.mode });
+      if (!open) continue;
+      if (!data) {
+        rows.push({ ...base, type: 'note', k: p.key + '#chg-wait', text: '   reading changes…' });
+        continue;
+      }
+      const has = (id) => levelSets(data, id).length > 0;
+      const visit = (id, prefix, isLast, depth) => {
+        const k = `chg#${p.key}#${id}`;
+        const sets = levelSets(data, id);
+        rows.push({ ...base, type: 'task', task: id, k, sets, prefix: depth ? prefix + (isLast ? '└─' : '├─') : '' });
+        if (ui.collapsed.has(k)) return;
+        const t = p.st.tasks[id];
+        const inner = depth ? prefix + (isLast ? '  ' : '│ ') : '';
+        if (t.children.length) {
+          const kids = t.children.filter(has);
+          kids.forEach((c, i) => visit(c, inner, i === kids.length - 1, depth + 1));
+        } else for (const s of sets) for (const f of s.files) rows.push({ ...base, type: 'file', task: id, set: s, file: f, k: `${k}#${s.repo}#${f.path}`, prefix: inner + (depth ? '  ' : '') });
+      };
+      const roots = p.st.order.filter((id) => (!p.st.tasks[id].parent || !p.st.tasks[p.st.tasks[id].parent]) && has(id));
+      roots.forEach((id, i) => visit(id, '', i === roots.length - 1, 0));
+      if (!roots.length)
+        rows.push({ ...base, type: 'note', k: p.key + '#chg-none', text: data.mode === 'snapshots' ? '   no changes yet: taken when a task starts and when its agent finishes it' : '   no changes reported (file, commit and branch artifacts of the tasks)' });
+    }
+    const prev = ui.rows.changes[ui.sel.changes]?.k;
+    ui.rows.changes = rows;
+    const i = prev ? rows.findIndex((r) => r.k === prev) : -1;
+    ui.sel.changes = i >= 0 ? i : Math.min(ui.sel.changes ?? 0, Math.max(0, rows.length - 1));
+    return rows;
+  }
+
+  function changeRowLine(r, W, selected) {
+    const lead = `${selected ? ' › ' : '   '}${multi() ? '│ ' : ''}`;
+    const base = selected ? 'inverse ' : '';
+    if (r.type === 'plan') {
+      const t = totals(r.sets);
+      return [mark(selected), [r.open ? '▾ ' : '▸ ', 'bold cyan'], [clip(r.st.title, Math.max(12, W - 50)).trimEnd(), (base + 'bold cyan').trim()], [ui.scope.level === 'all' ? `  ${projectName(r.root)}` : '', 'cyan'], [t.files ? `  ${statStr(t)}` : '  no changes', 'dim'], [r.mode ? `  (${r.mode})` : '', 'gray']];
+    }
+    if (r.type === 'note') return [[r.text, 'dim']];
+    if (r.type === 'file') {
+      const f = r.file;
+      const where = projectPath(r.set, f);
+      const stat = f.binary ? 'binary' : `+${f.added} -${f.removed}`;
+      const pre = `${lead}${r.prefix}  `;
+      return [[pre, selected ? 'cyan bold' : 'gray'], [`${f.status} `, FILE_STYLE[f.status] || ''], [clip(where, Math.max(8, W - strWidth(pre) - stat.length - 6)), (base.trim() || '')], ['  ' + stat, 'dim']];
+    }
+    const t = r.st.tasks[r.task];
+    const s = effStatus(t);
+    const [g, color] = STATUS[s];
+    const overlap = [...new Set(r.sets.flatMap((x) => x.overlap || []))];
+    const fold = ui.collapsed.has(r.k) ? '▸' : '▾';
+    const right = `${statStr(totals(r.sets))}${overlap.length ? `  ⚠ overlaps ${overlap.join(',')}` : ''}`;
+    const pre = `${lead}${r.prefix}`;
+    const titleW = Math.max(4, W - strWidth(pre) - strWidth(`${fold}${t.id} `) - 2 - strWidth(right) - 3);
+    return [[pre, selected ? 'cyan bold' : 'gray'], [`${fold}${t.id} `, base + 'bold'], [g + ' ', (base + color).trim()], [clip(t.title, titleW) + '  ', (base + (t.children.length ? 'bold' : '')).trim()], [statStr(totals(r.sets)), 'dim'], [overlap.length ? `  ⚠ overlaps ${overlap.join(',')}` : '', 'yellow']];
+  }
+
+  /**
+   * d: the combined diff of a level in the user's diff viewer (atf diff --open, in a herdr
+   * tab): a file, a task, a work package (its subtree) or a plan.
+   */
+  async function openDiff(r, { task = null, file = null } = {}) {
+    if (!r?.root || !r?.plan) return flash('select a task or a plan');
+    const data = changesOf({ root: r.root, id: r.plan, st: r.st, key: keyOf(r.root, r.plan) });
+    if (data && !levelSets(data, task).length) return flash(`no changes ${task ? `on ${task}` : `in "${r.st.title}"`}${data.mode === 'snapshots' ? '' : ' (agents report them as file, commit and branch artifacts)'}`);
+    const q = (x) => `'${String(x).replace(/'/g, `'\\''`)}'`;
+    const args = [process.execPath, ATF_CLI, 'diff', task || 'plan', '--plan', r.plan, '--open', ...(file ? ['--file', file] : [])];
+    const cmd = `ATF_DIR=${q(r.root)} ${args.map(q).join(' ')}`;
+    if (!inHerdr()) return flash(`run: ${cmd}`);
+    const label = `diff ${file ? path.basename(file) : task || clip(r.st.title, 20).trimEnd()}`;
+    if (await openInTab(r, label, cmd)) flash(`opened the diff of ${file || task || r.st.title} in tab "${label}" (${diffTool()})`, 'green');
+  }
+
+  /** d outside the Changes tab: the selected task, else the plan of the row or in scope. */
+  function diffSelected() {
+    const r = selectedRow();
+    if (r?.st && r.task) return openDiff(r, { task: r.task });
+    const target = r?.st ? r : ui.scope.level === 'plan' ? { root: ui.scope.root, plan: ui.scope.plan, st: cachedPlan(ui.scope.root, ui.scope.plan) } : null;
+    if (!target) return flash('select a task or a plan');
+    return openDiff(target);
   }
 
   /**
@@ -2207,6 +2363,47 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       }
     }
     if (k === 'N' && v !== 'help') return planNote(), draw(); // a plan note, from every view
+    // the Changes tab: its own moves and folds; tabs, esc, help, plan picker as everywhere
+    if (v === 'changes' && !['\x1b', 'q', '\t', '\x1b[Z', '?', 'A', 'p', 'f'].includes(k) && !/^[0-9]$/.test(k)) {
+      const r = selectedRow();
+      const n = ui.rows.changes.length;
+      if (k === '\r' || k === 'd') {
+        if (r?.type === 'file') return openDiff(r, { task: r.task, file: projectPath(r.set, r.file) });
+        if (r?.type === 'task') return openDiff(r, { task: r.task });
+        if (r?.type === 'plan') return openDiff(r);
+        return;
+      }
+      if (k === 'D' && r?.st) return openDiff(r);
+      if (k === 'g') return goTo();
+      const foldable = r && (r.type === 'plan' || r.type === 'task');
+      const isOpen = (x) => (x.type === 'plan' ? x.open : !ui.collapsed.has(x.k));
+      const setOpen = (x, o) => (x.type === 'plan' ? ui.open.set(x.k, o) : o ? ui.collapsed.delete(x.k) : ui.collapsed.add(x.k));
+      if (UP.includes(k)) ui.sel.changes = Math.max(0, ui.sel.changes - 1);
+      else if (DOWN.includes(k)) ui.sel.changes = Math.min(n - 1, ui.sel.changes + 1);
+      else if (k === '\x1b[5~') ui.sel.changes = Math.max(0, ui.sel.changes - page);
+      else if (k === '\x1b[6~') ui.sel.changes = Math.min(n - 1, ui.sel.changes + page);
+      else if (k === '\x1b[H') ui.sel.changes = 0;
+      else if (k === 'G' || k === '\x1b[F') ui.sel.changes = n - 1;
+      else if (k === ' ' && foldable) setOpen(r, !isOpen(r));
+      else if ((k === '\x1b[C' || k === 'l') && foldable) setOpen(r, true);
+      else if (k === '\x1b[D' || k === 'h') {
+        if (foldable && isOpen(r) && (r.type === 'task' || multi())) setOpen(r, false);
+        else {
+          // up to the row this one hangs under: its task, the parent task, the plan
+          const parent = r?.type === 'file' ? r.task : r?.type === 'task' ? r.st.tasks[r.task].parent : null;
+          let j = ui.sel.changes - 1;
+          while (j >= 0 && !(parent ? ui.rows.changes[j].type === 'task' && ui.rows.changes[j].task === parent && ui.rows.changes[j].key === r.key : ui.rows.changes[j].type === 'plan')) j--;
+          if (j >= 0) ui.sel.changes = j;
+        }
+      } else if (k === 'z') {
+        const tasks = ui.rows.changes.filter((x) => x.type === 'task');
+        const anyOpen = tasks.some(isOpen);
+        for (const x of tasks) setOpen(x, !anyOpen);
+      }
+      if (r?.root && r?.plan) ui.focus = { root: r.root, plan: r.plan };
+      return draw();
+    }
+    if (k === 'd' && ['overview', 'tasks', 'detail', 'plan'].includes(v)) return diffSelected();
     if (['overview', 'tasks', 'detail', 'plan'].includes(v)) {
       // acting takes effect at once; the human's words go to the coordinator (§12.5)
       if (v !== 'plan' && k === 'a') return reviewNow('approve');

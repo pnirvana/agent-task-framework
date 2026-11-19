@@ -96,8 +96,9 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 | `task.status`   | `{status, message?, on?: id[], for?: coordinator\|human, changes?: true}` | `message` on `done` is the task's **result summary**; `on` with `blocked`: tasks it is blocked on; `for` with `blocked` (no `on`): who must answer the question (default the coordinator; `human`: escalated, §12.4); `changes` with `todo`: **changes requested** from review (`message` is the coordinator's instructions) |
 | `task.progress` | `{message?, percent?: 0..100}` | heartbeat / milestone |
 | `task.note`     | `{message, kind?: info\|question\|decision\|warning\|checkpoint}` | `checkpoint`: where the work stands (done / left / how to verify) |
-| `task.artifact` | `{kind: file\|commit\|branch\|pr\|url\|other, ref, description?}` | pointer to an output |
+| `task.artifact` | `{kind: file\|commit\|branch\|pr\|url\|other, ref, description?, git?}` | pointer to an output; `git` (files in a repository): `{path, repo, head}` when reported (§15) |
 | `task.session`  | `{ref, kind?, actor?}` | opaque reference to an agent session that worked on the task (§9) |
+| `task.snapshot` | `{phase: start\|end, repos: [{path, commit, head}]}` | the working tree of the project's repositories when a leaf task started (the first time) and when it last left `in_progress` (§15); `path` relative to the project |
 
 ### Extension events
 Types starting with `x.` (e.g. `x.herdr.focus`, `x.mycorp.cost`) are reserved for
@@ -869,3 +870,62 @@ GitLab server for trying it).
 - An opencode coordinator adapter (wake, peek); opencode works as a subagent kind today.
 - Retention: run outputs stay under `<plan>/live/runs/` until the plan directory is removed.
 - More built-in kinds (gradle test reports, coverage).
+
+## 15. Changes: what a task, a package and a plan changed
+
+### 15.1 Why
+
+Reviewing means reading a change, and the human reviews with their own tools (diffview
+in Neovim, a difftool, plain `git diff`). A task's changes are rarely one commit: agents
+work in the working tree, several agents in one repository, a project may hold several
+repositories. ATF therefore records *where each task started and ended*, and derives
+changesets per task, per work package and per plan from that.
+
+### 15.2 Sources (`.atf/config.json` `"changes"`)
+
+- **`snapshots`** (default). The writer (store.transact) adds a `task.snapshot` event
+  after a `task.status` by which a leaf task enters `in_progress` for the first time
+  (`phase: start`), or leaves `in_progress` (`phase: end`, replacing an earlier end).
+  A snapshot is the working tree of each git repository of the project (the one the
+  project directory is in, and those up to three levels below it), recorded with
+  `git add -A` into a temporary index, `git write-tree` and `git commit-tree` (parent:
+  `HEAD`), and kept by the ref `refs/atf/<plan>/<task>/<phase>`. The user's index, `HEAD`
+  and branches are not touched; `.gitignore` applies. A failing snapshot never fails the
+  transaction.
+- **`artifacts`**. No snapshots. A task's changes are its `file` artifacts together with
+  the files of its `commit` artifacts, to the working tree, from the oldest of: the
+  parents of its `commit` artifacts, and `HEAD` at the time each file was reported (`atf
+  artifact` records the file's repository and `HEAD` as `git: {path, repo, head}`), so a
+  reported file stays in the diff after it is committed; without either, the current
+  `HEAD`. A `branch` artifact is its own changeset (merge base with the default branch ..
+  branch).
+
+### 15.3 Changesets
+
+A changeset is per repository: `{repo, base, target|null, files: [{path, status, added,
+removed, tasks}], tasks, overlap}`; `target` null is the working tree.
+
+- **Task** (snapshots): start snapshot .. end snapshot (the working tree while the task
+  is in progress). **Overlap**: other leaf tasks whose snapshot window intersects this one
+  in the same repository. Their changes may be in this window too. A task that reported
+  `file` artifacts is then narrowed to those files; otherwise it is marked as overlapping.
+- **Work package** (a parent) and **plan**: the changesets of their leaves combined per
+  repository, from the earliest base to the latest target (the working tree while any of
+  them runs), over the union of their files.
+
+### 15.4 Viewing
+
+`atf diff [task] [--file F] [--patch | --open [--tool T]] [--json]`: the changed files
+of a task (a parent: its subtree; none: the plan), the combined patch, or the viewer.
+The viewer is the user's (`~/.config/atf/config.json` `diff.tool`, `$ATF_DIFF_TOOL`):
+`git`, `diffview`, `difftool` or a command template (`{repo} {base} {target} {range}
+{files}`), so every team member keeps their own tool. Frontends show the same
+changesets (the herdr board: the Changes tab, `d`) and open the viewer through `atf diff
+--open`.
+
+### 15.5 Not yet
+
+- Edit hooks (pi, Copilot, opencode) that attribute every edited file to its task exactly,
+  also when tasks overlap in time.
+- Repositories outside the project directory (agents in separate git worktrees).
+- Pruning `refs/atf/<plan>/…` when a plan is closed.

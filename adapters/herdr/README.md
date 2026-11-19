@@ -112,7 +112,7 @@ The board has one **scope**, shown as a breadcrumb in its header:
 `prefix+alt+t` start on the Overview of all projects (`"board_start": "plan"` in the
 plugin config makes `prefix+t` open the focused project's plan instead).
 
-Every tab shows its content for the scope (`Tab` / `0`–`3`):
+Every tab shows its content for the scope (`Tab` / `0`–`4`):
 
 - **Overview**: built for supervising several plans at once. Two sections, then the
   context of the selected row:
@@ -161,6 +161,14 @@ Every tab shows its content for the scope (`Tab` / `0`–`3`):
 - **Log**: events of all plans in scope, newest first, tagged with their plan. `/` searches
   as you type (every word must match; matches highlighted), `p` picks one plan of the
   scope to filter by (the plan picker popup), Esc clears the filter. A filtered log searches each plan's whole history.
+- **Changes**: the files the plan's tasks changed (SPEC §15), per plan: the tasks with
+  changes in the task tree (a work package holds its subtasks' changes combined), each
+  with its files and line counts. ⏎ or `d` opens the combined diff of the row in your
+  diff viewer, in a new herdr tab: one file, a task, a work package or the whole plan
+  (`D`: the plan from any row). `⚠ overlaps T4`: another task worked in the same repo at
+  the same time, so its changes may be in this window too (a task that reported its
+  files is narrowed to them). `d` in the other views opens the selected task's or the
+  plan's diff; task details list the task's files.
 
 Rows always know their project and plan, so `g`, `a`, `x`, `r`, `o`, `s` and ⏎ work at any scope.
 
@@ -168,7 +176,7 @@ Rows always know their project and plan, so `g`, `a`, `x`, `r`, `o`, `s` and ⏎
 
 | key | action |
 |-----|--------|
-| `Tab` / `0`–`3` | switch view: `0` Overview · `1` Tasks · `2` Plan · `3` Log |
+| `Tab` / `0`–`4` | switch view: `0` Overview · `1` Tasks · `2` Plan · `3` Log · `4` Changes |
 | `v` | Tasks: task tree ↔ grouped by agent |
 | `⏎` / `Esc` / `A` | narrow scope to the selected plan / widen / all projects |
 | `↑↓` / `jk`, PgUp/PgDn | select / scroll |
@@ -177,6 +185,7 @@ Rows always know their project and plan, so `g`, `a`, `x`, `r`, `o`, `s` and ⏎
 | `g` | focus the owning agent's pane (closes the popup) |
 | `a` / `x` / `r` (`n`) | approve / change request / answer or message, at once; `x`, `r` go to the coordinator |
 | `o` | open the task's artifact (PR, branch diff, commit, file, URL) or the plan's documents |
+| `d` | the combined diff of the selected file, task, work package or plan in your diff viewer (`D` in Changes: the whole plan) |
 | `L` | open what the task's agent runs or watches: a running output followed in a new tab, a finished run in `less`, a pipeline in the browser |
 | `s` / `S` | start the plan's coordinator: resume its session / a fresh session (press twice; replaces a running one after its checkpoint) |
 | `p` | plan picker: a popup listing every plan by project with its goal and state; typing filters it; ⏎ goes to the plan (in the Log: filters the log to it) |
@@ -224,6 +233,45 @@ with its jobs per stage, from the agent's output or the GitLab API. One `.mjs` f
 `atf live-try` tries one on a saved output. Guide:
 [docs/live-plugins.md](../../docs/live-plugins.md). To see all of it at work without Maven or
 GitLab: `sh examples/live-demo/setup.sh <dir>` ([examples/live-demo](../../examples/live-demo/README.md)).
+
+### Changes and diffs (SPEC §15)
+
+Where a task's changes come from is set per project in `.atf/config.json`:
+
+```json
+{ "changes": "snapshots" }
+```
+
+- `"snapshots"` (default): when a task starts, and when its agent finishes, blocks or
+  fails it, ATF records the working tree of every git repository in the project (the
+  project's own and those below it) as a commit kept by a hidden ref
+  (`refs/atf/<plan>/<task>/start|end`). Your index, `HEAD` and branches stay untouched.
+  A task's diff runs from its start snapshot to its end snapshot (to the working tree
+  while it runs); a work package's and a plan's from the first start to the last end, over
+  the files of their tasks. Exact when tasks working in one repo don't overlap in time.
+  When they do, the task is marked `⚠ overlaps`, and narrowed to the files it reported
+  (`atf artifact T3 <file>`), if it reported any. `git for-each-ref refs/atf` lists the
+  refs; `git update-ref -d` removes one.
+- `"artifacts"`: only what agents record, meaning file, commit and branch artifacts. Files are
+  diffed against `HEAD` (or the commit before the task's first commit) to the working tree,
+  and branches against their merge base with the default branch. This needs no
+  snapshots, but it misses files an agent did not report.
+
+The viewer is yours, in `~/.config/atf/config.json` (or `$ATF_DIFF_TOOL`):
+
+```json
+{ "diff": { "tool": "diffview" } }
+```
+
+| tool | opens |
+|------|-------|
+| `git` (default) | `git diff --stat` and the patch in `less -R` |
+| `diffview` | Neovim with [diffview.nvim](https://github.com/sindrets/diffview.nvim), one tab per repository (`:DiffviewOpen -C<repo> <base>..<end> -- <files>`; against the working tree while a task runs, so you can edit; if the task created files git does not track yet, against a snapshot of the working tree instead, since diffview leaves untracked files out of a comparison with a commit) |
+| `difftool` | `git difftool --dir-diff` (your configured difftool) |
+| a template | any command, run once per repository: `{repo}`, `{base}`, `{target}` (empty: working tree), `{range}` (`base..target` or `base`), `{files}` |
+
+From a shell: `atf diff [T3] [--file F]` lists the changed files, `--patch` prints the
+combined diff and `--open` opens it in the viewer.
 
 ### Plugin config (optional)
 

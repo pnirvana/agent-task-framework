@@ -11,8 +11,9 @@ const ATF = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin',
 
 function sandbox() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-test-'));
-  const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', NO_COLOR: '1', ATF_REGISTRY: path.join(dir, 'registry.json'), HERDR_PLUGIN_CONFIG_DIR: path.join(dir, 'herdr-config') };
+  const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', NO_COLOR: '1', ATF_REGISTRY: path.join(dir, 'registry.json'), HERDR_PLUGIN_CONFIG_DIR: path.join(dir, 'herdr-config'), XDG_CONFIG_HOME: path.join(dir, 'xdg-config') };
   delete env.ATF_VI_MODE; // the user's own board settings stay out of the tests
+  delete env.ATF_DIFF_TOOL; // and their diff viewer (~/.config/atf/config.json, via XDG_CONFIG_HOME above)
   delete env.HERDR_PANE_ID;
   const run = (args, extraEnv = {}) =>
     JSON.parse(execFileSync('node', [ATF, ...args, '--json'], { cwd: dir, env: { ...env, ...extraEnv } }).toString());
@@ -1663,4 +1664,127 @@ test('herdr spawn: why an agent did not start, from its pane', async () => {
   assert.match(startFailure('copilot', '│ Confirm folder trust │\n│ Do you trust the files in this folder? │\n', '/p'), /copilot asks whether to trust \/p/);
   assert.match(startFailure('opencode', 'line 1\nError: no credits\n', '/p'), /its pane showed:\n {2}line 1\n {2}Error: no credits/);
   assert.equal(startFailure('pi', '', '/p'), '');
+});
+
+test('§15 changes: snapshots per task, work package and plan; overlaps; the repo stays untouched', () => {
+  const { dir, env, run } = sandbox();
+  const app = path.join(dir, 'app');
+  const git = (...a) => execFileSync('git', ['-C', app, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+  fs.mkdirSync(app);
+  git('init', '-q');
+  fs.writeFileSync(path.join(app, 'a.txt'), 'one\ntwo\n');
+  git('add', '.');
+  git('commit', '-qm', 'init');
+  run(['add', 'Backend']); // T1
+  run(['add', 'Parse', '--parent', 'T1']); // T2
+  run(['add', 'Write', '--parent', 'T1']); // T3
+  run(['add', 'Docs']); // T4
+  run(['start', 'T2']);
+  fs.writeFileSync(path.join(app, 'a.txt'), 'one\nTWO\nthree\n');
+  fs.writeFileSync(path.join(app, 'n.txt'), 'new\n');
+  // while it runs: against the working tree (new untracked files included)
+  let d = run(['diff', 'T2']);
+  assert.equal(d.mode, 'snapshots');
+  assert.deepEqual(d.sets[0].files.map((f) => [f.status, f.path, f.added, f.removed]), [['M', 'a.txt', 2, 1], ['A', 'n.txt', 1, 0]]);
+  assert.equal(d.sets[0].target, null);
+  run(['done', 'T2', '-m', 'ok']);
+  // T3 and T4 at the same time: T4 reported its file, T3 did not
+  run(['start', 'T3']);
+  run(['start', 'T4']);
+  fs.writeFileSync(path.join(app, 'b.txt'), 'b\n');
+  fs.writeFileSync(path.join(app, 'README.md'), '# docs\n');
+  run(['artifact', 'T4', 'app/README.md']);
+  run(['done', 'T3', '-m', 'ok']);
+  run(['done', 'T4', '-m', 'ok']);
+  const files = (r) => r.sets.flatMap((s) => s.files.map((f) => f.path));
+  d = run(['diff', 'T4']);
+  assert.deepEqual(files(d), ['README.md']);
+  assert.deepEqual([d.sets[0].overlap, d.sets[0].narrowed], [['T3'], true]);
+  d = run(['diff', 'T3']);
+  assert.deepEqual(files(d), ['b.txt', 'README.md'], 'no files reported: the whole window, flagged');
+  assert.deepEqual(d.sets[0].overlap, ['T4']);
+  // the work package: its subtasks combined, from the first start to the last end
+  d = run(['diff', 'T1']);
+  assert.deepEqual(files(d), ['a.txt', 'b.txt', 'n.txt', 'README.md']);
+  assert.deepEqual(d.sets[0].files.find((f) => f.path === 'a.txt').tasks, ['T2']);
+  d = run(['diff']);
+  assert.deepEqual(d.totals, { files: 4, added: 5, removed: 1 });
+  // --file, --patch, and the viewer commands
+  assert.deepEqual(files(run(['diff', 'T1', '--file', 'app/n.txt'])), ['n.txt']);
+  assert.match(run(['diff', 'T2', '--patch']).patch, /^\+TWO$/m);
+  const cmd = (tool, extra = {}) => run(['diff', 'T1', '--open', ...(tool ? ['--tool', tool] : [])], extra).command;
+  assert.match(cmd('diffview'), /^nvim -c 'DiffviewOpen -C\S+app [0-9a-f]{40}\.\.[0-9a-f]{40} -- a\.txt b\.txt n\.txt README\.md'/);
+  assert.match(cmd(null), /git -C '\S+app' --no-pager diff --stat [0-9a-f]{40} [0-9a-f]{40} -- 'a\.txt'.*\| less -R$/);
+  assert.match(cmd(null, { ATF_DIFF_TOOL: 'mytool {repo} {range}' }), /^mytool '\S+app' [0-9a-f]{40}\.\.[0-9a-f]{40}$/);
+  // nothing in the repo changed: no staged files, untracked stay untracked, refs only under refs/atf
+  assert.equal(git('status', '--porcelain'), ' M a.txt\n?? README.md\n?? b.txt\n?? n.txt\n');
+  assert.deepEqual(git('for-each-ref', '--format=%(refname)').trim().split('\n').filter((r) => !r.startsWith('refs/atf/')), ['refs/heads/' + git('branch', '--show-current').trim()]);
+  // a second repo: T6 works in web while T5 works in app; T6 reported its file, so the app
+  // change T5 made at the same time is not T6's
+  const web = path.join(dir, 'web');
+  fs.mkdirSync(web);
+  execFileSync('git', ['-C', web, 'init', '-q']);
+  run(['add', 'App fix']); // T5
+  run(['add', 'Web page']); // T6
+  run(['start', 'T5']);
+  run(['start', 'T6']);
+  fs.writeFileSync(path.join(app, 'fix.txt'), 'fix\n');
+  fs.writeFileSync(path.join(web, 'index.html'), '<p>hi</p>\n');
+  run(['artifact', 'T6', 'web/index.html']);
+  run(['done', 'T6', '-m', 'ok']);
+  run(['done', 'T5', '-m', 'ok']);
+  const t6 = run(['diff', 'T6']);
+  assert.deepEqual(t6.sets.map((s) => [s.rel, s.files.map((f) => f.path)]), [['web', ['index.html']]]);
+  assert.ok(run(['diff', 'T5']).sets.some((s) => s.rel === 'app' && s.files.some((f) => f.path === 'fix.txt')));
+  // the board: 4 Changes, files under their tasks; d on a file opens its diff (outside herdr: the command)
+  const frames = JSON.parse(
+    execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '400', '40', JSON.stringify(['4', 'x', 'x', 'x', '\x1b[B', '\x1b[B', '\x1b[B', 'd'])], {
+      cwd: dir,
+      env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
+    }).toString(),
+  );
+  const view = frames.at(-2);
+  assert.match(view, /▾ Test plan .*6 files \+7 -1 {2}\(snapshots\)/);
+  assert.match(view, /T1 ● Backend +4 files \+5 -1  ⚠ overlaps T4/);
+  assert.match(view, /M app\/a\.txt +\+2 -1/);
+  assert.match(view, /T3 ● Write .*⚠ overlaps T4/);
+  assert.match(frames.at(-1), /run: ATF_DIR=.* 'diff' 'T2' .*'--open' '--file' 'app\/a\.txt'/);
+});
+
+test('§15 changes: "artifacts" takes only what agents report (files, commits)', () => {
+  const { dir, env, run } = sandbox();
+  const git = (...a) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+  git('init', '-q');
+  fs.writeFileSync(path.join(dir, '.gitignore'), '.atf/\nregistry.json\nherdr-config/\n');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
+  git('add', '.');
+  git('commit', '-qm', 'init');
+  const cfg = path.join(dir, '.atf', 'config.json');
+  fs.writeFileSync(cfg, JSON.stringify({ ...(fs.existsSync(cfg) ? JSON.parse(fs.readFileSync(cfg, 'utf8')) : {}), changes: 'artifacts' }));
+  run(['add', 'Work']);
+  run(['start', 'T1']);
+  fs.writeFileSync(path.join(dir, 'c.txt'), 'c\n');
+  git('add', 'c.txt');
+  git('commit', '-qm', 'c');
+  run(['artifact', 'T1', git('rev-parse', 'HEAD').trim(), '--kind', 'commit']);
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'a\nmore\n');
+  fs.writeFileSync(path.join(dir, 'other.txt'), 'not reported\n');
+  run(['artifact', 'T1', 'a.txt']);
+  run(['done', 'T1', '-m', 'ok']);
+  const plan = fs.readdirSync(path.join(dir, '.atf', 'plans'))[0];
+  assert.ok(!fs.readFileSync(path.join(dir, '.atf', 'plans', plan, 'events.jsonl'), 'utf8').includes('task.snapshot'));
+  const d = run(['diff', 'T1']);
+  assert.equal(d.mode, 'artifacts');
+  assert.deepEqual(d.sets[0].files.map((f) => [f.status, f.path]), [['M', 'a.txt'], ['A', 'c.txt']]);
+  // a file reported, then committed: read from HEAD at the report, so it stays in the diff;
+  // reported from a subdirectory, it is still found
+  run(['add', 'More']);
+  run(['start', 'T2']);
+  fs.mkdirSync(path.join(dir, 'sub'));
+  fs.writeFileSync(path.join(dir, 'sub', 'd.txt'), 'd\n');
+  execFileSync('node', [ATF, 'artifact', 'T2', 'd.txt'], { cwd: path.join(dir, 'sub'), env: { ...env, ATF_DIR: path.join(dir, '.atf') } });
+  git('add', '.');
+  git('commit', '-qm', 'everything');
+  run(['done', 'T2', '-m', 'ok']);
+  assert.deepEqual(run(['diff', 'T2']).sets[0].files.map((f) => [f.status, f.path]), [['A', 'sub/d.txt']]);
 });

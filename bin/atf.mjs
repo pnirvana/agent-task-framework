@@ -21,8 +21,9 @@ import {
   BLOCK_FOR,
   brief,
 } from '../src/core.mjs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { buildPrompt } from '../src/prompts.mjs';
+import { planChanges, levelSets, totals, onlyFile, projectPath, viewerCommand, patchText, changeMode, diffTool, fileOrigin } from '../src/changes.mjs';
 import { activeRuns, taskLive, elapsed, readTail, earlierText, liveView, loadLiveKinds, liveKinds, liveKind, refreshLive, refreshError, enableAutoRefresh, summarizeText, classify, registerLiveKind, STYLES } from '../src/live.mjs';
 import {
   findRoot,
@@ -49,6 +50,7 @@ import {
   projectName,
   skillStatus,
   SKILL_SRC,
+  readConfig,
 } from '../src/store.mjs';
 
 const HELP = `atf — Agent Task Framework
@@ -96,6 +98,10 @@ Tasks (worker)
                                         a file you watch (background build, server log):
                                         the board shows it while the task runs (--cwd: where
                                         a maven build runs, for its test reports)
+  atf diff [task] [--file F] [--patch | --open [--tool T]]
+                                        files a task changed (a parent: its subtree; none:
+                                        the plan) with line counts; --patch the combined
+                                        diff, --open it in your diff viewer (SPEC §15)
   atf note <task> "<done / left / how to verify>" --kind checkpoint
                                         where the work stands (write one before you block or stop)
   atf session <task> <ref> [--kind K] [--for WHO]
@@ -178,7 +184,7 @@ Global flags
 `;
 
 // ---------- args ----------
-const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early', 'review', 'new', 'live', 'active', 'no-refresh']);
+const BOOL = new Set(['json', 'force', 'follow', 'ready', 'mine', 'help', 'all', 'watch', 'package', 'closed', 'fresh', 'early', 'review', 'new', 'live', 'active', 'no-refresh', 'open', 'patch']);
 const MULTI = new Set(['accept', 'dep', 'label', 'doc']);
 const SHORT = { m: 'message', n: 'limit', h: 'help', j: 'json' };
 
@@ -574,6 +580,7 @@ function renderEvent(e) {
     d.assignee !== undefined ? `→ ${d.assignee ?? '(none)'}` : null,
     upd,
     e.type === 'task.updated' ? null : d.title,
+    d.phase ? `snapshot ${d.phase}: ${(d.repos || []).map((r) => r.path).join(', ')}` : null,
     d.kind,
     d.ref,
     d.message,
@@ -1049,6 +1056,11 @@ const commands = {
     if (FLAGS.live && /^[a-z]+:\/\//.test(pos[1])) (FLAGS.live = false), (FLAGS.kind ||= 'url');
     const ref = FLAGS.live ? path.resolve(pos[1]) : pos[1];
     const data = { kind: FLAGS.live && !FLAGS.kind ? 'log' : kind, ref, ...(FLAGS.desc ? { description: FLAGS.desc } : {}), ...(FLAGS.live ? { live: true, since: new Date().toISOString() } : {}), ...(FLAGS.cwd ? { cwd: path.resolve(FLAGS.cwd) } : {}) };
+    // a file: its repo and HEAD now, so its change can be read from here (§15, artifacts)
+    if (data.kind === 'file' && !data.live) {
+      const git = fileOrigin(pos[1]);
+      if (git) data.git = git;
+    }
     // a live file already registered on the task (e.g. by the harness hook): nothing to add
     transact(root, planId, actor, (st) => (data.live && requireTask(st, pos[0]).artifacts.some((a) => a.live && a.ref === ref) ? [] : [{ type: 'task.artifact', task: requireTask(st, pos[0]).id, data }]));
     out({ ok: true }, dim('ok'));
@@ -1266,6 +1278,39 @@ const commands = {
     if (b.artifacts) b.files = fileStats(path.dirname(root), b.artifacts);
     if (which) b.live = liveLines(state.tasks[which], activeRuns(root, planId), '    ');
     out(b, renderBrief(b));
+  },
+
+  async diff(pos) {
+    // §15: the changed files of a task, a work package or the plan, and their combined diff
+    const { root, planId } = ctx();
+    const state = loadPlan(root, planId);
+    const id = pos[0] && pos[0] !== 'plan' ? requireTask(state, pos[0]).id : null;
+    const proj = path.dirname(root);
+    const mode = changeMode(readConfig(root));
+    const changes = await planChanges(proj, state, { mode });
+    let sets = levelSets(changes, id);
+    if (FLAGS.file) sets = onlyFile(sets, proj, FLAGS.file);
+    const what = id ? `${id} ${state.tasks[id].title}` : `plan ${state.title}`;
+    if (FLAGS.open) {
+      const cmd = viewerCommand(sets, FLAGS.tool || diffTool());
+      if (!cmd) die(`no changes for ${what}`);
+      if (FLAGS.json) return out({ ok: true, command: cmd, sets });
+      const r = spawnSync('sh', ['-c', cmd], { stdio: 'inherit', cwd: proj });
+      process.exit(r.status ?? 1);
+    }
+    if (FLAGS.patch) {
+      const p = await patchText(sets, { color: tty });
+      return out({ ok: true, patch: p }, p || `no changes for ${what}`);
+    }
+    const tot = totals(sets);
+    const L = [`${bold(what)}  ${dim(`${tot.files} file${tot.files === 1 ? '' : 's'}`)} ${green('+' + tot.added)} ${red('-' + tot.removed)}  ${dim(`(${mode})`)}`];
+    if (!sets.length) L.push(dim(mode === 'snapshots' ? '  no changes recorded (snapshots are taken when a task starts and when it is finished)' : '  no changes reported (file, commit and branch artifacts)'));
+    for (const s of sets) {
+      L.push(dim(`  ${s.rel === '.' ? path.basename(s.repo) : s.rel}: ${s.base.slice(0, 8)}..${s.target ? s.target.slice(0, 8) : 'working tree'}${s.branch ? ` (branch ${s.branch})` : ''}`));
+      for (const f of s.files) L.push(`    ${f.status} ${projectPath(s, f)} ${f.binary ? dim('binary') : `${green('+' + f.added)} ${red('-' + f.removed)}`}${(!id || state.tasks[id].children.length) && f.tasks?.length ? dim('  ' + f.tasks.join(',')) : ''}`);
+      if (s.overlap?.length) L.push(yellow(`    overlaps ${s.overlap.join(', ')} in time: ${s.narrowed ? 'narrowed to the files it reported' : 'may include their changes'}`));
+    }
+    out({ ok: true, mode, task: id, totals: tot, sets }, L.join('\n'));
   },
 
   whoami() {

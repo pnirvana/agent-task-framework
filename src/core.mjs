@@ -83,6 +83,7 @@ function newTask(id, ev) {
     last_message: null,
     notes: [],
     artifacts: [],
+    snapshots: {}, // §15: {start, end}: {seq, ts, repos: [{path, commit, head}]}
     history: [],
     created_at: ev.ts,
     created_by: ev.actor?.id ?? null,
@@ -241,6 +242,11 @@ export function fold(events) {
         t.session = ref;
         break;
       }
+      case 'task.snapshot':
+        // §15: the working tree of the project's repos when the task started (the first
+        // time) and when it last left in_progress
+        if ((d.phase === 'start' && !t.snapshots.start) || d.phase === 'end') t.snapshots[d.phase] = { seq: ev.seq, ts: ev.ts, repos: Array.isArray(d.repos) ? d.repos : [] };
+        break;
       case 'task.artifact':
         t.artifacts.push({
           ...entry,
@@ -249,7 +255,7 @@ export function fold(events) {
           description: d.description ?? null,
           // live artifacts (§14): watched while the task runs; runs recorded by a harness hook
           ...(d.live ? { live: true } : {}),
-          ...Object.fromEntries(['cmd', 'cwd', 'exit', 'duration_ms', 'since', 'extra'].filter((k) => d[k] != null).map((k) => [k, d[k]])),
+          ...Object.fromEntries(['cmd', 'cwd', 'exit', 'duration_ms', 'since', 'extra', 'git'].filter((k) => d[k] != null).map((k) => [k, d[k]])),
         });
         break;
     }
