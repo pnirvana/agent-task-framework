@@ -1749,6 +1749,18 @@ test('§15 changes: snapshots per task, work package and plan; overlaps; the rep
   assert.match(view, /M app\/a\.txt +\+2 -1/);
   assert.match(view, /T3 ● Write .*⚠ overlaps T4/);
   assert.match(frames.at(-1), /run: ATF_DIR=.* 'diff' 'T2' .*'--open' '--file' 'app\/a\.txt'/);
+  // a closed plan: the board starts wider than the plan, where it is hidden with a note;
+  // f shows it (its changes stay readable)
+  run(['plan', 'status', 'completed', '-m', 'finished']);
+  const closed = JSON.parse(
+    execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '400', '40', JSON.stringify(['4', 'f', 'x', 'x', 'x'])], {
+      cwd: dir,
+      env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
+    }).toString(),
+  );
+  assert.match(closed[1], /1 closed plan hidden: f shows them/);
+  assert.doesNotMatch(closed[1], /Test plan/);
+  assert.match(closed.at(-1), /Test plan .*6 files \+7 -1/);
 });
 
 test('§15 changes: "artifacts" takes only what agents report (files, commits)', () => {

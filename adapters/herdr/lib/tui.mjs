@@ -1676,7 +1676,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       overview: overviewKeys(ui.rows.overview[ui.sel.overview]),
       tasks: `↑↓ move  ←→ fold  v ${ui.byAgent ? 'tree' : 'by agent'}  ⏎ details  a approve  x changes  r message  N plan note  o open  d diff  L live  g agent  s/S coordinator  p plan  ${esc}`,
       plan: multi() ? `↑↓ select  ←→ fold  ⏎ open plan  o docs  r note  N plan note  s/S coordinator  g jump  c close  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}` : `↑↓ scroll  o docs  r / N note  s/S coordinator  ${esc}  ? help`,
-      changes: `↑↓ move  ←→ fold  z fold all  ⏎/d diff of the row (file, task, package, plan)  D plan diff  g agent  ${esc}  ? help`,
+      changes: `↑↓ move  ←→ fold  z fold all  ⏎/d diff of the row (file, task, package, plan)  D plan diff  g agent  ${multi() ? `f ${ui.showClosed ? 'hide' : 'show'} closed  ` : ''}${esc}  ? help`,
       log: `↑↓ scroll  / search  N plan note  ${multi() ? 'p plan  ' : ''}${ui.log.plan || ui.log.query ? 'esc clear filter  ' : esc + '  '}tab views  ? help`,
       detail: '↑↓ scroll  ⏎/esc back  a approve  x changes  r message  N plan note  o open  d diff  L live  g agent  s/S coordinator',
       help: '↑↓ scroll  any other key: back',
@@ -2112,6 +2112,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (!roots.length)
         rows.push({ ...base, type: 'note', k: p.key + '#chg-none', text: data.mode === 'snapshots' ? '   no changes yet: taken when a task starts and when its agent finishes it' : '   no changes reported (file, commit and branch artifacts of the tasks)' });
     }
+    // closed plans are hidden unless f: say so, they are where most finished work is
+    if (multi() && !ui.showClosed) {
+      const hidden = rootsInScope().reduce((n, r) => n + listPlanIds(r).filter((id) => !isOpenStatus(cachedPlan(r, id))).length, 0);
+      if (hidden) rows.push({ type: 'note', k: 'chg#closed-hidden', text: `   ${hidden} closed plan${hidden === 1 ? '' : 's'} hidden: f shows them` });
+    } else if (!rows.length) rows.push({ type: 'note', k: 'chg#empty', text: '   No plans in scope.' });
     const prev = ui.rows.changes[ui.sel.changes]?.k;
     ui.rows.changes = rows;
     const i = prev ? rows.findIndex((r) => r.k === prev) : -1;
@@ -2446,6 +2451,10 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
         current: ui.scope.level === 'plan' ? keyOf(ui.scope.root, ui.scope.plan) : null,
         onPick: (p) => ((ui.back = null), setScope({ level: 'plan', root: p.root, plan: p.id }, { tab })),
       });
+    } else if (k === 'f' && v !== 'detail') {
+      // closed plans: shown or hidden in every view that lists plans
+      ui.showClosed = !ui.showClosed;
+      flash(ui.showClosed ? 'showing closed plans too' : 'showing active plans only', 'blue');
     } else if (k === 'i' && ui.scope.level === 'all' && initDir && !findRoot(initDir)) {
       const r = initRoot(initDir);
       setScope({ level: 'project', root: r }, { tab: 'overview' });
@@ -2471,10 +2480,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
         const anyOpen = keys.some((key) => !ui.cardFolded.has(key));
         for (const key of keys) anyOpen ? ui.cardFolded.add(key) : ui.cardFolded.delete(key);
       } else if (k === 'c') return closePlan(r?.type === 'need' || r?.type === 'task' || r?.type === 'plan' ? r : null);
-      else if (k === 'f') {
-        ui.showClosed = !ui.showClosed;
-        flash(ui.showClosed ? 'showing closed plans too' : 'showing active plans only', 'blue');
-      } else if (v === 'tasks' && k === 'v') {
+      else if (v === 'tasks' && k === 'v') {
         ui.byAgent = !ui.byAgent;
         flash(ui.byAgent ? 'tasks grouped by agent (v: task tree)' : 'task tree (v: group by agent)', 'blue');
       } else if (v === 'tasks' && ui.byAgent && (k === '\x1b[D' || k === 'h')) {
