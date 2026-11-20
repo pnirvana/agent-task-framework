@@ -159,10 +159,9 @@ test('hooks: post_write hook runs detached with seq range env', async () => {
   const outFile = path.join(dir, 'hook.out');
   const script = path.join(dir, 'hook.mjs');
   fs.writeFileSync(script, `import fs from 'node:fs'; fs.appendFileSync(${JSON.stringify(outFile)}, [process.env.ATF_PLAN, process.env.ATF_HOOK_FROM_SEQ, process.env.ATF_HOOK_TO_SEQ, process.env.ATF_HOOK_TYPES].join(' ') + '\\n');`);
-  const cfgPath = path.join(dir, '.atf', 'config.json');
-  const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-  cfg.hooks = { post_write: [[process.execPath, script], ['/nonexistent/binary']] };
-  fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+  const cfgPath = path.join(dir, '.atf', 'config.toml');
+  assert.match(fs.readFileSync(cfgPath, 'utf8'), /^protocol = 1$/m, 'atf init writes TOML');
+  fs.appendFileSync(cfgPath, `\n[hooks]\npost_write = [\n  [${JSON.stringify(process.execPath)}, ${JSON.stringify(script)}],\n  ['/nonexistent/binary'], # a broken hook never fails a write\n]\n`);
   run(['add', 'one']); // seq 2
   run(['start', 'T1']); // seq 3 (assigned) + 4 (status)
   // hooks run detached: poll (up to 5 s) instead of a fixed sleep, so a busy machine can't flake this
@@ -1833,8 +1832,7 @@ test('§15 changes: "artifacts" takes only what agents report (files, commits)',
   fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
   git('add', '.');
   git('commit', '-qm', 'init');
-  const cfg = path.join(dir, '.atf', 'config.json');
-  fs.writeFileSync(cfg, JSON.stringify({ ...(fs.existsSync(cfg) ? JSON.parse(fs.readFileSync(cfg, 'utf8')) : {}), changes: 'artifacts' }));
+  fs.appendFileSync(path.join(dir, '.atf', 'config.toml'), 'changes = "artifacts"\n');
   run(['add', 'Work']);
   run(['start', 'T1']);
   fs.writeFileSync(path.join(dir, 'c.txt'), 'c\n');
@@ -1861,4 +1859,73 @@ test('§15 changes: "artifacts" takes only what agents report (files, commits)',
   git('commit', '-qm', 'everything');
   run(['done', 'T2', '-m', 'ok']);
   assert.deepEqual(run(['diff', 'T2']).sets[0].files.map((f) => [f.status, f.path]), [['A', 'sub/d.txt']]);
+});
+
+test('config: TOML files, old config.json still read, atf config [migrate]', async () => {
+  const { parseToml, stringifyToml } = await import('../src/toml.mjs');
+  const text = `# comment
+protocol = 1
+changes = "snapshots" # trailing comment
+hex = 0x1f
+big = 1_000
+lit = 'C:\\dir'
+multi = '''
+two
+lines'''
+nested = [[1, 2], ["a"]]
+inline = { a = 1, "b c" = true }
+dotted.key = "v"
+
+[agents.pi]
+start = ["--skill", "{skill}"]
+
+[[list]]
+n = 1
+[[list]]
+n = 2
+`;
+  const data = parseToml(text);
+  assert.deepEqual(data, {
+    protocol: 1, changes: 'snapshots', hex: 31, big: 1000, lit: 'C:\\dir', multi: 'two\nlines',
+    nested: [[1, 2], ['a']], inline: { a: 1, 'b c': true }, dotted: { key: 'v' },
+    agents: { pi: { start: ['--skill', '{skill}'] } }, list: [{ n: 1 }, { n: 2 }],
+  });
+  assert.deepEqual(parseToml(stringifyToml(data)), data, 'what ATF writes reads back the same');
+  assert.throws(() => parseToml('tool = diffview'), /line 1: expected a value \(strings need quotes: "diffview"\)/);
+  assert.throws(() => parseToml('a = 1\n[x]\nb = 2\n[x]'), /line 4: \[x\] is defined twice/);
+
+  // the files: project (.atf), user (XDG_CONFIG_HOME/atf), herdr plugin; JSON before TOML
+  const { dir, env, run } = sandbox();
+  const user = path.join(env.XDG_CONFIG_HOME, 'atf');
+  const plugin = env.HERDR_PLUGIN_CONFIG_DIR;
+  fs.mkdirSync(user, { recursive: true });
+  fs.mkdirSync(plugin, { recursive: true });
+  fs.writeFileSync(path.join(user, 'config.json'), JSON.stringify({ diff: { tool: 'difftool' } }));
+  fs.writeFileSync(path.join(plugin, 'config.toml'), 'vi_mode = yes\n'); // a mistake
+  let c = run(['config']);
+  const by = (w) => c.files.find((f) => f.what === w);
+  assert.equal(by('project').format, 'toml');
+  assert.deepEqual([by('user').format, by('user').keys], ['json', ['diff']]);
+  assert.match(by('herdr plugin').error, /line 1: expected a value/);
+  // the old user file is still used (here: the diff viewer)
+  const { diffTool } = await import('../src/changes.mjs');
+  const xdg = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = env.XDG_CONFIG_HOME;
+  delete process.env.ATF_DIFF_TOOL;
+  try {
+    assert.equal(diffTool(), 'difftool');
+  } finally {
+    if (xdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = xdg;
+  }
+  c = run(['config', 'migrate']);
+  assert.deepEqual(c.migrated.map((m) => m.what), ['user']);
+  assert.ok(!fs.existsSync(path.join(user, 'config.json')));
+  assert.equal(fs.readFileSync(path.join(user, 'config.toml'), 'utf8'), '# ATF: your own settings (diff viewer, notifications)\n\n[diff]\ntool = "difftool"\n');
+  assert.equal(by('herdr plugin').format, 'toml', 'a file with errors is left alone');
+  // an old project config.json (no config.toml) is still read
+  fs.rmSync(path.join(dir, '.atf', 'config.toml'));
+  fs.writeFileSync(path.join(dir, '.atf', 'config.json'), JSON.stringify({ protocol: 1, changes: 'artifacts' }));
+  const { readConfig } = await import('../src/store.mjs');
+  assert.equal(readConfig(path.join(dir, '.atf')).changes, 'artifacts');
 });

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { findRoot, registerRoot } from '../../../src/store.mjs';
+import { readConfigFile } from '../../../src/toml.mjs';
 
 export function herdrBin() {
   if (process.env.HERDR_BIN_PATH) return process.env.HERDR_BIN_PATH;
@@ -133,14 +134,10 @@ function indexAgents(res) {
   return idx;
 }
 
-/** Plugin user config: $HERDR_PLUGIN_CONFIG_DIR/config.json (all optional). */
+/** Plugin user config: $HERDR_PLUGIN_CONFIG_DIR/config.toml (or config.json; all optional). */
+export const pluginConfigDir = () => process.env.HERDR_PLUGIN_CONFIG_DIR || path.join(os.homedir(), '.config/herdr/plugins/config/atf.herdr');
 export function pluginConfig() {
-  const dir = process.env.HERDR_PLUGIN_CONFIG_DIR || path.join(os.homedir(), '.config/herdr/plugins/config/atf.herdr');
-  try {
-    return JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
-  } catch {
-    return {};
-  }
+  return readConfigFile(pluginConfigDir()).data;
 }
 
 /**

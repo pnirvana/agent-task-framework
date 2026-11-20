@@ -1,6 +1,7 @@
 // ATF file store: locate the .atf root, append events under a lock, read + fold.
 import fs from 'node:fs';
 import path from 'node:path';
+import { readConfigFile, writeConfigFile } from './toml.mjs';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
@@ -42,8 +43,7 @@ export function initRoot(dir = process.cwd()) {
   const root = path.join(path.resolve(dir), ROOT_NAME);
   fs.mkdirSync(path.join(root, 'plans'), { recursive: true });
   registerRoot(root);
-  const cfg = path.join(root, 'config.json');
-  if (!fs.existsSync(cfg)) fs.writeFileSync(cfg, JSON.stringify({ protocol: PROTOCOL_VERSION }, null, 2) + '\n');
+  if (!readConfigFile(root).file) writeConfig(root, { protocol: PROTOCOL_VERSION });
   return root;
 }
 
@@ -166,22 +166,18 @@ export function transact(root, planId, actor, fn) {
 }
 
 // ---------- hooks ----------
+/** The project's config: .atf/config.toml (or, before TOML, config.json). */
 export function readConfig(root) {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
-  } catch {
-    return {};
-  }
+  return readConfigFile(root).data;
 }
 
+export const PROJECT_CONFIG_HEADER = '# ATF project config (SPEC §4); atf init / atf-herdr enable-sync rewrite it\n\n';
 export function writeConfig(root, cfg) {
-  const p = path.join(root, 'config.json');
-  fs.writeFileSync(p + '.tmp', JSON.stringify(cfg, null, 2) + '\n');
-  fs.renameSync(p + '.tmp', p);
+  writeConfigFile(root, cfg, 'config', PROJECT_CONFIG_HEADER);
 }
 
 /**
- * Post-write hooks: config.json `hooks.post_write` is a list of argv arrays.
+ * Post-write hooks: config.toml `hooks.post_write` is a list of argv arrays.
  * Each runs detached and fire-and-forget after a transaction commits, so a slow
  * or broken hook can never block or fail an agent's `atf` call.
  * Env: ATF_DIR, ATF_PLAN, ATF_HOOK_FROM_SEQ, ATF_HOOK_TO_SEQ, ATF_HOOK_TYPES.

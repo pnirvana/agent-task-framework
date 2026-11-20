@@ -53,14 +53,14 @@ const HELP = `atf-herdr — run and watch ATF agents inside herdr
   atf-herdr enable-sync        install the ATF post-write hook for this project
   atf-herdr disable-sync       remove it
 
-Plugin config ($(herdr plugin config-dir atf.herdr)/config.json):
-  lifecycle: "ephemeral" (default) | "persistent"
-  agent_kind: "pi" (default) | "copilot" | "opencode" | "claude" | "codex"   (also --kind on spawn/coordinate)
-  agent_placement: "tab" (default: agents in their own tab) | "split" (beside the coordinator)
-  agents: { "<kind>": { "start": [...], "resume": [..."{session}"...], "nativeSkill": bool } }
+Plugin config ($(herdr plugin config-dir atf.herdr)/config.toml; atf config shows it):
+  lifecycle = "ephemeral" (default) | "persistent"
+  agent_kind = "pi" (default) | "copilot" | "opencode" | "claude" | "codex"   (also --kind on spawn/coordinate)
+  agent_placement = "tab" (default: agents in their own tab) | "split" (beside the coordinator)
+  [agents.<kind>]  start = [...], resume = [..."{session}"...], nativeSkill = true|false
 
-Notifications (~/.config/atf/config.json, per user):
-  "notify": { "herdr": true, "terminal": ["toast", "bell", "progress"], "command": "…", "settle_seconds": 5 }
+Notifications (~/.config/atf/config.toml, per user):
+  [notify]  herdr = true, terminal = ["toast", "bell", "progress"], command = "…", settle_seconds = 5
   terminal: written to the terminal the herdr client runs in (works over SSH): toast =
   OSC 777 (Windows Terminal 1.26+ with compatibility.allowOSC777), bell = BEL (taskbar
   flash), progress = OSC 9;4 (a yellow tab/taskbar mark while something waits for you).

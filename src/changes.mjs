@@ -1,7 +1,7 @@
 // Changesets (SPEC §15): which files a task, a work package or a plan changed, and the
 // combined diff of each, opened in the user's diff viewer.
 //
-// Two sources, chosen per project in .atf/config.json `"changes"`:
+// Two sources, chosen per project in .atf/config.toml `"changes"`:
 //   "snapshots" (default) — when a leaf task starts and when it leaves in_progress, ATF
 //     records the working tree of every git repository in the project as a commit
 //     (`git add -A` into a temporary index, `git write-tree`, `git commit-tree`), kept by a
@@ -20,6 +20,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { readConfigFile } from './toml.mjs';
 
 export const CHANGE_MODES = ['snapshots', 'artifacts'];
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
@@ -39,7 +40,7 @@ function gitAsync(cwd, args, env) {
   );
 }
 
-/** The project's change source: .atf/config.json "changes", $ATF_CHANGES overrides. */
+/** The project's change source: .atf/config.toml "changes", $ATF_CHANGES overrides. */
 export function changeMode(cfg = {}) {
   const m = process.env.ATF_CHANGES || cfg.changes;
   return CHANGE_MODES.includes(m) ? m : 'snapshots';
@@ -456,18 +457,15 @@ export const projectPath = (s, f) => (s.rel === '.' ? f.path : path.join(s.rel, 
 // ---------- viewers ----------
 
 /**
- * The user's diff viewer: $ATF_DIFF_TOOL, else ~/.config/atf/config.json `diff.tool`:
+ * The user's diff viewer: $ATF_DIFF_TOOL, else ~/.config/atf/config.toml `diff.tool`:
  * "git" (default: git diff in less), "diffview" (Neovim's diffview.nvim, one tab per
  * repo), "difftool" (git difftool --dir-diff), or a command template with {repo},
  * {base}, {target}, {range} and {files}, run once per repository.
  */
+/** The user's own settings: ~/.config/atf/config.toml (or, before TOML, config.json). */
+export const userConfigDir = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'atf');
 export function userConfig() {
-  const dir = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
-  try {
-    return JSON.parse(fs.readFileSync(path.join(dir, 'atf', 'config.json'), 'utf8'));
-  } catch {
-    return {};
-  }
+  return readConfigFile(userConfigDir()).data;
 }
 export const diffTool = () => process.env.ATF_DIFF_TOOL || userConfig().diff?.tool || 'git';
 

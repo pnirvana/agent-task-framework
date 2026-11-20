@@ -67,7 +67,7 @@ Then `herdr server reload-config`.
 
 1. In a project with `.atf/` (`atf init`), run the plugin action **atf: enable live sync
    for this project** once (or `atf-herdr enable-sync`). This adds a post-write hook to
-   `.atf/config.json`, so every `atf` write from any pane updates labels, sidebar, and
+   `.atf/config.toml`, so every `atf` write from any pane updates labels, sidebar, and
    notifications even while the board is closed.
 2. `prefix+t` toggles the board for the focused pane's project (found from its cwd,
    walking up to parents and the main git worktree). In a pane without a project it
@@ -236,10 +236,10 @@ GitLab: `sh examples/live-demo/setup.sh <dir>` ([examples/live-demo](../../examp
 
 ### Changes and diffs (SPEC §15)
 
-Where a task's changes come from is set per project in `.atf/config.json`:
+Where a task's changes come from is set per project in `.atf/config.toml`:
 
-```json
-{ "changes": "snapshots" }
+```toml
+changes = "snapshots"
 ```
 
 - `"snapshots"` (default): when a task starts, and when its agent finishes, blocks or
@@ -257,10 +257,11 @@ Where a task's changes come from is set per project in `.atf/config.json`:
   and branches against their merge base with the default branch. This needs no
   snapshots, but it misses files an agent did not report.
 
-The viewer is yours, in `~/.config/atf/config.json` (or `$ATF_DIFF_TOOL`):
+The viewer is yours, in `~/.config/atf/config.toml` (or `$ATF_DIFF_TOOL`):
 
-```json
-{ "diff": { "tool": "diffview" } }
+```toml
+[diff]
+tool = "diffview"
 ```
 
 | tool | opens |
@@ -282,10 +283,14 @@ waiting for input. Each item is notified once, when it appears, and again only i
 away and came back. Status changes the coordinator handles (a review for it, a question
 it answers) do not notify you while it runs.
 
-Channels, per user in `~/.config/atf/config.json`:
+Channels, per user in `~/.config/atf/config.toml`:
 
-```json
-{ "notify": { "herdr": true, "terminal": ["toast", "bell", "progress"], "command": null, "settle_seconds": 5 } }
+```toml
+[notify]
+herdr = true                                # herdr's own notification
+terminal = ["toast", "bell", "progress"]    # default: none
+# command = 'curl -d "$ATF_NOTIFY_BODY" ntfy.sh/<topic>'
+settle_seconds = 5
 ```
 
 | Channel | What you get |
@@ -307,11 +312,18 @@ now; `atf-herdr notify --test` sends a test notification through every channel.
 
 ### Plugin config (optional)
 
-`$(herdr plugin config-dir atf.herdr)/config.json`:
+`$(herdr plugin config-dir atf.herdr)/config.toml`:
 
-```json
-{ "agent_kind": "pi", "agent_placement": "tab", "board_placement": "auto", "board_start": "overview" }
+```toml
+agent_kind = "pi"
+agent_placement = "tab"
+board_placement = "auto"
+board_start = "overview"
 ```
+
+`atf config` lists the config files in use (project, yours, the plugin's) and reports
+syntax errors in them; `atf config migrate` converts `config.json` files from before TOML
+(they are still read while no `config.toml` exists).
 
 `agent_placement`: `tab` (default) opens subagents in the workspace's `agents` tab, `split`
 beside the coordinator (see "Pane layout for agents").
@@ -373,23 +385,21 @@ objects (`iw aw iW aW i" a" i' a' i( a( i[ a[ i{ a{ i< a<`, also `ib iB`), `dd c
   the last minute (probably finishing its turn), or another sweep held the lock, the next
   sweep runs after 3 s.
 
-Agents you start yourself are never closed. `"lifecycle": "persistent"` keeps launched
+Agents you start yourself are never closed. `lifecycle = "persistent"` keeps launched
 agents open after they finish. Set `ATF_HERDR_TRACE=<file>` to log which background runs a
 board triggers. Every action is logged to `~/.local/state/herdr/plugins/atf.herdr/lifecycle.log`.
 
-Agent kinds (override or add in the plugin config under `"agents"`). Arguments with
+Agent kinds (override or add in the plugin config under `[agents]`). Arguments with
 `{skill}` are dropped when the skill is installed (`atf skill install`), since the agent
 then discovers it itself:
 
-```json
-{
-  "agent_kind": "pi",
-  "agents": {
-    "pi":     { "start": ["--skill", "{skill}"], "resume": ["--session", "{session}", "--skill", "{skill}"], "nativeSkill": true },
-    "claude": { "start": [], "resume": ["--resume", "{session}"] },
-    "codex":  { "start": [], "resume": ["resume", "{session}"] }
-  }
-}
+```toml
+agent_kind = "pi"
+
+[agents]
+pi     = { start = ["--skill", "{skill}"], resume = ["--session", "{session}", "--skill", "{skill}"], nativeSkill = true }
+claude = { start = [], resume = ["--resume", "{session}"] }
+codex  = { start = [], resume = ["resume", "{session}"] }
 ```
 
 The session reference comes from herdr (`agent_session` of the agent's pane), so it works

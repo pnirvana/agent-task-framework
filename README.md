@@ -101,7 +101,7 @@ atf-herdr enable-sync          # pane labels, notifications, agent lifecycle
 
 Machine-local state starts empty on a new machine and fills itself: the project registry
 (`~/.config/atf/roots.json`), plugin state (`~/.local/state/herdr/plugins/atf.herdr/`)
-and optional plugin config (`$(herdr plugin config-dir atf.herdr)/config.json`; defaults:
+and optional plugin config (`$(herdr plugin config-dir atf.herdr)/config.toml`; defaults:
 pi agents, ephemeral lifecycle, full-height board). Plans live in each project's `.atf/`
 and move with the project only if you copy or commit that directory.
 

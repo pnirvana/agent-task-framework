@@ -2,7 +2,7 @@
 // (attention.mjs): a question or review for them, a plan question, a finished plan, a
 // plan without a coordinator, a coordinator waiting for them, an agent waiting for input.
 // Each item is notified once, when it appears; it notifies again only after it went away
-// and came back. Channels (per user, ~/.config/atf/config.json "notify"):
+// and came back. Channels (per user, ~/.config/atf/config.toml [notify]):
 //   herdr     herdr's own notification (its [ui.toast] delivery decides how it shows)
 //   terminal  sequences written to the terminal the herdr client runs in, which also
 //             works over SSH: "toast" (OSC 777, Windows Terminal 1.26+ with

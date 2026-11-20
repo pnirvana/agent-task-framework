@@ -23,7 +23,7 @@ extension, an MCP server, a Python harness) is a valid participant.
 
 ```
 <project>/.atf/
-  config.json                 {"protocol": 1}
+  config.toml                 protocol = 1   (config.json before TOML: read when no .toml)
   current                     id of the default plan (optional convenience)
   plans/<plan-id>/
     events.jsonl              SOURCE OF TRUTH — append-only
@@ -212,11 +212,14 @@ Readers need no lock. A torn trailing line (crashed writer) MUST be skipped.
 
 ## 8. Hooks
 
-`config.json` may declare post-write hooks, which are argv arrays run after every committed
+`config.toml` may declare post-write hooks, which are argv arrays run after every committed
 transaction:
 
-```json
-{ "protocol": 1, "hooks": { "post_write": [["/usr/bin/node", "/path/to/sync.mjs", "hook"]] } }
+```toml
+protocol = 1
+
+[hooks]
+post_write = [["/usr/bin/node", "/path/to/sync.mjs", "hook"]]
 ```
 
 Hooks are fire-and-forget: spawned detached after the lock is released, with output
@@ -881,7 +884,7 @@ work in the working tree, several agents in one repository, a project may hold s
 repositories. ATF therefore records *where each task started and ended*, and derives
 changesets per task, per work package and per plan from that.
 
-### 15.2 Sources (`.atf/config.json` `"changes"`)
+### 15.2 Sources (`.atf/config.toml` `changes`)
 
 - **`snapshots`** (default). The writer (store.transact) adds a `task.snapshot` event
   after a `task.status` by which a leaf task enters `in_progress` for the first time
@@ -917,7 +920,7 @@ removed, tasks}], tasks, overlap}`; `target` null is the working tree.
 
 `atf diff [task] [--file F] [--patch | --open [--tool T]] [--json]`: the changed files
 of a task (a parent: its subtree; none: the plan), the combined patch, or the viewer.
-The viewer is the user's (`~/.config/atf/config.json` `diff.tool`, `$ATF_DIFF_TOOL`):
+The viewer is the user's (`~/.config/atf/config.toml` `[diff] tool`, `$ATF_DIFF_TOOL`):
 `git`, `diffview`, `difftool` or a command template (`{repo} {base} {target} {range}
 {files}`), so every team member keeps their own tool. Frontends show the same
 changesets (the herdr board: the Changes tab, `d`) and open the viewer through `atf diff
