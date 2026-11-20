@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readConfigFile, writeConfigFile } from './toml.mjs';
+import { initConfigFile, PROJECT_TEMPLATE } from './config.mjs';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
@@ -43,7 +44,7 @@ export function initRoot(dir = process.cwd()) {
   const root = path.join(path.resolve(dir), ROOT_NAME);
   fs.mkdirSync(path.join(root, 'plans'), { recursive: true });
   registerRoot(root);
-  if (!readConfigFile(root).file) writeConfig(root, { protocol: PROTOCOL_VERSION });
+  if (!readConfigFile(root).file) initConfigFile({ dir: root, template: PROJECT_TEMPLATE });
   return root;
 }
 
@@ -171,9 +172,9 @@ export function readConfig(root) {
   return readConfigFile(root).data;
 }
 
-export const PROJECT_CONFIG_HEADER = '# ATF project config (SPEC §4); atf init / atf-herdr enable-sync rewrite it\n\n';
+/** Change the project's config; comments in it stay where they can (toml.mjs updateToml). */
 export function writeConfig(root, cfg) {
-  writeConfigFile(root, cfg, 'config', PROJECT_CONFIG_HEADER);
+  writeConfigFile(root, cfg, 'config', '# ATF project config (atf config shows the files in use)\n\n');
 }
 
 /**

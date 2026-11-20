@@ -1906,7 +1906,7 @@ n = 2
   const by = (w) => c.files.find((f) => f.what === w);
   assert.equal(by('project').format, 'toml');
   assert.deepEqual([by('user').format, by('user').keys], ['json', ['diff']]);
-  assert.match(by('herdr plugin').error, /line 1: expected a value/);
+  assert.match(by('plugin').error, /line 1: expected a value/);
   // the old user file is still used (here: the diff viewer)
   const { diffTool } = await import('../src/changes.mjs');
   const xdg = process.env.XDG_CONFIG_HOME;
@@ -1921,11 +1921,37 @@ n = 2
   c = run(['config', 'migrate']);
   assert.deepEqual(c.migrated.map((m) => m.what), ['user']);
   assert.ok(!fs.existsSync(path.join(user, 'config.json')));
-  assert.equal(fs.readFileSync(path.join(user, 'config.toml'), 'utf8'), '# ATF: your own settings (diff viewer, notifications)\n\n[diff]\ntool = "difftool"\n');
-  assert.equal(by('herdr plugin').format, 'toml', 'a file with errors is left alone');
+  assert.equal(fs.readFileSync(path.join(user, 'config.toml'), 'utf8'), '# ATF: your own settings (atf config shows the files in use).\n\n[diff]\ntool = "difftool"\n');
+  // init: a template with every option commented out; never over an existing file
+  assert.equal(run(['config', 'init']).created, false, 'the user file exists now');
+  fs.rmSync(path.join(user, 'config.toml'));
+  const made = run(['config', 'init']);
+  assert.equal(made.created, true);
+  const tpl = fs.readFileSync(made.file, 'utf8');
+  assert.match(tpl, /^# tool = "git"$/m);
+  assert.match(tpl, /^# terminal = \["toast", "bell", "progress"\]/m);
+  assert.deepEqual(parseToml(tpl), { diff: {}, notify: {} }, 'all defaults: nothing set');
+  fs.rmSync(path.join(plugin, 'config.toml'));
+  assert.deepEqual(parseToml(fs.readFileSync(run(['config', 'init', 'plugin']).file, 'utf8')), {});
+  // the project's: written by atf init, commented; ATF's own changes keep the comments
+  const projCfg = path.join(dir, '.atf', 'config.toml');
+  let ptext = fs.readFileSync(projCfg, 'utf8');
+  assert.match(ptext, /^protocol = 1$/m);
+  assert.match(ptext, /^# changes = "snapshots"$/m);
+  fs.writeFileSync(projCfg, ptext.replace('# changes = "snapshots"', 'changes = "artifacts" # mine'));
+  const { readConfig, writeConfig } = await import('../src/store.mjs');
+  const root = path.join(dir, '.atf');
+  writeConfig(root, { ...readConfig(root), hooks: { post_write: [['/bin/hook', 'x']] } }); // as enable-sync does
+  ptext = fs.readFileSync(projCfg, 'utf8');
+  assert.match(ptext, /^changes = "artifacts" # mine$/m, 'comments and layout stay');
+  assert.match(ptext, /^# Where a task's changed files come from/m);
+  assert.match(ptext, /\n\[hooks\]\npost_write = \[\["\/bin\/hook", "x"\]\]\n$/);
+  writeConfig(root, { ...readConfig(root), hooks: { post_write: [] } });
+  assert.deepEqual(readConfig(root), { protocol: 1, changes: 'artifacts', hooks: { post_write: [] } });
+  assert.equal((fs.readFileSync(projCfg, 'utf8').match(/^\[hooks\]/gm) || []).length, 1, 'the section is replaced, not added again');
+  assert.equal(by('plugin').format, 'toml', 'a file with errors is left alone');
   // an old project config.json (no config.toml) is still read
   fs.rmSync(path.join(dir, '.atf', 'config.toml'));
   fs.writeFileSync(path.join(dir, '.atf', 'config.json'), JSON.stringify({ protocol: 1, changes: 'artifacts' }));
-  const { readConfig } = await import('../src/store.mjs');
   assert.equal(readConfig(path.join(dir, '.atf')).changes, 'artifacts');
 });

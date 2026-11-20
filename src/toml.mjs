@@ -255,6 +255,62 @@ export function stringifyToml(obj) {
   return out.join('\n') + '\n';
 }
 
+// ---------- editing in place ----------
+
+const canon = (v) => JSON.stringify(v, (k, x) => (isTable(x) ? Object.fromEntries(Object.entries(x).filter(([, y]) => y != null).sort(([a], [b]) => a.localeCompare(b))) : x));
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * `text` changed so that it reads as `data`, keeping comments and layout: changed
+ * top-level values are replaced on their line, changed tables are rewritten as a section
+ * at the end. null when that cannot be done safely (then write the file anew).
+ */
+export function updateToml(text, data) {
+  let old;
+  try {
+    old = parseToml(text);
+  } catch {
+    return null;
+  }
+  let lines = text.replace(/\n$/, '').split('\n');
+  const isHeader = (l) => /^\s*\[/.test(l);
+  for (const k of new Set([...Object.keys(old), ...Object.keys(data)])) {
+    if (canon(old[k]) === canon(data[k])) continue;
+    if (isTable(old[k]) || isTable(data[k]) || isTableArray(old[k]) || isTableArray(data[k])) {
+      // drop [k], [k.*] and [[k]] sections, then write the table anew at the end
+      const own = new RegExp(`^\\s*\\[\\[?\\s*${escRe(bareKey(k))}\\s*(\\]|\\.)`);
+      const keep = [];
+      let skipping = false;
+      for (const l of lines) {
+        if (isHeader(l)) skipping = own.test(l);
+        if (!skipping) keep.push(l);
+      }
+      while (keep.length && keep.at(-1).trim() === '') keep.pop();
+      lines = keep;
+      if (data[k] != null) lines.push('', ...stringifyToml({ [k]: data[k] }).replace(/\n$/, '').split('\n'));
+    } else {
+      // a top-level key: its line before the first section
+      const first = lines.findIndex(isHeader);
+      const end = first < 0 ? lines.length : first;
+      const re = new RegExp(`^\\s*${escRe(bareKey(k))}\\s*=`);
+      const at = lines.slice(0, end).findIndex((l) => re.test(l));
+      const line = data[k] == null ? null : `${bareKey(k)} = ${inline(data[k])}`;
+      if (at >= 0) lines.splice(at, 1, ...(line == null ? [] : [line]));
+      else if (line != null) {
+        let pos = end;
+        while (pos > 0 && lines[pos - 1].trim() === '') pos--;
+        lines.splice(pos, 0, line);
+      }
+    }
+  }
+  const out = lines.join('\n') + '\n';
+  try {
+    return canon(parseToml(out)) === canon(data) ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------- config files ----------
 
 /**
@@ -280,11 +336,18 @@ export function readConfigFile(dir, name = 'config') {
   return { data: {}, file: null, format: null, error: null };
 }
 
-/** Write <dir>/<name>.toml (atomically) and remove an old <name>.json beside it. */
+/**
+ * Write <dir>/<name>.toml (atomically) and remove an old <name>.json beside it. An
+ * existing TOML file is edited in place (its comments stay) where that is safe.
+ */
 export function writeConfigFile(dir, data, name = 'config', header = '') {
   const file = path.join(dir, `${name}.toml`);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(file + '.tmp', header + stringifyToml(data));
+  let text = null;
+  try {
+    text = updateToml(fs.readFileSync(file, 'utf8'), data);
+  } catch {}
+  fs.writeFileSync(file + '.tmp', text ?? header + stringifyToml(data));
   fs.renameSync(file + '.tmp', file);
   fs.rmSync(path.join(dir, `${name}.json`), { force: true });
   return file;

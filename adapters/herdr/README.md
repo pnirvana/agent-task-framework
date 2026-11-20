@@ -322,8 +322,10 @@ board_start = "overview"
 ```
 
 `atf config` lists the config files in use (project, yours, the plugin's) and reports
-syntax errors in them; `atf config migrate` converts `config.json` files from before TOML
-(they are still read while no `config.toml` exists).
+syntax errors in them. `atf config init [user|plugin]` creates one with every option at its
+default, commented out (`atf init` does that for the project's). `atf config migrate`
+converts `config.json` files from before TOML (they are still read while no `config.toml`
+exists). When ATF changes a config itself (enable-sync's `[hooks]`), your comments stay.
 
 `agent_placement`: `tab` (default) opens subagents in the workspace's `agents` tab, `split`
 beside the coordinator (see "Pane layout for agents").

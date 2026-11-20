@@ -23,7 +23,7 @@ import {
 } from '../src/core.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { buildPrompt } from '../src/prompts.mjs';
-import { planChanges, levelSets, totals, onlyFile, projectPath, viewerCommand, patchText, changeMode, diffTool, fileOrigin, userConfigDir } from '../src/changes.mjs';
+import { planChanges, levelSets, totals, onlyFile, projectPath, viewerCommand, patchText, changeMode, diffTool, fileOrigin } from '../src/changes.mjs';
 import { activeRuns, taskLive, elapsed, readTail, earlierText, liveView, loadLiveKinds, liveKinds, liveKind, refreshLive, refreshError, enableAutoRefresh, summarizeText, classify, registerLiveKind, STYLES } from '../src/live.mjs';
 import {
   findRoot,
@@ -51,9 +51,9 @@ import {
   skillStatus,
   SKILL_SRC,
   readConfig,
-  PROJECT_CONFIG_HEADER,
 } from '../src/store.mjs';
 import { readConfigFile, writeConfigFile } from '../src/toml.mjs';
+import { configPlaces, initConfigFile } from '../src/config.mjs';
 
 const HELP = `atf — Agent Task Framework
 
@@ -161,9 +161,11 @@ Viewing
                                         (who asked, the recommendation) or the review (submission,
                                         acceptance, changed files)
   atf projects [add [dir]]              known projects (registered on init / plan creation)
-  atf config [migrate]                  the config files in use (project .atf/config.toml, your
+  atf config [migrate | init [user|plugin|project]]
+                                        the config files in use (project .atf/config.toml, your
                                         ~/.config/atf/config.toml, the herdr plugin's) and errors
-                                        in them; migrate converts old config.json files to TOML
+                                        in them; init writes one with every option commented out
+                                        (default: yours); migrate converts old config.json files
   atf skill [status|install|uninstall]  link the agent skill into ~/.agents/skills (and
                                         ~/.claude/skills) so agents discover it automatically
   atf wait [--timeout MS] [--since SEQ] (coordinator) block until something needs you: tasks to
@@ -759,15 +761,20 @@ function statusCmd(target, msgRequired) {
 // ---------- commands ----------
 const commands = {
   config(pos) {
-    // TOML config files (src/toml.mjs); config.json is still read where no .toml exists
+    // TOML config files (src/toml.mjs, src/config.mjs); config.json is still read where no .toml exists
     const sub = pos[0] || 'show';
-    if (!['show', 'migrate'].includes(sub)) die('usage: atf config [migrate]');
+    if (!['show', 'migrate', 'init'].includes(sub)) die('usage: atf config [migrate | init [user|plugin|project]]');
     const root = process.env.ATF_DIR || findRoot(process.cwd());
-    const places = [
-      ...(root ? [{ what: 'project', dir: root, header: PROJECT_CONFIG_HEADER }] : []),
-      { what: 'user', dir: userConfigDir(), header: '# ATF: your own settings (diff viewer, notifications)\n\n' },
-      { what: 'herdr plugin', dir: process.env.HERDR_PLUGIN_CONFIG_DIR || path.join(process.env.HOME || '', '.config/herdr/plugins/config/atf.herdr'), header: '# ATF herdr plugin settings\n\n' },
-    ];
+    const places = configPlaces(root);
+    if (sub === 'init') {
+      const what = pos[1] || 'user';
+      const place = places.find((p) => p.what === what);
+      if (!place) die(what === 'project' ? 'no ATF project here (atf init creates one, with its config)' : `atf config init [user|plugin|project], not ${what}`);
+      const old = readConfigFile(place.dir);
+      if (old.format === 'json') die(`${old.file} exists in the old format: atf config migrate converts it`);
+      const r = initConfigFile(place);
+      return out({ ok: true, what, ...r }, r.created ? `created ${r.file}: every option, commented out; uncomment what you want to change` : `${r.file} exists; left as it is`);
+    }
     const res = places.map((p) => ({ ...p, ...readConfigFile(p.dir) }));
     const migrated = [];
     if (sub === 'migrate')
@@ -779,8 +786,8 @@ const commands = {
         }
     const rows = res.map((r) => ({ what: r.what, file: r.file, format: r.format, error: r.error, keys: Object.keys(r.data) }));
     const line = (r) =>
-      `${r.what.padEnd(13)} ${r.file ? r.file : dim(`none (${path.join(r.dir, 'config.toml')})`)}` +
-      (r.error ? red(`\n              error: ${r.error}`) : r.file ? dim(`  ${Object.keys(r.data).join(', ') || 'empty'}`) : '') +
+      `${r.what.padEnd(8)} ${r.file ? r.file : dim(`none: atf config init ${r.what} (${path.join(r.dir, 'config.toml')})`)}` +
+      (r.error ? red(`\n         error: ${r.error}`) : r.file ? dim(`  ${Object.keys(r.data).join(', ') || 'empty'}`) : '') +
       (r.format === 'json' && !r.error ? yellow('  (old format: atf config migrate)') : '');
     out(
       { files: rows, ...(sub === 'migrate' ? { migrated } : {}) },

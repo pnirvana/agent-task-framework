@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findRoot, registerRoot } from '../../../src/store.mjs';
 import { readConfigFile } from '../../../src/toml.mjs';
+import { pluginConfigDir } from '../../../src/config.mjs';
 
 export function herdrBin() {
   if (process.env.HERDR_BIN_PATH) return process.env.HERDR_BIN_PATH;
@@ -135,7 +136,6 @@ function indexAgents(res) {
 }
 
 /** Plugin user config: $HERDR_PLUGIN_CONFIG_DIR/config.toml (or config.json; all optional). */
-export const pluginConfigDir = () => process.env.HERDR_PLUGIN_CONFIG_DIR || path.join(os.homedir(), '.config/herdr/plugins/config/atf.herdr');
 export function pluginConfig() {
   return readConfigFile(pluginConfigDir()).data;
 }

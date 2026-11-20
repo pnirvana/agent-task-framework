@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readConfigFile } from './toml.mjs';
+import { userConfigDir } from './config.mjs';
 
 export const CHANGE_MODES = ['snapshots', 'artifacts'];
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
@@ -463,7 +464,6 @@ export const projectPath = (s, f) => (s.rel === '.' ? f.path : path.join(s.rel, 
  * {base}, {target}, {range} and {files}, run once per repository.
  */
 /** The user's own settings: ~/.config/atf/config.toml (or, before TOML, config.json). */
-export const userConfigDir = () => path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'atf');
 export function userConfig() {
   return readConfigFile(userConfigDir()).data;
 }
