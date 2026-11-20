@@ -72,7 +72,7 @@ Setup / plans
   atf plan note "<text>" [--kind K] [--for human]   a plan-level note
   atf plan session <ref> [--kind K]     record the coordinator's session (launchers)
   atf whoami                            who ATF thinks you are: identity, role and why, plan
-  atf plan status <${PLAN_STATUSES.join('|')}> [-m msg]
+  atf plan status <${PLAN_STATUSES.join('|')}> [-m msg] [--relay "<the human's words>"]  (closing: the human's decision)
 
 Tasks (coordinator)
   atf add <title> [--desc D] [--accept A]... [--dep T1]... [--parent T1]
@@ -142,6 +142,7 @@ Relaying the human's decisions (coordinator; the human said it in your chat)
   atf done <task> --relay "<their words>"        their approval (also of a review for the human)
   atf changes <task> --relay "<their words>" -m "1. …"   their change request, your instructions
   atf plan note --relay "<their words>"           on the plan (answers a plan question)
+  atf plan status completed --relay "<their words>" -m "<summary>"   they agreed to close the plan
 
 Viewing
   atf status [--watch]                  board summary (--watch: live-updating)
@@ -886,7 +887,12 @@ const commands = {
     if (sub === 'status') {
       const { root, planId, actor } = ctx();
       if (!PLAN_STATUSES.includes(pos[0])) die(`plan status must be one of ${PLAN_STATUSES.join(', ')}`);
-      transact(root, planId, actor, () => [{ type: 'plan.status', data: { status: pos[0], ...(FLAGS.message ? { message: FLAGS.message } : {}) } }]);
+      // closing a plan is the human's decision: an agent (the coordinator) records theirs
+      const relay = relayed(actor);
+      const closing = !['active', 'paused'].includes(pos[0]);
+      if (closing && !relay && actor.id !== HUMAN && actor.role !== 'human' && !FLAGS.force)
+        die(`closing the plan is the human's decision: ask them (in your chat) whether to set it ${pos[0]}; when they agree, record it: atf plan status ${pos[0]} --relay "<their words>" -m "<summary>". They can also close it themselves (the board: c).`);
+      transact(root, planId, actor, () => [{ type: 'plan.status', data: { status: pos[0], ...(FLAGS.message || relay ? { message: FLAGS.message || relay.quote } : {}), ...(relay ? { relayed: relay } : {}) } }]);
       return out({ ok: true }, `plan ${planId}: ${pos[0]}`);
     }
     die(`unknown plan subcommand: ${sub}`);
@@ -1556,11 +1562,11 @@ const commands = {
         // then lists everything that needs the actor, old and new
         const fresh = attention.filter((a) => !seen.has(keyOf(a)));
         if (news.length || fresh.length) return finish(st, attention, news);
-        if (allDone && !seen.has('note:all tasks are finished')) return finish(st, attention, [], 'all tasks are finished');
+        if (allDone && !seen.has('note:all tasks are finished: ask the human whether to close the plan (closing is their decision)')) return finish(st, attention, [], 'all tasks are finished: ask the human whether to close the plan (closing is their decision)');
         return;
       }
       if (attention.length || news.length) return finish(st, attention, news);
-      if (allDone) return finish(st, [], [], 'all tasks are finished');
+      if (allDone) return finish(st, [], [], 'all tasks are finished: ask the human whether to close the plan (closing is their decision)');
     };
 
     evaluate(); // return at once if something already needs you

@@ -667,7 +667,7 @@ test('herdr notifications: once per item that needs the human; terminal toast, b
     r = tick();
     assert.deepEqual(r.items.map((i) => i.text), ['all tasks finished: close the plan']);
     assert.match(fs.readFileSync(tty, 'utf8'), /777;notify;ATF · Test plan;all tasks finished/);
-    run(['plan', 'status', 'completed', '-m', 'done']);
+    run(['plan', 'status', 'completed', '-m', 'done', '--relay', 'close it']);
     fs.writeFileSync(tty, '');
     assert.equal(tick().count, 0);
     assert.equal(fs.readFileSync(tty, 'utf8'), '\x1b]9;4;0;0\x1b\\', 'nothing waits any more: the mark is cleared');
@@ -832,7 +832,13 @@ test('e2e findings: review permissions, answered questions, fresh is one-shot, p
   run(['start', 'T2'], bob);
   run(['review', 'T2', '-m', 'ok'], bob);
   run(['done', 'T2', '-m', 'approved']);
-  run(['plan', 'status', 'completed']);
+  // closing the plan is the human's decision: the coordinator asks, then records their words
+  const w = run(['wait', '--timeout', '200']);
+  assert.match(w.note, /all tasks are finished: ask the human whether to close the plan/);
+  assert.match(runFail(['plan', 'status', 'completed']).error, /closing the plan is the human's decision: ask them/);
+  assert.equal(run(['status']).status, 'active');
+  run(['plan', 'status', 'completed', '--relay', 'yes, close it']);
+  assert.deepEqual([run(['status']).status, run(['status']).status_message], ['completed', 'yes, close it']);
   run(['changes', 'T2', '-m', '1. one more thing']);
   assert.equal(run(['status']).status, 'active');
   // dependency cycles are refused
@@ -1812,7 +1818,7 @@ test('§15 changes: snapshots per task, work package and plan; overlaps; the rep
   assert.match(frames.at(-1), /run: ATF_DIR=.* 'diff' 'T2' .*'--open' '--file' 'app\/a\.txt'/);
   // a closed plan: the board starts wider than the plan, where it is hidden with a note;
   // f shows it (its changes stay readable)
-  run(['plan', 'status', 'completed', '-m', 'finished']);
+  run(['plan', 'status', 'completed', '-m', 'finished', '--relay', 'close it']);
   const closed = JSON.parse(
     execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '400', '40', JSON.stringify(['4', 'f', 'x', 'x', 'x'])], {
       cwd: dir,

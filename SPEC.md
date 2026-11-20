@@ -82,7 +82,7 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 |------|------|
 | `plan.created` | `{title, goal?, description?, labels?, coordinator?, docs?, meta?}` (`coordinator` defaults to the creating actor; `docs`: the plan's documents, §12.7) |
 | `plan.updated` | any subset of the above (shallow replace) |
-| `plan.status`  | `{status: active\|paused\|completed\|failed\|cancelled, message?}` |
+| `plan.status`  | `{status: active\|paused\|completed\|failed\|cancelled, message?, relayed?}` (closing: the human's decision, §13.3) |
 | `plan.review`  | `{summary, items: [{task, action: approve\|change\|note, message, file?, line?}]}`: one submitted review batch |
 | `plan.note`    | `{kind: info\|question\|decision\|warning\|checkpoint, message, for?: human}`: plan-level note; `checkpoint` = the coordinator's handoff, `question` + `for: human` = a question for the human (§12) |
 | `plan.session` | `{ref, kind?, actor?}`: the coordinator's session, for resuming the plan (§12.6) |
@@ -592,7 +592,13 @@ atf note T5 --relay "yes, go with SQLite"            # an answer
 atf done T1 --relay "looks good, approve"            # an approval of a review for the human
 atf changes T1 --relay "rename the module, else fine" -m "1. rename cart.py to cart_api.py"
 atf plan note --relay "local demo, not production"   # on the plan
+atf plan status completed --relay "yes, close it" -m "<summary>"   # closing the plan
 ```
+
+Closing a plan (`completed`, `failed`, `cancelled`) is the human's decision: an agent
+(the coordinator) is refused without `--relay` and asks instead; `atf wait` reports a
+plan whose tasks are all finished as "ask the human whether to close the plan". The
+human closes it directly too (board `c`, or the CLI as `human`).
 
 - The event's actor stays the coordinator (it wrote it); `data.relayed = {from: "human",
   quote: "<the human's words, verbatim>", via: "chat"}`. `--relay` requires the verbatim

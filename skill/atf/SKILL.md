@@ -267,9 +267,13 @@ show it, or they ask you). Two rules make that work:
    session (after a restart, or a deliberate fresh start when your context grew large)
    starts from it: read the documents (`atf plan show` lists them), the checkpoint, `atf
    status`, then handle `atf wait`.
-9. **Close.** Before closing, fold the decisions made during execution (`atf plan show`
-   lists them) into `design.md` where they matter beyond this plan. Then
-   `atf plan status completed -m "<summary>"`.
+9. **Close: the human decides.** When all tasks are finished (`atf wait` says so), do not
+   close the plan yourself. Fold the decisions made during execution (`atf plan show`
+   lists them) into `design.md` where they matter beyond this plan, write a plan
+   checkpoint, then ask the human in your chat whether to close it (they also see the plan
+   as finished). If they agree, record it with their words: `atf plan status completed
+   --relay "<their words>" -m "<summary>"` (`atf` refuses to close a plan without them).
+   They may also close it themselves, or give more work: then add tasks and go on.
 
 **Agent context.** Every agent you spawn starts **fresh**: a focused prompt, the task, its
 checkpoint, feedback and history. That keeps subagent contexts small. Resuming the
