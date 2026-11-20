@@ -91,6 +91,18 @@ const relRepo = (projDir, repo) => path.relative(real(projDir), repo) || '.';
 const absRepo = (projDir, rel) => real(path.resolve(projDir, rel));
 
 /**
+ * Copy a git index for a snapshot, with its timestamps. Git trusts an entry whose stat data
+ * matches as unchanged unless it is not older than the index ("racy git"): a copy with a
+ * new mtime would hide a same-size edit made within the second of the last `git add`.
+ */
+function copyIndex(abs, tmp) {
+  if (!fs.existsSync(abs)) return;
+  fs.copyFileSync(abs, tmp);
+  const st = fs.statSync(abs);
+  fs.utimesSync(tmp, st.atime, st.mtime);
+}
+
+/**
  * Record the working tree of a repo as a commit (parent: HEAD), without touching the
  * index, HEAD or any branch. `ref` keeps it from git's garbage collection.
  */
@@ -101,7 +113,7 @@ async function snapshot(repo, { ref = null, message = 'atf snapshot' } = {}) {
   const tmp = path.join(os.tmpdir(), `atf-index-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
   try {
     const abs = path.resolve(repo, idx);
-    if (fs.existsSync(abs)) fs.copyFileSync(abs, tmp); // the stat cache: only changed files are hashed
+    copyIndex(abs, tmp); // the stat cache: only changed files are hashed
     const env = { ...process.env, ...GIT_ENV, GIT_INDEX_FILE: tmp };
     if ((await run(repo, ['add', '-A', '--', '.'], env)) === null) return null;
     const tree = (await run(repo, ['write-tree'], env))?.trim();
@@ -156,7 +168,7 @@ function snapshotSync(repo, { ref, message }) {
   const tmp = path.join(os.tmpdir(), `atf-index-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
   try {
     const abs = path.resolve(repo, idx);
-    if (fs.existsSync(abs)) fs.copyFileSync(abs, tmp);
+    copyIndex(abs, tmp);
     const env = { ...process.env, ...GIT_ENV, GIT_INDEX_FILE: tmp };
     if (gitSync(repo, ['add', '-A', '--', '.'], env) === null) return null;
     const tree = gitSync(repo, ['write-tree'], env)?.trim();
