@@ -117,7 +117,11 @@ export function notify(title, body, sound = 'request') {
 
 /** Map of herdr agents keyed by agent name, pane id, and `names:<name>` (all agents of that name). */
 export async function agentIndex() {
-  const res = await herdrAsync(['agent', 'list']);
+  return indexAgents(await herdrAsync(['agent', 'list']));
+}
+/** agentIndex, synchronously (hooks and sweeps). */
+export const agentIndexSync = () => indexAgents(herdr(['agent', 'list']));
+function indexAgents(res) {
   const idx = new Map();
   for (const a of res?.agents || []) {
     if (a.name) {

@@ -603,18 +603,80 @@ test('herdr sweep (v2): closes finished agents, never relaunches them, nudges th
     assert.doesNotMatch(log, /agent start/, 'fe has work (changes) but is never relaunched by the sweep');
     assert.match(log, /agent prompt w1:p1 \[ATF\][^\n]*T2 changes[^\n]*T3 stalled/, 'the coordinator is told: start an agent for T2; T3 stalled');
     assert.ok(r.actions.some((a) => /closed be/.test(a)));
-    // no coordinator running: one notification, not repeated
+    // no coordinator running: the sweep only logs it; the human is notified by notify.mjs
     fs.writeFileSync(calls, '');
     fs.writeFileSync(fake, script(agents(false)), { mode: 0o755 });
-    lifecycleSweep(root);
-    lifecycleSweep(root);
-    assert.equal((fs.readFileSync(calls, 'utf8').match(/notification show ATF: no coordinator/g) || []).length, 1);
+    assert.ok(lifecycleSweep(root).actions.some((a) => /no coordinator running/.test(a)));
+    assert.doesNotMatch(fs.readFileSync(calls, 'utf8'), /notification show/);
     const st = { title: 'P', id: 'p1', tasks: { T2: { title: 'ui' } } };
     assert.match(nudgeText(st, { id: 'lead' }, [{ task: 'T2', reason: 'changes' }], [{ id: 'T3', owner: 'st' }]), /T2 changes \(ui\); T3 stalled .*atf-herdr spawn/);
   } finally {
     process.env = saved;
   }
 });
+test('herdr notifications: once per item that needs the human; terminal toast, bell and progress mark', async () => {
+  const { dir, run } = sandbox(); // coordinator "lead"
+  const sub = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
+  run(['add', 'api', '--assign', 'be', '--reviewer', 'human']); // T1: the human reviews it
+  run(['add', 'db', '--assign', 'be']); // T2
+  run(['start', 'T1'], sub);
+  const root = path.join(dir, '.atf');
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-state-'));
+  const calls = path.join(state, 'calls.log');
+  const fake = path.join(state, 'herdr');
+  fs.writeFileSync(fake, `#!/bin/sh\necho "$@" >> '${calls}'\necho '{"result":{}}'\n`, { mode: 0o755 });
+  const tty = path.join(state, 'tty'); // stands in for the herdr client's terminal
+  fs.writeFileSync(tty, '');
+  const saved = { ...process.env };
+  Object.assign(process.env, { HERDR_BIN_PATH: fake, HERDR_PLUGIN_STATE_DIR: state, HERDR_ENV: '1', ATF_REGISTRY: path.join(dir, 'registry.json') });
+  delete process.env.HERDR_SOCKET_PATH;
+  try {
+    const { notifyTick, notifyConfig } = await import('../adapters/herdr/lib/notify.mjs');
+    // a live coordinator, busy: nothing needs the human yet
+    const lead = { name: 'lead', pane_id: 'w1:p1', agent_status: 'working', cwd: dir };
+    const idx = (...list) => new Map(list.flatMap((a) => [[`pane:${a.pane_id}`, a], [`name:${a.name}`, a], [`names:${a.name}`, [a]]]));
+    const cfg = notifyConfig({ terminal: ['toast', 'bell', 'progress'], settle_seconds: 0 });
+    const tick = (agents = idx(lead)) => notifyTick({ agents, roots: [root], ttys: [tty], cfg });
+    let r = tick();
+    assert.deepEqual([r.count, r.sent], [0, 0]);
+    assert.equal(fs.readFileSync(tty, 'utf8'), '', 'nothing waits: no mark either');
+    // T1 goes to the human's review: one notification, through herdr and the terminal
+    run(['review', 'T1', '-m', 'check the API'], sub);
+    r = tick();
+    assert.deepEqual([r.count, r.sent], [1, 1]);
+    assert.match(fs.readFileSync(calls, 'utf8'), /notification show ATF · Test plan --body T1 waits for your review \(api\) --sound request/);
+    assert.equal(fs.readFileSync(tty, 'utf8'), '\x1b]777;notify;ATF · Test plan;T1 waits for your review (api)\x1b\\\x07\x1b]9;4;4;100\x1b\\');
+    // ... and only once
+    fs.writeFileSync(calls, '');
+    fs.writeFileSync(tty, '');
+    assert.equal(tick().sent, 0);
+    assert.equal(fs.readFileSync(calls, 'utf8') + fs.readFileSync(tty, 'utf8'), '');
+    // a T2 review for the coordinator is not the human's, while the coordinator runs
+    run(['start', 'T2'], sub);
+    run(['review', 'T2', '-m', 'done'], sub);
+    assert.deepEqual([tick().count, fs.readFileSync(calls, 'utf8')], [1, '']);
+    // the coordinator stops: its items and "no coordinator" become the human's
+    r = tick(idx());
+    assert.equal(r.count, 3);
+    const said = fs.readFileSync(calls, 'utf8');
+    assert.match(said, /notification show ATF · 2 things need you · Test plan --body /);
+    assert.ok(said.includes('T2 in review (db)') && said.includes('no coordinator running'));
+    // the human approves T1, a coordinator is back and approves T2: the mark goes off
+    run(['done', 'T1', '-m', 'approved'], { ATF_ACTOR: 'human', ATF_ROLE: 'human' });
+    run(['done', 'T2', '-m', 'ok']);
+    fs.writeFileSync(tty, '');
+    r = tick();
+    assert.deepEqual(r.items.map((i) => i.text), ['all tasks finished: close the plan']);
+    assert.match(fs.readFileSync(tty, 'utf8'), /777;notify;ATF · Test plan;all tasks finished/);
+    run(['plan', 'status', 'completed', '-m', 'done']);
+    fs.writeFileSync(tty, '');
+    assert.equal(tick().count, 0);
+    assert.equal(fs.readFileSync(tty, 'utf8'), '\x1b]9;4;0;0\x1b\\', 'nothing waits any more: the mark is cleared');
+  } finally {
+    process.env = saved;
+  }
+});
+
 
 test('--review: the owner must submit for review; the coordinator approves', () => {
   const { run, runFail } = sandbox();

@@ -113,17 +113,3 @@ export function sync(root, extraWorkspace = process.env.HERDR_WORKSPACE_ID) {
   return desired;
 }
 
-/** Notifications for events in [from, to] that need a human. */
-export function notifyForEvents(root, planId, from, to) {
-  const evs = readEvents(root, planId).filter((e) => e.seq >= from && e.seq <= to);
-  const statusEvs = evs.filter((e) => e.type === 'task.status' && ['blocked', 'review', 'failed'].includes(e.data?.status));
-  if (!statusEvs.length && !evs.some((e) => e.type === 'task.status' && e.data?.status === 'done')) return;
-  const s = loadPlan(root, planId);
-  for (const e of statusEvs) {
-    const t = s.tasks[e.task];
-    notify(`ATF ${e.task} ${e.data.status}: ${t?.title ?? ''}`, `${e.actor?.id ?? '?'}: ${e.data.message ?? ''}`);
-  }
-  const leaves = s.order.filter((id) => !s.tasks[id].children.length);
-  if (leaves.length && leaves.every((id) => TERMINAL.has(s.tasks[id].status)) && evs.some((e) => e.type === 'task.status' && TERMINAL.has(e.data?.status)))
-    notify(`ATF plan finished: ${s.title}`, progressText(s), 'done');
-}

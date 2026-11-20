@@ -8,7 +8,7 @@ actionable inside herdr. Optional: ATF itself does not depend on any of this.
 | **Task board** | interactive TUI as a full-height side column (`prefix+t`, toggle) or popup (`prefix+alt+t`); one scope for all tabs (all projects › project › plan): Overview, Tasks (as a tree or grouped by agent), Plan, Log |
 | **Agent pane labels** | each subagent's pane title becomes `T3 · Token endpoint`, with tokens `$atf_task`, `$atf_status` (`◐ in progress 40%`), `$atf_plan` |
 | **Sidebar progress** | workspace tokens `$atf_plan`, `$atf_progress` (`3/5 ✓ 1 ◐ 1 ⊘`) for the Spaces sidebar |
-| **Notifications** | herdr notification when a task becomes blocked, needs review, or fails, and when a plan finishes |
+| **Notifications** | when you are needed (what the board shows as ⚑ needs you), once per item: in herdr, and optionally in the terminal herdr runs in (also over SSH: Windows Terminal toasts, taskbar flash, a tab mark) or through your own command |
 | **Stall detection** | board flags `stale?` when a task is in progress but its herdr agent has been idle > 90s (an agent that stopped without reporting) |
 | **Overview** | tab `0`, where the board starts: what needs you (agents waiting for input, your reviews, finished plans; under a heading per plan when the scope holds several), then per plan only the tasks being worked on with their latest progress; a context panel for the selected row; approve, request changes, reply, open the review artifact or jump to the agent's terminal with one key |
 | **Spawn** | `s` on a ready task or package (or `atf-herdr spawn T3`) places a pane in the workspace's `agents` tab (your tab with the coordinator and the board keeps its layout), starts the agent (pi by default; the atf skill is discovered once installed with `atf skill install`), assigns the task and sends the kickoff prompt |
@@ -273,6 +273,38 @@ The viewer is yours, in `~/.config/atf/config.json` (or `$ATF_DIFF_TOOL`):
 From a shell: `atf diff [T3] [--file F]` lists the changed files, `--patch` prints the
 combined diff and `--open` opens it in the viewer.
 
+### Notifications
+
+You are notified when you are needed, with exactly what the board shows as **⚑ needs
+you**: a question escalated to you, a review that is yours, a plan question, a finished
+plan to close, a plan without a coordinator, a coordinator waiting for you, an agent
+waiting for input. Each item is notified once, when it appears, and again only if it went
+away and came back. Status changes the coordinator handles (a review for it, a question
+it answers) do not notify you while it runs.
+
+Channels, per user in `~/.config/atf/config.json`:
+
+```json
+{ "notify": { "herdr": true, "terminal": ["toast", "bell", "progress"], "command": null, "settle_seconds": 5 } }
+```
+
+| Channel | What you get |
+|---|---|
+| `herdr` (on by default) | `herdr notification show`; how it shows is herdr's `[ui.toast] delivery` |
+| `terminal: "toast"` | OSC 777 to the terminal the herdr client runs in: a desktop notification in Windows Terminal 1.26+ (profile setting `compatibility.allowOSC777: true`; not while the window has focus), foot, WezTerm, Ghostty |
+| `terminal: "bell"` | BEL: Windows Terminal flashes the taskbar / marks the tab, with `"bellStyle": ["window", "taskbar"]` in its profile |
+| `terminal: "progress"` | OSC 9;4: a yellow mark on the tab and the taskbar icon while anything waits for you, cleared when nothing does (Windows Terminal, Ghostty). Not for iTerm2, which shows OSC 9 as a notification |
+| `command` | any shell command, with `$ATF_NOTIFY_TITLE`, `$ATF_NOTIFY_BODY`, `$ATF_NOTIFY_COUNT` (e.g. `curl -d "$ATF_NOTIFY_BODY" ntfy.sh/<topic>`) |
+
+The `terminal` channel writes to the terminal of the herdr client process (the one you
+attached from), so it reaches your own machine over SSH, which herdr's own `terminal`
+delivery does not do for Windows Terminal. `$ATF_NOTIFY_TERMINAL` (e.g. `toast,bell`) and
+`$ATF_NOTIFY_COMMAND` override the file. Live states (an agent waiting, no coordinator)
+must hold `settle_seconds` before they notify.
+
+`atf-herdr notify` shows the channels, the client terminals found and what waits for you
+now; `atf-herdr notify --test` sends a test notification through every channel.
+
 ### Plugin config (optional)
 
 `$(herdr plugin config-dir atf.herdr)/config.json`:
@@ -336,8 +368,8 @@ objects (`iw aw iW aW i" a" i' a' i( a( i[ a[ i{ a{ i< a<`, also `ib iB`), `dd c
   every 20 s from an open board; always in a separate `atf-herdr` process): close
   finished subagents; nudge an idle coordinator once per situation with what needs it
   (not one the wake extension waits for),
-  including **stalled** subagents (idle > 90 s with a task in progress); notify once when
-  an active plan has no coordinator running. When the coordinator is busy but wrote within
+  including **stalled** subagents (idle > 90 s with a task in progress); check what needs
+  the human (notifications, below). When the coordinator is busy but wrote within
   the last minute (probably finishing its turn), or another sweep held the lock, the next
   sweep runs after 3 s.
 
@@ -418,10 +450,11 @@ another workspace.
   open task per pane (blocked > review > in progress), and sends
   `pane report-metadata` / `workspace report-metadata` with `--source atf`. Panes whose
   actors have nothing open get their atf title and tokens cleared.
-- **Notifications** come from the hook when sync is enabled, otherwise from the open
-  board, so you never get both.
+- **Notifications** are checked by the hook, the sweeps and an open board (every 5 s);
+  `lib/notify.mjs` keeps one record of what was notified, so each item is notified once
+  whoever looks first.
 - Files: `herdr-plugin.toml` (manifest), `run.sh` (PATH fix), `atf-herdr.mjs`
-  (CLI + action dispatch), `lib/tui.mjs` (board), `lib/sync.mjs`, `lib/herdr.mjs`.
+  (CLI + action dispatch), `lib/tui.mjs` (board), `lib/attention.mjs` (what needs the human), `lib/notify.mjs` (notifications), `lib/sync.mjs`, `lib/herdr.mjs`.
 
 ## Limitations
 

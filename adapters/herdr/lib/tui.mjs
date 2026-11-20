@@ -11,6 +11,8 @@ import { textField, keyField, fieldText, fieldRows, fieldMode } from './textfiel
 import { activeRuns, taskLive, liveBadge, elapsed, readTail, earlierText, liveView, hasView, liveOpen, loadLiveKinds, enableAutoRefresh } from '../../../src/live.mjs';
 import { fileURLToPath } from 'node:url';
 import { planChanges, levelSets, totals, projectPath, changeMode, diffTool } from '../../../src/changes.mjs';
+import { notifyTick } from './notify.mjs';
+import { liveAgent as liveAgentOf, agentFor as agentForOf, coordinatorOf as coordinatorOfPlan, inboxOf as inboxOfPlan, attentionOf as attentionOfPlan, elsewhere } from './attention.mjs';
 const ATF_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../bin/atf.mjs');
 
 const ESC = '\x1b[';
@@ -26,7 +28,6 @@ const STATUS = {
   cancelled: ['–', 'gray'],
 };
 const AGENT_GLYPH = { working: ['⚙', 'blue'], idle: ['◌', 'yellow'], done: ['✓', 'green'], blocked: ['!', 'red'], unknown: ['?', 'gray'] };
-const STALE_MS = 90_000; // task in_progress but its herdr agent idle for this long => flag
 
 // Display width of a character: wide ones (emoji such as ⧖, CJK) take two columns,
 // combining marks and variation selectors none. A line wider than the pane wraps, scrolls
@@ -256,41 +257,16 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     draw();
   }
 
-  /** Live herdr agent of an actor in plan `st` (only for actors of this herdr server). */
-  function liveAgent(st, actorId) {
-    if (!actorId) return null;
-    const actor = st.actors[actorId];
-    if (actor && !sameServer(actor)) return null;
-    // names repeat across projects (every project may have a "coordinator"): an agent
-    // working in another project's directory is not this plan's
-    const here = (x) => !!x && inProject(x, st.root);
-    const byPane = actor?.ctx?.herdr_pane && ui.agents.get(`pane:${actor.ctx.herdr_pane}`);
-    const a = [byPane, ...(ui.agents.get(`names:${actorId}`) || [])].find(here);
-    if (!a) return null;
-    return { ...a, since: ui.agentsSince.get(`pane:${a.pane_id}`)?.since ?? Date.now() };
-  }
-  function agentFor(st, t) {
-    const a = liveAgent(st, t?.owner);
-    if (!a) return null;
-    const stale = t.status === 'in_progress' && ['idle', 'done'].includes(a.agent_status) && Date.now() - a.since > STALE_MS;
-    return { ...a, stale };
-  }
-  const elsewhere = (st, who) => !!st.actors[who] && !sameServer(st.actors[who]);
+  // liveness and "needs you" (attention.mjs, shared with the notifications)
+  const LV = { agents: null, sinceOf: (pane) => ui.agentsSince.get(`pane:${pane}`)?.since };
+  const lv = () => ((LV.agents = ui.agents), LV);
+  const liveAgent = (st, actorId) => liveAgentOf(lv(), st, actorId);
+  const agentFor = (st, t) => agentForOf(lv(), st, t);
 
   const effStatus = (t) => t.rollup_status ?? t.status;
 
   // ---------- inbox ----------
-  /** driverInbox plus stalled agents (needs live herdr state). */
-  function inboxOf(p) {
-    const items = driverInbox(p.st).map((it) => ({ ...it, root: p.root, plan: p.id, st: p.st }));
-    for (const tid of p.st.order) {
-      const t = p.st.tasks[tid];
-      if (t.status !== 'in_progress' || t.children.length || !t.owner) continue;
-      const a = agentFor(p.st, t);
-      if (a?.stale) items.push({ kind: 'stale', task: tid, ts: new Date(a.since).toISOString(), actor: t.owner, message: `${t.owner} idle, task still in progress`, root: p.root, plan: p.id, st: p.st });
-    }
-    return items;
-  }
+  const inboxOf = (p) => inboxOfPlan(lv(), p);
 
   // ---------- rendering helpers ----------
   function bar(frac, w) {
@@ -1018,12 +994,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     finished: ['● finished', 'green'],
   };
   const NEED_RANK = Object.fromEntries(Object.keys(NEED).map((k, i) => [k, i]));
-  const WAITING_MS = 8000; // coordinator idle this long while its plan is active => waits for you
-
-  function coordinatorOf(st) {
-    const id = st.coordinator || Object.values(st.actors).find((a) => a.role === 'coordinator')?.id || null;
-    return { id, live: id ? liveAgent(st, id) : null, away: !!id && elsewhere(st, id) };
-  }
+  const coordinatorOf = (st) => coordinatorOfPlan(lv(), st);
 
   /** Tasks being worked on now: in progress, reworked after review, or answered; newest first. */
   function currentWork(st) {
@@ -1038,33 +1009,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
    * coordinator handles (`queued`). Without herdr there is no liveness: all of it is mine.
    */
   function attentionOf(p) {
-    const st = p.st;
-    const mine = [];
-    const queued = [];
-    const at = (x) => ({ ...x, root: p.root, plan: p.id, st, key: p.key });
-    const coord = coordinatorOf(st);
-    for (const a of Object.values(st.actors)) {
-      const la = liveAgent(st, a.id);
-      if (la?.agent_status !== 'blocked') continue;
-      const t = st.order.map((id) => st.tasks[id]).find((x) => x.owner === a.id && x.status === 'in_progress' && !x.children.length);
-      mine.push(at({ kind: 'prompt', actor: a.id, pane: la.pane_id, task: t?.id ?? null, ts: new Date(la.since).toISOString() }));
-    }
-    const handles = (!!coord.live && coord.live.agent_status !== 'blocked') || coord.away;
-    // nobody decides or starts anything for this plan: the human must start a coordinator
-    const openWork = st.order.some((id) => !st.tasks[id].children.length && !TERMINAL.has(st.tasks[id].status));
-    if (inHerdr() && st.status === 'active' && openWork && !coord.live && !coord.away)
-      mine.push(at({ kind: 'no-coordinator', actor: null, task: null, ts: st.updated_at }));
-    const finished = st.order.some((id) => !st.tasks[id].children.length) && st.order.every((id) => st.tasks[id].children.length || TERMINAL.has(st.tasks[id].status));
-    // an idle coordinator waits for the human, unless its harness wakes it (a live `atf wait
-    // --new` waiter: the pi extension, Copilot): then idling is how it waits for the plan
-    if (st.status === 'active' && !finished && coord.live && ['idle', 'done'].includes(coord.live.agent_status) && Date.now() - coord.live.since > WAITING_MS && !hasLiveWaiter(p.root, p.id, coord.id))
-      mine.push(at({ kind: 'coordinator', actor: coord.id, pane: coord.live.pane_id, task: null, ts: new Date(coord.live.since).toISOString() }));
-    for (const it of inboxOf(p)) {
-      // items for the human, and the coordinator's own when no coordinator handles them
-      const human = it.for === HUMAN || !handles;
-      (human ? mine : queued).push(at(it));
-    }
-    return { mine, queued, coord };
+    return attentionOfPlan(lv(), p);
   }
 
   // narrow boards (the side column) drop the project name from row labels
@@ -2551,4 +2496,9 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   // agents go idle after their last write (no hook fires then): sweep projects in scope
   // (in the background, see background()); hooks cover writes, this covers idle agents
   setInterval(() => new Set(scopePlans().map((p) => p.root)).forEach((r) => background('sweep', r)), 20_000);
+  // notifications (notify.mjs): what newly needs the human, with the agents this board
+  // already knows; a waiting coordinator or agent shows up here first (no event for it)
+  setInterval(() => {
+    if (inHerdr() && ui.agents) notifyTick({ agents: ui.agents, extraRoots: [...new Set(scopePlans().map((p) => p.root))] });
+  }, 5000);
 }

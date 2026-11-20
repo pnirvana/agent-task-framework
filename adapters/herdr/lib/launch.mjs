@@ -470,10 +470,10 @@ function sweepLocked(root) {
     const agent = coord && liveAgentOf(s, coord, live, livePane);
     const nkey = `${root}#${s.id}#${coordId}`;
     if (!agent) {
-      // nobody decides for this plan: tell the human once (the board offers to start one)
+      // nobody decides for this plan: the human is notified (notify.mjs: "no-coordinator");
+      // the board offers to start one. Logged once here.
       const open = s.order.some((tid) => !s.tasks[tid].children.length && !TERMINAL.has(s.tasks[tid].status));
       if (open && nudges[`${nkey}#absent`] !== true) {
-        notify(`ATF: no coordinator for "${s.title}"`, 'start one from the board (s) or with atf-herdr coordinate', 'request');
         nudges[`${nkey}#absent`] = true;
         actions.push(`no coordinator running for ${s.id}`);
       }

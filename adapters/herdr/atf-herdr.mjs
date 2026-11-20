@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 // atf-herdr — herdr adapter + plugin entrypoints for ATF.
 // The ATF core knows nothing about herdr; everything herdr-specific lives here.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchPlan } from '../../src/core.mjs';
 import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig, skillInstalled, readEvents } from '../../src/store.mjs';
 import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isBoardPane, isLiveBoard, focusPaneSync } from './lib/herdr.mjs';
-import { sync, notifyForEvents } from './lib/sync.mjs';
+import { sync } from './lib/sync.mjs';
+import { notifyTick, notifyConfig, clientTtys, SEQ } from './lib/notify.mjs';
 import { chooseBoardSplit, tabLayout, planRebuild, withPlacementLock } from './lib/layout.mjs';
 import { discoverAgents, resolveAgentDef, piArgsForAgent } from './lib/agents.mjs';
 import { agentKinds, agentPlacement, launchAgent, launchCoordinator, lifecycle, lifecycleSweep, stateDir, recordSessionsForEvents } from './lib/launch.mjs';
@@ -46,6 +47,9 @@ const HELP = `atf-herdr — run and watch ATF agents inside herdr
   atf-herdr tui                run the board in the current terminal (also outside herdr,
                                e.g. beside atf-copilot; without agent state, g, s/S)
   atf-herdr sync               push labels/progress to herdr and run a sweep now
+  atf-herdr notify [--test]    notifications when you are needed: the channels, the
+                               terminals herdr clients run in, what waits for you now;
+                               --test sends a test notification through every channel
   atf-herdr enable-sync        install the ATF post-write hook for this project
   atf-herdr disable-sync       remove it
 
@@ -55,6 +59,13 @@ Plugin config ($(herdr plugin config-dir atf.herdr)/config.json):
   agent_placement: "tab" (default: agents in their own tab) | "split" (beside the coordinator)
   agents: { "<kind>": { "start": [...], "resume": [..."{session}"...], "nativeSkill": bool } }
 
+Notifications (~/.config/atf/config.json, per user):
+  "notify": { "herdr": true, "terminal": ["toast", "bell", "progress"], "command": "…", "settle_seconds": 5 }
+  terminal: written to the terminal the herdr client runs in (works over SSH): toast =
+  OSC 777 (Windows Terminal 1.26+ with compatibility.allowOSC777), bell = BEL (taskbar
+  flash), progress = OSC 9;4 (a yellow tab/taskbar mark while something waits for you).
+  command: run with $ATF_NOTIFY_TITLE, $ATF_NOTIFY_BODY, $ATF_NOTIFY_COUNT.
+
 Plugin actions (atf.herdr.*): board (this project; overview if none here),
 board-popup (overview of all projects), sync, enable-sync.`;
 
@@ -63,7 +74,7 @@ const argv = process.argv.slice(2);
 const sep = argv.indexOf('--');
 const agentArgs = sep >= 0 ? argv.slice(sep + 1) : [];
 const main = sep >= 0 ? argv.slice(0, sep) : argv;
-const BOOL = new Set(['help', 'dry-run', 'fresh', 'resume', 'early']);
+const BOOL = new Set(['help', 'dry-run', 'fresh', 'resume', 'early', 'test']);
 
 const flags = {};
 const pos = [];
@@ -471,10 +482,41 @@ async function sweepCmd() {
   }
   const { actions, pending, soon } = lifecycleSweep(root);
   if (actions.length) sync(root);
+  const n = notifyTick({ extraRoots: [root] });
   // keep watching while ATF agents are alive or launching; closely while one is about to need us
-  if (soon) scheduleSweep(root, SOON_S);
-  else if (pending) scheduleSweep(root, 15);
+  // (or something that needs the human is about to be notified)
+  if (soon || n.pending) scheduleSweep(root, soon ? SOON_S : Math.max(1, Math.ceil(notifyConfig().settleMs / 1000)));
+  else if (pending || n.watch) scheduleSweep(root, 15);
   if (!flags.marker) process.stdout.write((actions.length ? actions.join('\n') : 'nothing to do') + '\n');
+}
+
+/** atf-herdr notify [--test]: the notification setup, and what waits for the human now. */
+function notifyCmd() {
+  const cfg = notifyConfig();
+  const ttys = clientTtys();
+  const root = resolveRoot({ optional: true });
+  if (flags.test) {
+    const title = 'ATF · test';
+    const body = 'notifications reach you here';
+    if (cfg.herdr) notify(title, body, 'request');
+    for (const t of ttys) {
+      try {
+        fs.writeFileSync(t, (cfg.terminal.includes('toast') ? SEQ.toast(title, body) : '') + (cfg.terminal.includes('bell') ? SEQ.bell() : '') + (cfg.terminal.includes('progress') ? SEQ.progress(true) : ''));
+      } catch {}
+    }
+    if (cfg.terminal.includes('progress')) setTimeout(() => ttys.forEach((t) => fs.writeFileSync(t, SEQ.progress(false))), 5000);
+    if (cfg.command) spawnSync('sh', ['-c', cfg.command], { stdio: 'inherit', env: { ...process.env, ATF_NOTIFY_TITLE: title, ATF_NOTIFY_BODY: body, ATF_NOTIFY_COUNT: '0' } });
+  }
+  const n = notifyTick({ extraRoots: root ? [root] : [] });
+  const L = [
+    `herdr:     ${cfg.herdr ? 'on (how it shows: [ui.toast] delivery in herdr\'s config.toml)' : 'off'}`,
+    `terminal:  ${cfg.terminal.length ? cfg.terminal.join(', ') : 'off'}${cfg.terminal.length ? `  → ${ttys.length ? ttys.join(', ') : 'no herdr client terminal found'}` : ''}`,
+    `command:   ${cfg.command || 'none'}`,
+    '',
+    n.busy ? 'another check is running; try again' : n.items.length ? `waiting for you (${n.items.length}):\n${n.items.map((i) => `  ${i.project} · ${i.text}`).join('\n')}` : 'nothing waits for you',
+  ];
+  if (flags.test) L.unshift(`test sent${cfg.terminal.includes('progress') ? ' (the progress mark clears in 5 s)' : ''}`, '');
+  process.stdout.write(L.join('\n') + '\n');
 }
 
 /** Invoked by the ATF post-write hook after every committed transaction. */
@@ -486,13 +528,14 @@ function hook() {
   sync(root);
   const { actions, soon } = lifecycleSweep(root);
   if (actions.length) sync(root);
-  scheduleSweep(root, soon ? SOON_S : 20);
   if ((process.env.ATF_HOOK_TYPES || '').split(',').includes('task.status')) {
     const from = Number(process.env.ATF_HOOK_FROM_SEQ);
     const to = Number(process.env.ATF_HOOK_TO_SEQ);
     recordSessionsForEvents(root, plan, readEvents(root, plan).filter((e) => e.seq >= from && e.seq <= to));
-    notifyForEvents(root, plan, from, to);
   }
+  // what now needs the human: notified once (SPEC §12.5, lib/notify.mjs)
+  const n = notifyTick({ extraRoots: [root] });
+  scheduleSweep(root, soon ? SOON_S : n.pending ? Math.max(1, Math.ceil(notifyConfig().settleMs / 1000)) : 20);
 }
 
 // ---------- dispatch ----------
@@ -554,6 +597,9 @@ switch (pos[0]) {
     break;
   case 'hook':
     hook();
+    break;
+  case 'notify':
+    notifyCmd();
     break;
   default:
     process.stdout.write(HELP + '\n');
