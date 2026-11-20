@@ -189,7 +189,7 @@ Rows always know their project and plan, so `g`, `a`, `x`, `r`, `o`, `s` and ⏎
 | `a` / `x` / `r` (`n`) | approve / change request / answer or message, at once; `x`, `r` go to the coordinator |
 | `o` | open the task's artifact (PR, branch diff, commit, file, URL) or the plan's documents |
 | `d` | the combined diff of the selected file, task, work package or plan in your diff viewer (`D` in Changes: the whole plan) |
-| `L` | open what the task's agent runs or watches: a running output followed in a new tab, a finished run in `less`, a pipeline in the browser |
+| `L` | the live view of what the task's agent runs or watches, in the board (below) |
 | `s` / `S` | start the plan's coordinator: resume its session / a fresh session (press twice; replaces a running one after its checkpoint) |
 | `p` | plan picker: a popup listing every plan by project with its goal and state; typing filters it; ⏎ goes to the plan (in the Log: filters the log to it) |
 | `/` | Log: search |
@@ -220,8 +220,20 @@ never wraps or changes a command; it records what the commands are about:
 - **Background files** (`… > build.log &`, `| tee x.log`) and log files the agent keeps
   reading are registered as live logs.
 
-`L` opens the selected task's: a pipeline in the browser (when its URL appeared in the
-output), a running output followed (`tail -F`) in a new tab, a finished one in `less`.
+`L` opens the selected task's **live view** in the board, updated while the command runs:
+the kind's full view (Maven: every module, failure and test class), in sections.
+
+| key | in the live view |
+|---|---|
+| `↑↓` `^d`/`^u` `gg` | move |
+| `G` | to the end, and follow new output |
+| `←→` / `hl`, `z` | fold / unfold the section (modules, failures, test classes); `z` all |
+| `⏎` | on a failed test: its message and stack trace from the surefire/failsafe report (the project's own frames stand out), else what the build printed for it |
+| `t` | raw output ⇄ the view (kinds without a view open on the output) |
+| `[` / `]` | the task's other runs and live files |
+| `/` | search, `n`/`N` |
+| `o` | open it outside the board: a pipeline in the browser, `atf live --watch` or the output in a new herdr tab |
+| `esc` | back |
 Agents can add what the hook cannot see with `atf artifact T3 <file> --live`. claude and
 codex have no hook yet: only registered files show.
 

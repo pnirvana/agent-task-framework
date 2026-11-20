@@ -24,7 +24,7 @@ import {
 import { execFileSync, spawnSync } from 'node:child_process';
 import { buildPrompt } from '../src/prompts.mjs';
 import { planChanges, levelSets, totals, onlyFile, projectPath, viewerCommand, patchText, changeMode, diffTool, fileOrigin } from '../src/changes.mjs';
-import { activeRuns, taskLive, elapsed, readTail, earlierText, liveView, loadLiveKinds, liveKinds, liveKind, refreshLive, refreshError, enableAutoRefresh, summarizeText, classify, registerLiveKind, STYLES } from '../src/live.mjs';
+import { activeRuns, taskLive, elapsed, readTail, earlierText, liveView, liveItem, loadLiveKinds, liveKinds, liveKind, refreshLive, refreshError, enableAutoRefresh, summarizeText, classify, registerLiveKind, STYLES } from '../src/live.mjs';
 import {
   findRoot,
   initRoot,
@@ -1225,9 +1225,13 @@ const commands = {
     const seg = (l) => l.map(([t, st]) => (st && STY[st] ? STY[st](t) : t)).join('');
     L.push(`${bold('summary')}  ${sum.state.padEnd(8)} ${sum.line}`, dim(`         counts ${JSON.stringify(sum.counts).slice(0, W - 20)}`));
     for (const d of sum.details) L.push(dim('         · ') + d);
-    L.push('', bold('view') + dim(liveKind(kind).view ? '' : '  (no view: the board shows the details)'), ...liveView(x, sum, { width: W, full: true, active: x.active }).map(seg));
+    const full = liveView(x, sum, { width: W, full: true, active: x.active });
+    L.push('', bold('view') + dim(liveKind(kind).view ? '' : '  (no view: the board shows the details)'), ...full.map(seg));
+    if (liveKind(kind).view) L.push('', bold('compact') + dim('  (the board\'s task details; aim for ≤ 8 lines)'), ...liveView(x, sum, { width: W, full: false, active: x.active }).map(seg));
+    const items = full.filter((l) => l.item != null).map((l) => l.item);
+    if (items.length) L.push('', bold('item') + dim(`  ${items[0]} (⏎ on it in the live view; ${items.length} item${items.length === 1 ? '' : 's'})`), ...(liveItem(x, sum, items[0], { width: W }) || [[['  (no item function)', 'dim']]]).map(seg));
     const op = liveKind(kind).open ? liveKind(kind).open(sum, { cwd: x.cwd, cmd: x.cmd, file, exit: x.exit, extra: {} }) : null;
-    L.push('', `${bold('open')}     ${op?.url ? 'browser ' + op.url : op?.file ? 'file ' + op.file : dim(liveKind(kind).view ? 'L opens the viewer (atf live)' : 'L shows the output')}`);
+    L.push('', `${bold('open')}     ${op?.url ? 'browser ' + op.url : op?.file ? 'file ' + op.file : dim(liveKind(kind).view ? 'o in the live view opens the viewer (atf live)' : 'o in the live view opens the output')}`);
     out({ kind, match: FLAGS.cmd ? classify(FLAGS.cmd, x.cwd) : null, fetched, summary: sum, open: op }, L.join('\n'));
   },
 

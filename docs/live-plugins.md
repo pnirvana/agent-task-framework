@@ -43,10 +43,13 @@ command ends   ─ summarize() → line                                         
    `task.artifact` is recorded with the exit code, duration, your `extra` and your summary
    `line`. The coordinator sees that line in `atf show` / `atf brief` when it reviews.
 4. **Showing it.** The board shows `line` in the task's row badge and in its details,
-   followed by your `view` (or your `details`). `L` on the board opens what `open` returns,
-   else the full viewer `atf live <task> --watch` (when there is a `view`), else the raw
-   output. A newer run of the same kind in the same directory replaces the older one on
-   the board (`atf live <task> --all` keeps the history).
+   followed by your compact `view` (or your `details`). `L` on the board opens the **live
+   view** in the board: your full `view`, updated while the command runs, with its
+   sections folded and unfolded (←→) and ⏎ on an item showing your `item`; `t` switches
+   to the raw output. `o` there opens it outside the board: what `open` returns, else
+   `atf live <task> --watch` (when there is a `view`), else the raw output in a herdr tab.
+   A newer run of the same kind in the same directory replaces the older one on the board
+   (`atf live <task> --all` keeps the history).
 
 The model never sees any of this: its commands and their output are not changed.
 
@@ -63,7 +66,7 @@ The model never sees any of this: its commands and their output are not changed.
   `.atf` directory can come from someone else's repository.
 - **Every process that shows or records live data loads them:**
   - the agent's hook (`match`, `onStart`, `onEnd`, `summarize` at the end);
-  - the board (`summarize`, `view`, `refresh`, `open`);
+  - the board (`summarize`, `view`, `item`, `refresh`, `open`);
   - `atf show` / `atf brief` / `atf live` (`summarize`, `view`; `atf live` also `refresh`).
 
   These usually run on the same machine. If they don't, install the plugin on both.
@@ -85,7 +88,8 @@ export default {
 
   match(cmd, { unquoted, cwd }) { … },        // → boolean
   summarize(text, ctx) { … },                 // required → { state, line, counts, details }
-  view(summary, opts, ctx) { … },             // → lines of [text, style] segments
+  view(summary, opts, ctx) { … },             // → lines: [text, style] segments, sections, items
+  item(summary, id, opts, ctx) { … },         // → lines: one item of the view in full
   open(summary, ctx) { … },                   // → { url } | { file } | null
   refreshEvery: 15000,                        // ms between refreshes while it runs
   refreshTimeout: 10000,                      // ms before a refresh is given up
@@ -158,15 +162,56 @@ line is an array of `[text, style]` segments; styles: `''`, `bold`, `dim`, `red`
 `bold cyan` (others are dropped). Keep lines within `width`. Without `view`, the board
 shows `details`.
 
+The compact view really is compact: a build with 40 modules must not take 40 lines in the
+task's details. Summarize there (`modules  38 ✓  1 ⚙  1 ✗`, the one building, the first
+failures) and leave the lists to `full: true`.
+
+Two optional kinds of lines, for the full view. Plain segment arrays still work everywhere,
+and older ATF versions skip these lines:
+
+- **A section heading** `{ section: 'jobs', note: '3/5 done', folded: false }`: the lines
+  after it, up to the next heading, belong to it. In the board's live view the human folds
+  and unfolds it (←→, z all); `folded: true` starts it folded (e.g. a long list of what
+  succeeded). `atf live` shows it as a bold heading.
+- **An item** `{ segments: [[text, style], …], item: 'job-123' }`: a line ⏎ opens in full
+  in the live view, via your `item` (below). The id is yours: anything `item` can find the
+  thing by. Only useful with an `item` function.
+
+```js
+view(s, { full }) {
+  if (!full) return [[['  ' + s.counts.jobs + ' jobs', 'dim']]];
+  return [
+    { section: 'failed jobs', note: String(s.counts.failed.length) },
+    ...s.counts.failed.map((j) => ({ segments: [['  ✗ ', 'red'], [j.name, 'red']], item: String(j.id) })),
+    { section: 'passed jobs', folded: true },
+    ...s.counts.passed.map((j) => [['  ✓ ', 'green'], [j.name, '']]),
+  ];
+}
+```
+
 Conventions the built-ins use: `✓` green done, `✗` red failed, `⚙` cyan running, `○` gray
 pending, `–` gray skipped, `▸` the thing running now; counts dim; a progress bar with
 `helpers.bar`.
 
+### `item(summary, id, { width, helpers }, ctx)` → lines (optional)
+
+One item of your full view in full, when the human presses ⏎ on its line in the board's
+live view: a failed test's message and stack trace, a job's log, a step's error. `id` is
+the `item` of that line. Return lines like `view` does (segments, headings); they scroll,
+so they may be long (the board clips each line to the width: wrap long ones yourself).
+It is called again every few seconds while it is shown, so it may read files (`ctx.cwd`,
+`ctx.file`, `ctx.since`/`ctx.until` as in `summarize`), but must not fetch: put what needs
+the network in `refresh` and read it from `summary.counts`.
+
+The built-in `maven` kind's: the failure from the run's surefire/failsafe report (type,
+message, stack trace, with the project's own frames standing out from the framework's),
+else what the build output printed for the test.
+
 ### `open(summary, ctx)` → `{ url }` | `{ file }` | null
 
-What `L` on the board opens: a URL in the browser (a pipeline page), or a file followed in
-a new tab. `null` (or no `open`): the full viewer `atf live --watch` if the kind has a
-`view`, else the raw output.
+What `o` in the board's live view opens outside the board: a URL in the browser (a
+pipeline page), or a file followed in a new herdr tab. `null` (or no `open`): the full
+viewer `atf live --watch` if the kind has a `view`, else the raw output.
 
 ### `refresh(ctx)` → data (async, optional)
 
@@ -261,7 +306,10 @@ For an agent asked to "show X on the board" (e.g. "our GitLab pipeline jobs"):
    status wins), pick the `state`, write a `line` with the most important thing first,
    put failures in `details`. No network, no writes.
 6. **Add `view`** if more than one line helps: per stage, per module, per step. Compact
-   for `full: false`, everything for `full: true`.
+   for `full: false` (≤ 8 lines, however big the run), everything for `full: true`, in
+   sections when there are several lists.
+   **Add `item`** if a line of the full view has more behind it (a failure's trace, a
+   job's log), and mark those lines as items.
 7. **Add `open`** if there is a page for it (a pipeline URL from the output).
 8. **Add `refresh`** only if needed: timeouts, token from env or file, `final: true`
    when done, nothing secret in errors.

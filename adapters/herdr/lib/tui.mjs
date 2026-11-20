@@ -8,7 +8,7 @@ import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact
 import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject, pluginConfig, focusPane } from './herdr.mjs';
 import { progressText } from './sync.mjs';
 import { textField, keyField, fieldText, fieldRows, fieldMode } from './textfield.mjs';
-import { activeRuns, taskLive, liveBadge, elapsed, readTail, earlierText, liveView, hasView, liveOpen, loadLiveKinds, enableAutoRefresh } from '../../../src/live.mjs';
+import { activeRuns, taskLive, liveBadge, elapsed, readTail, earlierText, liveView, hasView, liveOpen, liveItem, loadLiveKinds, enableAutoRefresh, supersedeKey, artifactKind } from '../../../src/live.mjs';
 import { fileURLToPath } from 'node:url';
 import { planChanges, levelSets, totals, projectPath, changeMode, diffTool } from '../../../src/changes.mjs';
 import { notifyTick } from './notify.mjs';
@@ -148,6 +148,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     showClosed: false, // wider scopes: also list completed / cancelled plans
     confirm: null, // {action, key, until}: second press confirms
     input: null, // one-line text input: {label, value, onSubmit}
+    live: null, // the live view (L): {root, plan, task, ref, skey, raw, follow, folded, from, item, meta}
   };
   const keyOf = (root, plan) => `${root}#${plan}`;
   const hookCache = new Map();
@@ -504,7 +505,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   function liveDetail(st, t, W, { recorded: maxRec = 5, tail = 4 } = {}) {
     const live = st.root ? taskLive(t, runsOf(st.root, st.id)) : null;
     if (!live || (!live.now.length && !live.recorded.length)) return [];
-    const L = [[], [['live', 'bold'], ['  L opens the output', 'dim']]];
+    const L = [[], [['live', 'bold'], ['  L live view', 'dim']]];
     const COL = { ok: 'green', failed: 'red', waiting: 'yellow', running: 'cyan', gone: 'gray', unknown: '' };
     const cmdLine = (c) => String(c || '').split('\n')[0];
     for (const r of live.now) {
@@ -1577,9 +1578,14 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       T('  maven · tests · pipeline · log   finished runs (exit code, summary, failing tests)'),
       T('                and files the agent writes in the background or keeps reading'),
       T('Maven summaries add surefire/failsafe reports; pipelines link their URL.'),
-      K('L', 'open it: a Maven run in the test viewer (atf live), other output followed in a'),
-      T('                herdr tab, a finished run in less,'),
-      T('                a pipeline in the browser'),
+      K('L', 'the live view, in the board, updated while it runs: the kind’s full view'),
+      T('                (Maven: every module, failure and test class) or the raw output'),
+      K('  ↑↓ G', 'move; G goes to the end and follows new output'),
+      K('  ←→ z', 'fold a section (modules, failures, test classes) · z all'),
+      K('  ⏎', 'on a failed test: its message and stack trace (the project’s frames stand out)'),
+      K('  t', 'raw output ⇄ the view   [ ] other runs of the task   / search'),
+      K('  o', 'open it outside the board: a pipeline in the browser, the viewer (atf live)'),
+      T('                or the output in a herdr tab'),
       T('Agents add what the hook cannot see: atf artifact T3 <file> --live [--kind maven]', 'dim'),
       [],
       H('Agent state: the symbol after an agent name (live from herdr)'),
@@ -1650,6 +1656,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       log: `↑↓ scroll  / search  N plan note  ${multi() ? 'p plan  ' : ''}${ui.log.plan || ui.log.query ? 'esc clear filter  ' : esc + '  '}tab views  ? help`,
       detail: '↑↓ ^d/^u G/gg scroll  ⏎/esc back  a approve  x changes  r message  N plan note  o open  d diff  L live  g agent  s/S coordinator',
       help: '↑↓ scroll  any other key: back',
+      live: liveKeys(),
+      liveitem: '↑↓ ^d/^u G/gg scroll  / search  esc/← back to the live view  o open outside',
     }[view()];
     return [[[' ' + keys, 'dim']]];
   }
@@ -1677,6 +1685,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     let sc = ui.scrolls[key] ?? 0;
     if (selLine < sc + 1) sc = Math.max(0, selLine - 1);
     if (selLine >= sc + bodyH - 1) sc = selLine - bodyH + 2;
+    sc = Math.max(0, Math.min(sc, all.length - bodyH)); // a list that fits does not scroll
     ui.scrolls[key] = sc;
     ui.drawn[key] = { texts: all.map(lineText), top: sc, h: bodyH, list: true };
     lines.push(...all.slice(sc, sc + bodyH).map((l, i) => highlight(l, key, sc + i)));
@@ -1685,7 +1694,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   // ---------- search (/ in a view; n / N; esc ends it) ----------
   // Views whose lines can be searched: long views scroll to a match, lists select its row
   // (their lines are their rows). The Log has its own / (a filter).
-  const SEARCHABLE = new Set(['detail', 'plan', 'help', 'tasks', 'changes']);
+  const SEARCHABLE = new Set(['detail', 'plan', 'help', 'tasks', 'changes', 'live', 'liveitem']);
   const searchKey = (v = view()) => (v === 'plan' && multi() ? null : SEARCHABLE.has(v) ? v : null);
   const lineText = (l) => (l || []).map((seg) => seg[0] ?? '').join('');
   function searchRe(q) {
@@ -1785,7 +1794,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
   function startSearch() {
     const key = searchKey();
-    if (!key) return flash('search (/) works in Tasks, Changes, the plan, task details and help; the Log filters with /', 'dim');
+    if (!key) return flash('search (/) works in Tasks, Changes, the plan, task details, the live view and help; the Log filters with /', 'dim');
     const before = ui.search;
     const at = { sel: ui.sel[key], scroll: ui.scrolls[key] };
     ui.input = {
@@ -1825,6 +1834,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const v = view();
 
     if (v === 'help') scrolled(lines, helpLines(), 'help', bodyH);
+    else if (v === 'live' || v === 'liveitem') drawLive(lines, W, bodyH, v);
     else if (v === 'overview') {
       // the list on top, the selected row's context below it
       const { lines: all, selLine } = overviewTabLines(W, plans);
@@ -2054,18 +2064,234 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     ui.input = { label: `change request for ${r.task}, for the coordinator: `, value: '', hint: '⏎ send', multiline: true, onSubmit: (text) => text.trim() && reviewNow('change', text.trim()) };
   }
 
-  /**
-   * L: open what the task's agent runs or watches (§14): a pipeline in the browser when
-   * its URL is known; else the output in a herdr tab, followed while it is written.
-   * Running/waiting commands first, then the latest recorded run or live file.
-   */
-  async function openLive() {
+  // ---------- the live view (L): a run's full view in the board, updated while it runs ----------
+  // The kind's full view (docs/live-plugins.md) with foldable sections and items (⏎: the
+  // kind's `item`, e.g. a failed test's stack trace), or the raw output (t). o opens the
+  // run outside the board as before (the kind's `open`, `atf live --watch`, the output).
+  const runRef = (x) => x.out || x.ref;
+  const runKey = (x) => supersedeKey({ ...x, kind: artifactKind(x.kind) });
+
+  /** The task's runs, in the order [ and ] go through: waiting, running, then recorded. */
+  function liveRuns(lv) {
+    const st = cachedPlan(lv.root, lv.plan);
+    const t = st.tasks[lv.task];
+    if (!t) return { st, t: null, runs: [] };
+    const live = taskLive(t, runsOf(lv.root, lv.plan));
+    return { st, t, live, runs: [...live.now.filter((n) => n.waiting), ...live.now.filter((n) => !n.waiting), ...live.recorded] };
+  }
+  /** The run the view shows; a run that just ended is followed to its recorded output. */
+  function liveRun(lv) {
+    const r = liveRuns(lv);
+    const x = r.runs.find((y) => runRef(y) === lv.ref) || r.runs.find((y) => lv.skey && runKey(y) === lv.skey) || r.runs[0] || null;
+    if (x) (lv.ref = runRef(x)), (lv.skey = runKey(x));
+    return { ...r, x };
+  }
+
+  /** L: open the live view of the selected task (from Tasks, the Overview or its details). */
+  function openLiveView() {
     const r = selectedRow();
     const t = r?.task && r.st?.tasks[r.task];
     if (!t) return flash('select a task');
-    const live = taskLive(t, runsOf(r.root, r.plan));
-    const x = live.now.find((n) => n.waiting) || live.now[0] || live.recorded[0];
+    const lv = { root: r.root, plan: r.plan, task: t.id, ref: null, skey: null, raw: false, follow: false, folded: new Map(), from: ui.overlay, item: null, meta: [] };
+    const { x } = liveRun(lv);
     if (!x) return flash(`nothing live on ${t.id} (agents' builds, tests and pipelines show here)`);
+    lv.raw = !hasView(x.kind); // a kind without a view: its output is the view
+    lv.follow = lv.raw; // the output from its end (and following it while it is written)
+    ui.live = lv;
+    ui.sel.live = 0;
+    ui.scrolls.live = 0;
+    if (ui.search?.key === 'live' || ui.search?.key === 'liveitem') ui.search = null;
+    ui.overlay = 'live';
+    draw();
+  }
+
+  const RUN_STATE = { ok: ['✓', 'green'], failed: ['✗', 'red'], waiting: ['⧖', 'yellow'], running: ['⚙', 'cyan'], gone: ['–', 'gray'], unknown: ['·', ''] };
+  /** The live view's fixed head: the task, the run (i of n), its summary and command. */
+  function liveHead(r, W) {
+    const { t, x, runs } = r;
+    const s = x.summary;
+    const [g, c] = x.active ? (x.waiting ? RUN_STATE.waiting : RUN_STATE.running) : RUN_STATE[s.state] || RUN_STATE.unknown;
+    const when = x.active
+      ? `${x.approval ? 'waiting for your approval' : x.waiting ? 'waiting' : 'running'} ${elapsed(x.since)}`
+      : x.exit != null
+        ? `exit ${x.exit}${x.duration_ms ? ' · took ' + elapsed(0, x.duration_ms) : ''} · ${ago(x.ts)} ago`
+        : x.live
+          ? `live file${s.mtime ? ` · written ${ago(new Date(s.mtime).toISOString())} ago` : ''}`
+          : '';
+    const i = runs.indexOf(x);
+    return [
+      [[` ${t.id} `, 'bold'], [clip(t.title, Math.max(10, W - 30)).trimEnd(), ''], [runs.length > 1 ? `   run ${i + 1}/${runs.length}  [ ] other runs` : '', 'dim']],
+      [[` ${g} `, c], [`${x.kind} `, (c + ' bold').trim()], [when + '  ', 'dim'], [s.line || '', RUN_STATE[s.state]?.[1] || '']],
+      [[`   ${x.cmd ? '$ ' + String(x.cmd).split('\n')[0] : runRef(x)}`, 'gray']],
+      [['─'.repeat(W), 'gray']],
+    ];
+  }
+
+  /**
+   * The live view's lines: the kind's full view with folded sections, or the raw output.
+   * lv.meta gets, per line, the section it heads or belongs to and its item.
+   */
+  function liveBody(lv, x, W) {
+    const body = [];
+    const meta = [];
+    if (lv.raw) {
+      const text = (readTail(runRef(x), 512 << 10) || '').replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\r(?!\n)/g, '\n');
+      const out = text.split('\n');
+      if (out.length && out[out.length - 1] === '') out.pop();
+      for (const l of out.slice(-3000)) body.push([[l.replace(/\t/g, '    '), /\b(ERROR|FAIL(ED|URE)?)\b/.test(l) ? 'red' : /\bWARN(ING)?\b/.test(l) ? 'yellow' : '']]), meta.push({});
+      if (!body.length) body.push([[fs.existsSync(runRef(x)) ? '(no output yet)' : `${runRef(x)} is gone`, 'dim']]), meta.push({});
+      return { body, meta };
+    }
+    const view = liveView(x, x.summary, { width: W - 4, full: true, active: !!x.active });
+    let sec = null;
+    let hidden = false;
+    const counts = new Map(); // section -> lines under it
+    for (const l of view) if (l.section) (sec = l.section), counts.set(sec, 0);
+      else if (sec) counts.set(sec, counts.get(sec) + 1);
+    sec = null;
+    for (const l of view) {
+      if (l.section) {
+        sec = l.section;
+        const folded = lv.folded.has(sec) ? lv.folded.get(sec) : l.folded;
+        hidden = folded;
+        if (body.length) body.push([]), meta.push({ section: null, blank: true });
+        body.push([[folded ? '▸ ' : '▾ ', 'cyan bold'], ...l, [folded ? `  (${counts.get(sec)} line${counts.get(sec) === 1 ? '' : 's'})` : '', 'dim']]);
+        meta.push({ section: sec, head: true });
+        continue;
+      }
+      if (hidden) continue;
+      body.push(l);
+      meta.push({ section: sec, item: l.item ?? null, blank: !l.some(([tx]) => tx.trim()) });
+    }
+    if (!body.length) body.push([['(nothing to show yet)', 'dim']]), meta.push({});
+    return { body, meta };
+  }
+
+  function drawLive(lines, W, bodyH, v) {
+    const lv = ui.live;
+    const r = lv && liveRun(lv);
+    if (!r?.x) {
+      lines.push([[` nothing live on ${lv?.task ?? 'this task'} any more`, 'dim']]);
+      lv && (lv.meta = []);
+      return;
+    }
+    const head = liveHead(r, W);
+    lines.push(...head);
+    const h = Math.max(1, bodyH - head.length);
+    if (v === 'liveitem') {
+      // one item in full (a failed test's stack trace); cached a few seconds (it reads reports)
+      const it = lv.item;
+      if (!it.lines || Date.now() - it.at > 3000) Object.assign(it, { lines: liveItem(r.x, r.x.summary, it.id, { width: W - 2 }) || [[['(no details for this item)', 'dim']]], at: Date.now() });
+      return scrolled(lines, it.lines.map((l) => [['  ', ''], ...l]), 'liveitem', h);
+    }
+    const { body, meta } = liveBody(lv, r.x, W);
+    lv.meta = meta;
+    if (ui.search?.key === 'live' && ui.search.q) lv.follow = false;
+    if (lv.follow) ui.sel.live = body.length - 1;
+    ui.sel.live = Math.max(0, Math.min(ui.sel.live ?? 0, body.length - 1));
+    const marked = body.map((l, i) => [[i === ui.sel.live ? '›' : ' ', 'cyan bold'], ...(i === ui.sel.live && meta[i].item ? l.map(([tx, st]) => [tx, st === 'dim' || st === 'gray' ? st : (st + ' bold').trim()]) : l)]);
+    list(lines, marked, ui.sel.live, 'live', h);
+  }
+
+  function liveKeys() {
+    const lv = ui.live;
+    const m = lv?.meta?.[ui.sel.live];
+    const enter = m?.item ? '⏎ in full  ' : '';
+    const folds = lv && !lv.raw && lv.meta.some((x) => x.head) ? '←→ z fold  ' : '';
+    return `↑↓ gg G ${lv?.follow ? 'following' : 'follow'}  ${enter}${folds}t ${lv?.raw ? 'view' : 'raw'}  [ ] runs  / search  o outside  esc back`;
+  }
+
+  /** Keys of the live view and of an item in it; true if handled. */
+  function liveKey(k, v, page) {
+    const lv = ui.live;
+    if (!lv) return (ui.overlay = null), false;
+    if (v === 'liveitem') {
+      if (['\x1b', 'q', 'h', '\x1b[D', '\x7f'].includes(k)) return (ui.overlay = 'live'), (lv.item = null), true;
+      if (k === 'o') return openLive(liveRun(lv)), true;
+      return false; // scrolling: as in every scrolled view
+    }
+    const n = lv.meta.length;
+    const at = ui.sel.live ?? 0;
+    const m = lv.meta[at] || {};
+    const headOf = (i) => {
+      while (i >= 0 && !lv.meta[i]?.head) i--;
+      return i;
+    };
+    const fold = (sec, on) => lv.folded.set(sec, on);
+    const isFolded = (sec) => lv.folded.get(sec) ?? false;
+    if (k === '\x1b' || k === 'q') {
+      ui.overlay = lv.from === 'detail' ? 'detail' : null;
+      ui.live = null;
+      if (ui.search?.key === 'live' || ui.search?.key === 'liveitem') ui.search = null;
+      return true;
+    }
+    // up / down skip the blank lines between sections
+    const step = (d) => {
+      let i = at + d;
+      while (i > 0 && i < n - 1 && lv.meta[i]?.blank) i += d;
+      return Math.max(0, Math.min(n - 1, i));
+    };
+    if (UP.includes(k)) return (lv.follow = false), (ui.sel.live = step(-1)), true;
+    if (DOWN.includes(k)) return (ui.sel.live = step(1)), (lv.follow = false), true;
+    if (k === '\x1b[5~') return (lv.follow = false), (ui.sel.live = Math.max(0, at - page)), true;
+    if (k === '\x1b[6~') return (lv.follow = false), (ui.sel.live = Math.min(n - 1, at + page)), true;
+    if (k === '\x1b[H') return (lv.follow = false), (ui.sel.live = 0), true;
+    if (k === 'G') return (lv.follow = true), (ui.sel.live = n - 1), true;
+    if (k === 't') {
+      lv.raw = !lv.raw;
+      const x = liveRun(lv).x;
+      lv.follow = lv.raw;
+      ui.sel.live = 0;
+      ui.scrolls.live = 0;
+      if (ui.search?.key === 'live') ui.search = null;
+      if (!lv.raw && x && !hasView(x.kind)) flash(`${x.kind} has no view of its own: its details`, 'dim');
+      return true;
+    }
+    if (k === '[' || k === ']') {
+      const r = liveRun(lv);
+      if (r.runs.length < 2) return flash('no other runs on this task', 'dim'), true;
+      const x = r.runs[(r.runs.indexOf(r.x) + (k === ']' ? 1 : r.runs.length - 1)) % r.runs.length];
+      Object.assign(lv, { ref: runRef(x), skey: runKey(x), raw: !hasView(x.kind), follow: !hasView(x.kind) });
+      ui.sel.live = 0;
+      ui.scrolls.live = 0;
+      return true;
+    }
+    if (k === 'o') return openLive(liveRun(lv)), true;
+    if (lv.raw) return false;
+    if (k === '\r' && m.item) {
+      lv.item = { id: m.item, lines: null, at: 0 };
+      ui.scrolls.liveitem = 0;
+      ui.overlay = 'liveitem';
+      return true;
+    }
+    const h = m.head ? at : headOf(at);
+    const sec = h >= 0 ? lv.meta[h].section : null;
+    if (sec && (k === '\r' || k === ' ') && m.head) return fold(sec, !isFolded(sec)), true;
+    if (sec && (k === '\x1b[D' || k === 'h')) {
+      if (m.head && isFolded(sec)) return true;
+      fold(sec, true);
+      ui.sel.live = h; // the heading stays where the cursor was
+      return true;
+    }
+    if (sec && (k === '\x1b[C' || k === 'l')) return fold(sec, false), true;
+    if (k === 'z') {
+      const secs = [...new Set(lv.meta.filter((x) => x.head).map((x) => x.section))];
+      const anyOpen = secs.some((x) => !isFolded(x));
+      secs.forEach((x) => fold(x, anyOpen));
+      if (anyOpen) ui.sel.live = Math.max(0, headOf(at));
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * o in the live view: the run outside the board. The kind decides: a URL (a pipeline
+   * page) in the browser, a file followed in a herdr tab; else its viewer (atf live) or the
+   * output, in a herdr tab.
+   */
+  async function openLive({ st, t, x } = {}) {
+    if (!t || !x) return flash('nothing live to open');
+    const r = { root: ui.live.root, plan: ui.live.plan, st };
     // the kind decides: a URL (a pipeline page) or a file; else its viewer or the output
     const o = liveOpen(x, x.summary);
     const url = o?.url;
@@ -2480,6 +2706,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (k === '\x1b') return (ui.search = null), draw();
     }
     if (k === '/' && v !== 'log') return startSearch();
+    if ((v === 'live' || v === 'liveitem') && liveKey(k, v, page)) return draw();
     if (v === 'log') {
       if (k === '/') {
         const before = ui.log.query;
@@ -2557,7 +2784,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (v !== 'plan' && k === 'x') return changeNow(), draw();
       if (k === 'r' || k === 'n') return reply(), draw();
       if (k === 'o') return openArtifact();
-      if (k === 'L') return openLive();
+      if (k === 'L') return openLiveView();
       if (k === 's') return startCoordinator(false);
       if (k === 'S') return startCoordinator(true);
     }

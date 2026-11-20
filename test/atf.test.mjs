@@ -1388,7 +1388,7 @@ test('§14 live: maven test progress against the previous run (baseline)', async
   assert.equal(L.summarizeText('maven', log).line, '1/2 core · 14 tests');
   // the Results section names the failure and its message
   const failed = L.summarizeText('maven', log + '\n[ERROR] Failures: \n[ERROR]   RoundingTest.halfUp:12 expected: <3> but was: <2>\n[INFO] BUILD FAILURE\n');
-  assert.deepEqual(failed.progress.failures, [{ test: 'RoundingTest#halfUp', message: 'expected: <3> but was: <2>' }]);
+  assert.deepEqual(failed.progress.failures, [{ test: 'RoundingTest#halfUp', id: 'RoundingTest.halfUp', message: 'expected: <3> but was: <2>' }]);
   // the view renders modules and the running class
   const text = L.mavenView(s, { width: 100, active: true }).map((l) => l.map(([x]) => x).join('')).join('\n');
   assert.match(text, /14\/~43 tests/);
@@ -2006,6 +2006,104 @@ test('board: Neovim-style scrolling in long views (G, gg, ctrl+d / ctrl+u)', () 
   assert.notEqual(half, top, 'ctrl+d: down');
   assert.doesNotMatch(half, /todo → in_progress/, 'half a page, not to the end');
   assert.equal(back, top, 'ctrl+u: up again');
+});
+
+test('§14 live: views in sections with items (plugin contract), compact maven view, a failure in full', async () => {
+  const L = await import('../src/live.mjs');
+  // a plugin's view: plain segment lines (as before), section headings and items
+  L.registerLiveKind({
+    kind: 'secttest',
+    summarize: () => ({ state: 'ok', line: 'x', counts: {}, details: [] }),
+    view: (s, { full }) => (full ? [{ section: 'jobs', note: '2', folded: true }, { segments: [['✗ build', 'red']], item: 'j1' }, [['✓ lint', 'green']], 'not a line'] : [[['2 jobs', 'dim']]]),
+    item: (s, id) => [[[`job ${id}`, 'bold']]],
+  }, 'test');
+  const x = { kind: 'secttest', ref: '/dev/null' };
+  const v = L.liveView(x, {}, { full: true });
+  assert.equal(v.length, 3, 'what is not a line is dropped');
+  assert.deepEqual([v[0].section, v[0].folded, v[0].map((s) => s[0]).join('')], ['jobs', true, 'jobs  2']);
+  assert.deepEqual([v[1].item, v[1][0]], ['j1', ['✗ build', 'red']]);
+  assert.deepEqual(v[2], [['✓ lint', 'green']], 'plain lines unchanged');
+  assert.deepEqual(L.liveItem(x, {}, 'j1'), [[['job j1', 'bold']]]);
+  assert.equal(L.liveItem({ kind: 'log', ref: '/dev/null' }, {}, 'a'), null, 'no item function: null');
+  assert.match(L.checkKind({ kind: 'bad', summarize() {}, item: 3 }), /item must be a function/);
+
+  // maven: compact however many modules (≤ 8 lines); full: sections, failures as items
+  const mods = ['core', 'api', 'web', 'cli', 'db', 'auth'];
+  const log = ['[INFO] Reactor Build Order:', ...mods.map((m) => `[INFO]   demo-${m} [jar]`), '[INFO] ',
+    ...mods.slice(0, 4).flatMap((m, i) => [`[INFO] --------------------------< com.demo:${m} >---------------------------`, `[INFO] Building ${m} 1.0 [${i + 1}/6]`, `[INFO] Running com.demo.${m}.ATest`, `[INFO] Tests run: 3, Failures: ${m === 'api' ? 1 : 0}, Errors: 0, Skipped: 0, Time elapsed: 1.2 s - in com.demo.${m}.ATest`]),
+    '[ERROR] com.demo.api.ATest.refund  Time elapsed: 0.3 s  <<< FAILURE!', 'org.opentest4j.AssertionFailedError: expected: <200> but was: <500>', '\tat com.demo.api.ATest.refund(ATest.java:42)', '',
+    '[INFO] Running com.demo.cli.BTest'].join('\n');
+  const s = L.summarizeText('maven', log);
+  const text = (ls) => ls.map((l) => l.map(([t]) => t).join('')).join('\n');
+  const compact = L.liveView({ kind: 'maven', ref: '/dev/null', active: true }, s, { width: 90, active: true });
+  assert.ok(compact.length <= 8, `compact: ${compact.length} lines`);
+  assert.match(text(compact), /modules {2}3 ✓ {2}1 ⚙ {2}2 ○/);
+  assert.doesNotMatch(text(compact), /demo-db/, 'pending modules are counted, not listed');
+  const full = L.liveView({ kind: 'maven', ref: '/dev/null' }, s, { width: 90, full: true });
+  assert.deepEqual(full.filter((l) => l.section).map((l) => l.section), ['modules', 'failures', 'test classes']);
+  assert.deepEqual(full.filter((l) => l.item).map((l) => l.item), ['com.demo.api.ATest.refund']);
+  // the failure in full: from the build output without a report …
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-item-'));
+  fs.writeFileSync(path.join(dir, 'out.log'), log);
+  const fromLog = text(L.mavenFailure('com.demo.api.ATest.refund', { cwd: dir, file: path.join(dir, 'out.log') }));
+  assert.match(fromLog, /from the build output/);
+  assert.match(fromLog, /at com\.demo\.api\.ATest\.refund\(ATest\.java:42\)/);
+  // … and from the run's report, with its stack trace
+  const rd = path.join(dir, 'api', 'target', 'surefire-reports');
+  fs.mkdirSync(rd, { recursive: true });
+  fs.writeFileSync(path.join(rd, 'TEST-com.demo.api.ATest.xml'), '<testsuite name="com.demo.api.ATest" tests="1" failures="1"><testcase name="refund" classname="com.demo.api.ATest" time="0.3"><failure message="expected: &lt;200&gt; but was: &lt;500&gt;" type="org.opentest4j.AssertionFailedError"><![CDATA[org.opentest4j.AssertionFailedError: expected: <200> but was: <500>\n\tat org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:55)\n\tat com.demo.api.ATest.refund(ATest.java:42)\n]]></failure></testcase></testsuite>');
+  const item = L.mavenFailure('com.demo.api.ATest#refund', { cwd: dir });
+  assert.match(text(item), /failure · org\.opentest4j\.AssertionFailedError/);
+  assert.match(text(item), /expected: <200> but was: <500>/);
+  const frame = (re) => item.find((l) => re.test(l.map(([t]) => t).join('')))?.[0][1];
+  assert.equal(frame(/AssertionUtils\.fail/), 'gray', "the framework's frames are dim");
+  assert.equal(frame(/ATest\.refund\(ATest/), '', "the project's own frames stand out");
+  assert.match(text(item), /api\/target\/surefire-reports\/TEST-com\.demo\.api\.ATest\.xml/);
+});
+
+test('board: L opens the live view in the board (sections fold, ⏎ a failure in full, t raw output)', () => {
+  const { dir, env, run } = sandbox();
+  run(['add', 'Build it']);
+  const mods = ['core', 'api', 'web', 'cli', 'db', 'auth'];
+  const log = ['[INFO] Reactor Build Order:', ...mods.map((m) => `[INFO]   demo-${m} [jar]`), '[INFO] ',
+    ...mods.slice(0, 4).flatMap((m, i) => [`[INFO] --------------------------< com.demo:${m} >---------------------------`, `[INFO] Building ${m} 1.0 [${i + 1}/6]`, `[INFO] Running com.demo.${m}.ATest`, `[INFO] Tests run: 3, Failures: ${m === 'api' ? 1 : 0}, Errors: 0, Skipped: 0, Time elapsed: 1.2 s - in com.demo.${m}.ATest`]),
+    '[INFO] Running com.demo.cli.BTest'].join('\n') + '\n';
+  fs.writeFileSync(path.join(dir, 'build.log'), log);
+  run(['artifact', 'T1', 'build.log', '--live', '--kind', 'maven', '--cwd', dir]);
+  const rd = path.join(dir, 'api', 'target', 'surefire-reports');
+  fs.mkdirSync(rd, { recursive: true });
+  fs.writeFileSync(path.join(rd, 'TEST-com.demo.api.ATest.xml'), '<testsuite name="com.demo.api.ATest" tests="3" failures="1"><testcase name="refund" classname="com.demo.api.ATest" time="0.3"><failure message="expected: &lt;200&gt; but was: &lt;500&gt;" type="org.opentest4j.AssertionFailedError"><![CDATA[org.opentest4j.AssertionFailedError: expected: <200> but was: <500>\n\tat com.demo.api.ATest.refund(ATest.java:42)\n]]></failure></testcase></testsuite>');
+  const render = (keys) =>
+    JSON.parse(
+      execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '90', '34', JSON.stringify(keys)], {
+        cwd: dir,
+        env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
+      }).toString(),
+    );
+  const open = ['\r', '1', '\r', 'L']; // plan scope, Tasks, the task's details, L
+  const f = render([...open, '/', ...'refund', '\r', '\r', '\x1b', '\x1b', 'z', 't', '\x1b']);
+  const at = (i) => f[open.length + i];
+  const lv = at(0);
+  assert.match(lv, /T1 Build it/);
+  assert.match(lv, /▾ modules {2}3\/6 done/);
+  assert.match(lv, /○ demo-auth/, 'every module, not a compact summary');
+  assert.match(lv, /▾ failures {2}1/);
+  assert.match(lv, /▾ test classes {2}4/);
+  assert.match(lv, /G follow/);
+  const item = f.at(-6); // ⏎ on the failure the search selected
+  assert.match(item, /ATest#refund/);
+  assert.match(item, /at com\.demo\.api\.ATest\.refund\(ATest\.java:42\)/);
+  assert.match(item, /esc\/← back to the live view/);
+  assert.match(f.at(-5), /▾ failures/, 'esc: back in the live view');
+  assert.doesNotMatch(f.at(-5), /stack trace\n.*AssertionUtils/);
+  const folded = f.at(-3);
+  assert.match(folded, /▸ modules {2}3\/6 done {2}\(6 lines\)/, 'z folds every section');
+  assert.match(folded, /▸ failures .*\(1 line\)/);
+  assert.doesNotMatch(folded, /demo-auth/);
+  const raw = f.at(-2);
+  assert.match(raw, /\[INFO\] Running com\.demo\.cli\.BTest/, 't: the raw output, from its end');
+  assert.match(raw, /t view/);
+  assert.match(f.at(-1), /live {2}L live view/, 'esc: back in the task details');
 });
 
 test('board: / searches the view; n / N between matches, esc ends it', () => {

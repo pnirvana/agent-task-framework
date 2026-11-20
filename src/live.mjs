@@ -262,7 +262,8 @@ export function mavenProgress(text, { cwd, since = 0, until = Infinity, baseline
   for (const l of lines) {
     let m;
     if (/Reactor Build Order:/.test(l)) inOrder = true;
-    else if (inOrder && (m = l.match(/^\[INFO\]\s{2,}(.+?)(?:\s+\[\w+\])?\s*$/))) mod(m[1].trim());
+    // Maven 3 prints "[INFO] name    [jar]", older ones indent the name
+    else if (inOrder && ((m = l.match(/^\[INFO\]\s+(\S.*?)\s+\[[\w-]+\]\s*$/)) || (m = l.match(/^\[INFO\]\s{2,}(.+?)\s*$/)))) mod(m[1].trim());
     else if (inOrder && !/^\[INFO\]\s*$/.test(l)) inOrder = false;
     if ((m = l.match(/-+< ([\w.-]+):([\w.-]+) >-+/))) current = { id: m[2] };
     if ((m = l.match(/Building (.+?)\s+\S+\s+\[(\d+)\/(\d+)\]/)) || (m = l.match(/Building (.+?) \[(\d+)\/(\d+)\]/))) {
@@ -333,14 +334,14 @@ export function mavenProgress(text, { cwd, since = 0, until = Infinity, baseline
     if (firstSeen.size > 500) firstSeen.delete(firstSeen.keys().next().value);
   }
   const failures = [
-    ...classes.flatMap((c) => c.failures.map((f) => ({ test: `${c.cls.split('.').pop()}#${f.name}`, message: f.message }))),
+    ...classes.flatMap((c) => c.failures.map((f) => ({ test: `${c.cls.split('.').pop()}#${f.name}`, id: `${c.cls}#${f.name}`, message: f.message }))),
   ];
   // the log's failing names, for failures whose report is not there (yet)
   const norm = (f) => f.replace(/:\d+$/, '').replace('#', '.').split('.').slice(-2).join('#');
   for (const f of logFailing) {
     const test = norm(f.name);
     const have = failures.find((x) => x.test === test);
-    if (!have) failures.push({ test, message: f.message });
+    if (!have) failures.push({ test, id: f.name.replace(/:\d+$/, ''), message: f.message });
     else if (!have.message && f.message) have.message = f.message;
   }
   return {
@@ -575,20 +576,56 @@ export function summarize(x) {
 }
 
 /**
- * The detailed view of a run or artifact: the kind's `view` (lines of [text, style]
- * segments), else its details. `opts`: {width, full, active}.
+ * A view's line, checked: an array of [text, style] segments; or a section heading
+ * `{section, note?, folded?}` (the board folds the lines up to the next heading); or an
+ * item `{segments, item}` (⏎ on it on the board shows the kind's `item(summary, id)`).
+ * Returned as segment arrays; a heading's has `.section` (and `.folded`), an item's `.item`.
+ */
+function viewLine(l) {
+  const segs = (a) => a.map((seg) => (Array.isArray(seg) ? [String(seg[0] ?? ''), STYLES.has(seg[1]) ? seg[1] : ''] : [String(seg), '']));
+  if (Array.isArray(l)) return segs(l);
+  if (!l || typeof l !== 'object') return null;
+  if (l.section != null) {
+    const out = [[String(l.section), 'bold'], ...(l.note != null && l.note !== '' ? [[`  ${l.note}`, 'dim']] : [])];
+    return Object.assign(out, { section: String(l.section), folded: !!l.folded });
+  }
+  if (Array.isArray(l.segments)) {
+    const out = segs(l.segments);
+    return l.item != null ? Object.assign(out, { item: String(l.item) }) : out;
+  }
+  return null;
+}
+const viewLines = (lines) => (Array.isArray(lines) ? lines.map(viewLine).filter(Boolean) : null);
+
+/**
+ * The detailed view of a run or artifact: the kind's `view` (lines, see viewLine), else
+ * its details. `opts`: {width, full, active}.
  */
 export function liveView(x, summary, opts = {}) {
   const def = registry.get(x.kind) || registry.get('log');
   if (def.view) {
     try {
-      const lines = def.view(summary, { width: 100, full: false, active: !!x.active, ...opts, helpers: HELPERS }, ctxOf(x));
-      if (Array.isArray(lines)) return lines.filter(Array.isArray).map((l) => l.map((seg) => (Array.isArray(seg) ? [String(seg[0] ?? ''), STYLES.has(seg[1]) ? seg[1] : ''] : [String(seg), ''])));
+      const lines = viewLines(def.view(summary, { width: 100, full: false, active: !!x.active, ...opts, helpers: HELPERS }, ctxOf(x)));
+      if (lines) return lines;
     } catch (e) {
       return [[[`${def.kind}: view failed: ${String(e?.message ?? e).slice(0, 80)}`, 'red']]];
     }
   }
   return summary.details.slice(0, opts.full ? 50 : 4).map((d) => [['  ' + d, summary.state === 'failed' ? 'red' : 'dim']]);
+}
+
+/** Whether a kind shows items in full (`item`: ⏎ on an item line of its view). */
+export const hasItem = (k) => !!registry.get(k)?.item;
+
+/** One item of a run's view in full (the kind's `item`), as lines; null if it has none. */
+export function liveItem(x, summary, id, opts = {}) {
+  const def = registry.get(x.kind);
+  if (!def?.item) return null;
+  try {
+    return viewLines(def.item(summary, String(id), { width: 100, ...opts, helpers: HELPERS }, ctxOf(x))) || [];
+  } catch (e) {
+    return [[[`${def.kind}: item failed: ${String(e?.message ?? e).slice(0, 80)}`, 'red']]];
+  }
 }
 
 /** The last refresh error for a run or artifact (or null). */
@@ -738,7 +775,9 @@ const MOD_GLYPH = { done: ['✓', 'green'], failed: ['✗', 'red'], building: ['
 
 /**
  * A Maven run's test progress: overall bar, modules, the class running now, finished
- * classes (`full`: all, else the latest few) and failures. `s` is summarize()'s result.
+ * classes and failures. `full: false` (the board's details): at most 8 lines, modules
+ * folded to one line when there are many; `full: true` (the live view, atf live): every
+ * module, failure and class, in sections, each failure an item (⏎: its stack trace).
  */
 export function mavenView(s, { width = 100, full = false, active = false } = {}) {
   const p = s.progress;
@@ -750,28 +789,117 @@ export function mavenView(s, { width = 100, full = false, active = false } = {})
   const ofTotal = t.total && !p.result ? `/~${t.total}` : '';
   const cls = p.classCount.total && !p.result ? `${p.classCount.done}/${p.classCount.total} classes` : `${p.classCount.done} classes`;
   L.push([[bar(frac, W) + ' ', p.result === 'failed' || t.failed ? 'red' : p.result === 'ok' ? 'green' : 'cyan'], [`${t.done}${ofTotal} tests`, 'bold'], [`  ${cls}`, 'dim'], [t.failed ? `  ${t.failed} ✗` : '', 'red'], [t.skipped ? `  ${t.skipped} skipped` : '', 'yellow'], [!t.total && !p.result && active ? '  (total known after the first run)' : '', 'dim']]);
+  if (p.running && !p.result) L.push([['  ▸ running ', 'cyan'], [p.running.cls.split('.').pop(), 'bold'], [`  ${p.running.cls.split('.').slice(0, -1).join('.')}`, 'dim'], [p.running.since ? `  ${elapsed(p.running.since)}` : '', 'dim']]);
+
   const rows = p.dirs.length ? p.dirs : p.modules.map((m) => ({ module: m.label || m.name, state: m.state, classesDone: 0, classesTotal: null, testsDone: 0, testsTotal: null, failed: 0, time: 0 }));
   const nameW = Math.min(24, Math.max(6, ...rows.map((r) => r.module.length)));
-  for (const r of rows) {
+  const modRow = (r) => {
     const [g, c] = MOD_GLYPH[r.state] || MOD_GLYPH.pending;
     const counts = r.classesTotal != null && r.state !== 'done' && r.state !== 'failed' ? `${r.testsDone}/~${r.testsTotal} tests  ${r.classesDone}/${r.classesTotal} classes` : r.testsDone || r.classesDone ? `${r.testsDone} tests  ${r.classesDone} classes` : r.testsTotal ? `~${r.testsTotal} tests` : '';
-    L.push([[`  ${g} `, c], [r.module.padEnd(nameW) + '  ', r.state === 'building' ? 'bold' : r.state === 'pending' ? 'dim' : ''], [counts, 'dim'], [r.failed ? `  ${r.failed} ✗` : '', 'red'], [r.time ? `  ${secs(r.time)}` : '', 'dim']]);
-  }
-  if (p.running && !p.result) L.push([['  ▸ running ', 'cyan'], [p.running.cls.split('.').pop(), 'bold'], [`  ${p.running.cls.split('.').slice(0, -1).join('.')}`, 'dim'], [p.running.since ? `  ${elapsed(p.running.since)}` : '', 'dim']]);
+    return [[`  ${g} `, c], [r.module.padEnd(nameW) + '  ', r.state === 'building' ? 'bold' : r.state === 'pending' ? 'dim' : ''], [counts, 'dim'], [r.failed ? `  ${r.failed} ✗` : '', 'red'], [r.time ? `  ${secs(r.time)}` : '', 'dim']];
+  };
   const finished = [...p.classes].reverse(); // newest first
-  const show = full ? finished : finished.slice(0, 4);
-  const cw = Math.min(40, Math.max(8, ...show.map((c) => c.cls.split('.').pop().length)));
-  if (show.length) {
-    if (full) L.push([], [['test classes', 'bold'], ['  newest first', 'dim']]);
-    for (const c of show)
-      L.push([[`    ${c.failed ? '✗' : '✓'} `, c.failed ? 'red' : 'green'], [c.cls.split('.').pop().padEnd(cw), c.failed ? 'red' : ''], [`  ${`${c.tests - c.failed - c.skipped}/${c.tests}`.padStart(7)}${c.skipped ? ` (${c.skipped} skipped)` : ''}`, 'dim'], [c.time ? `  ${secs(c.time)}` : '', 'dim'], [full && c.module && c.module !== '.' ? `  ${c.module}` : '', 'gray']]);
-    if (!full && finished.length > show.length) L.push([[`    … ${finished.length - show.length} more finished`, 'dim']]);
+  const cw = (list) => Math.min(40, Math.max(8, ...list.map((c) => c.cls.split('.').pop().length)));
+  const classRow = (c, w) => [[`    ${c.failed ? '✗' : '✓'} `, c.failed ? 'red' : 'green'], [c.cls.split('.').pop().padEnd(w), c.failed ? 'red' : ''], [`  ${`${c.tests - c.failed - c.skipped}/${c.tests}`.padStart(7)}${c.skipped ? ` (${c.skipped} skipped)` : ''}`, 'dim'], [c.time ? `  ${secs(c.time)}` : '', 'dim'], [full && c.module && c.module !== '.' ? `  ${c.module}` : '', 'gray']];
+  const failRow = (f, indent) => [[`${indent}✗ `, 'red'], [f.test, 'red'], [f.message ? '  ' + clip(f.message, Math.max(20, width - f.test.length - indent.length - 4)) : '', 'dim']];
+
+  if (!full) {
+    // modules: listed when few; else one line of counts, plus the one building and the one failed
+    if (rows.length <= 3) L.push(...rows.map(modRow));
+    else {
+      const n = (st) => rows.filter((r) => r.state === st).length;
+      const counts = [['done', '✓', 'green'], ['failed', '✗', 'red'], ['building', '⚙', 'cyan'], ['skipped', '–', 'gray'], ['pending', '○', 'gray']].filter(([st]) => n(st));
+      L.push([['  modules  ', 'dim'], ...counts.flatMap(([st, g, c]) => [[`${n(st)} ${g}`, c], ['  ', '']])]);
+      L.push(...[rows.find((r) => r.state === 'building'), rows.find((r) => r.state === 'failed')].filter(Boolean).map(modRow));
+    }
+    if (p.failures.length) {
+      L.push(...p.failures.slice(0, 2).map((f) => failRow(f, '  ')));
+      if (p.failures.length > 2) L.push([[`    … ${p.failures.length - 2} more failures`, 'dim']]);
+    } else if (finished.length) {
+      const show = finished.slice(0, 2);
+      L.push(...show.map((c) => classRow(c, cw(show))));
+      if (finished.length > 2) L.push([[`    … ${finished.length - 2} more finished`, 'dim']]);
+    }
+    return L;
   }
+
+  // full: in sections (the board folds them); failures first, they are what to act on
+  const done = rows.filter((r) => r.state === 'done').length;
+  L.push({ section: 'modules', note: `${done}/${rows.length} done` }, ...rows.map(modRow));
   if (p.failures.length) {
-    L.push([[`  failures`, 'bold red']]);
-    for (const f of p.failures.slice(0, full ? 50 : 4)) L.push([['    ✗ ', 'red'], [f.test, 'red'], [f.message ? '  ' + clip(f.message, Math.max(20, width - f.test.length - 10)) : '', 'dim']]);
+    L.push({ section: 'failures', note: `${p.failures.length} · ⏎ on one: its stack trace` });
+    for (const f of p.failures) L.push({ segments: failRow(f, '  '), item: f.id || f.test });
+  } else if (p.result === 'failed' && p.errors.length) L.push({ section: 'errors' }, ...p.errors.map((e) => [['  ' + clip(e, width - 2), 'red']]));
+  if (finished.length) {
+    const w = cw(finished);
+    L.push({ section: 'test classes', note: `${finished.length} · newest first` }, ...finished.map((c) => classRow(c, w)));
   }
   return L;
+}
+
+/**
+ * One failed test in full (the maven kind's `item`): the report's failure message and
+ * stack trace (surefire/failsafe XML of this run), else what the build log printed for it.
+ * `id`: "com.acme.FooTest#bar" (or "FooTest#bar", "com.acme.FooTest.bar").
+ */
+export function mavenFailure(id, ctx = {}, { width = 100 } = {}) {
+  const raw = String(id);
+  const [clsPart, name] = raw.includes('#') ? raw.split('#') : [raw.slice(0, raw.lastIndexOf('.')), raw.slice(raw.lastIndexOf('.') + 1)];
+  const short = clsPart.split('.').pop();
+  let found = null;
+  if (ctx.cwd)
+    for (const { dir } of reportDirs(ctx.cwd)) {
+      let files = [];
+      try {
+        files = fs.readdirSync(dir).filter((f) => f.endsWith('.xml') && (f === `TEST-${clsPart}.xml` || f.endsWith(`.${short}.xml`) || f === `TEST-${short}.xml`));
+      } catch {
+        continue;
+      }
+      for (const f of files) {
+        try {
+          const file = path.join(dir, f);
+          const mtime = fs.statSync(file).mtimeMs;
+          if (mtime < (ctx.since || 0) || mtime > (ctx.until ?? Infinity)) continue;
+          const x = fs.readFileSync(file, 'utf8');
+          for (const m of x.matchAll(/<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g)) {
+            if (xmlAttr(m[1], 'name') !== name || !m[3]) continue;
+            const fm = m[3].match(/<(failure|error)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/\1>)/);
+            if (!fm) continue;
+            const body = unXml((fm[3] || '').replace(/^\s*<!\[CDATA\[|\]\]>\s*$/g, ''));
+            found = { file, kind: fm[1], type: unXml(xmlAttr(fm[2], 'type') || ''), message: unXml(xmlAttr(fm[2], 'message') || ''), stack: body, time: xmlAttr(m[1], 'time') };
+            break;
+          }
+        } catch {}
+        if (found) break;
+      }
+      if (found) break;
+    }
+  const wrapTo = (text, w) => String(text).split('\n').flatMap((l) => (l.length <= w ? [l] : l.match(new RegExp(`.{1,${w}}`, 'g'))));
+  const L = [[[`${short}#${name}`, 'bold red'], [found?.time ? `  ${secs(+found.time)}` : '', 'dim']]];
+  // a frame of the test framework or the JDK: dim; the project's own frames stand out
+  const lib = /^\s*at (java\.|javax\.|jdk\.|sun\.|org\.junit|junit\.|org\.apache\.maven|org\.testng|org\.opentest4j|org\.assertj|org\.hamcrest|org\.mockito|org\.springframework\.test)/;
+  const stackLines = (lines) => lines.flatMap((l) => wrapTo(l.replace(/\t/g, '    '), width - 4).map((w) => [['  ' + w, /^\s*at /.test(l) ? (lib.test(l) ? 'gray' : '') : /^\s*(Caused by|\.\.\. \d+ more)/.test(l) ? 'yellow' : 'red']]));
+  if (found) {
+    L.push([[`  ${found.kind}${found.type ? ' · ' + found.type : ''}`, 'dim']], []);
+    const msgInStack = found.message && found.stack.includes(found.message.split('\n')[0]);
+    if (found.message && !msgInStack) L.push(...wrapTo(found.message, width - 4).map((l) => [['  ' + l, 'red']]), []);
+    if (found.stack.trim()) L.push(...stackLines(found.stack.trimEnd().split('\n')));
+    L.push([], [[`  ${ctx.cwd ? path.relative(ctx.cwd, found.file) : found.file}`, 'gray']]);
+    return L;
+  }
+  // no report (not written yet, or another run's): what the log says about the test
+  const text = ctx.file ? stripAnsi(readTail(ctx.file, 1 << 20) || '') : '';
+  const lines = text.split('\n');
+  const about = (l) => /^\[ERROR\]/.test(l) && (l.includes(`${short}.${name}`) || l.includes(`${short}#${name}`)) && !/Tests run:/.test(l);
+  // the block surefire prints with the stack trace ("<<< FAILURE!"), else the Results line
+  const at = [lines.findIndex((l) => about(l) && /<<< (FAILURE|ERROR)!/.test(l)), lines.findIndex(about)].find((i) => i >= 0) ?? -1;
+  if (at < 0) return [...L, [], [['  no report and nothing in the output for this test (yet)', 'dim']]];
+  const out = [lines[at].replace(/^\[ERROR\]\s*/, '')];
+  for (let i = at + 1; i < lines.length && out.length < 200; i++) {
+    if (/^\[(INFO|ERROR|WARNING)\]/.test(lines[i]) || !lines[i].trim()) break;
+    out.push(lines[i]);
+  }
+  return [...L, [['  from the build output (no report for it)', 'dim']], [], ...stackLines(out)];
 }
 
 // ---------------------------------------------------------------- kinds and plugins
@@ -812,6 +940,7 @@ const BUILTIN = [
     match: (cmd, { unquoted }) => /(^|[\s;&|(/])(mvn|mvnw|mvnd)(\s|$)/.test(unquoted),
     summarize: summarizeMaven,
     view: (s, opts) => mavenView(s, opts),
+    item: (s, id, opts, ctx) => mavenFailure(id, ctx, opts),
     tailBytes: 1 << 20,
     stale: 3000, // reads report directories too
     // the previous run's test classes are this run's expected total (before a `clean`)
@@ -854,7 +983,7 @@ export function checkKind(def) {
   if (!def || typeof def !== 'object') return 'not an object';
   if (!KIND_RE.test(def.kind ?? '')) return `kind must match ${KIND_RE} (got ${JSON.stringify(def.kind)})`;
   if (typeof def.summarize !== 'function') return `${def.kind}: summarize(text, ctx) is required`;
-  for (const f of ['match', 'view', 'refresh', 'open', 'onStart', 'onEnd']) if (def[f] != null && typeof def[f] !== 'function') return `${def.kind}: ${f} must be a function`;
+  for (const f of ['match', 'view', 'item', 'refresh', 'open', 'onStart', 'onEnd']) if (def[f] != null && typeof def[f] !== 'function') return `${def.kind}: ${f} must be a function`;
   if (def.record != null && !KIND_RE.test(def.record)) return `${def.kind}: record must be a kind name`;
   return null;
 }
@@ -920,7 +1049,7 @@ export function loadLiveKinds({ files = [] } = {}) {
 /** The registered kinds (for `atf live-kinds`) and plugin load errors. */
 export function liveKinds() {
   return {
-    kinds: [...registry.values()].map((d) => ({ kind: d.kind, source: d.source, replaces: d.replaces, description: d.description ?? '', waiting: !!d.waiting, record: d.record ?? null, priority: d.priority ?? 0, has: ['match', 'summarize', 'view', 'refresh', 'open', 'onStart', 'onEnd'].filter((f) => typeof d[f] === 'function') })),
+    kinds: [...registry.values()].map((d) => ({ kind: d.kind, source: d.source, replaces: d.replaces, description: d.description ?? '', waiting: !!d.waiting, record: d.record ?? null, priority: d.priority ?? 0, has: ['match', 'summarize', 'view', 'item', 'refresh', 'open', 'onStart', 'onEnd'].filter((f) => typeof d[f] === 'function') })),
     errors: [...loadErrors],
   };
 }

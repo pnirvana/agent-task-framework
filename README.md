@@ -230,7 +230,8 @@ agents started by `spawn`, and Copilot sessions with the ATF extension, also the
 coordinator's background subagents.
 The board shows what an agent runs right now (`⚙ 2/5 core · 40 tests`), what it waits for
 (`⧖ pipeline #555 running`), and the result of each build, test run and pipeline watch
-(exit code, summary, failing tests, the full output: `L` opens it). Agents can register
+(exit code, summary, failing tests; `L` opens a live view of it in the board: the full
+view with foldable sections, a failed test's stack trace on ⏎, the raw output on `t`). Agents can register
 files the hook cannot see: `atf artifact T3 server.log --live`. Plugins add kinds of
 commands (e.g. your CI's pipeline jobs): one `.mjs` file in `~/.config/atf/live/`, see
 [docs/live-plugins.md](docs/live-plugins.md); `atf live-kinds` lists what is loaded.

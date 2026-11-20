@@ -831,19 +831,19 @@ output. Readers that do not know a kind show it as any other artifact.
 
 A **live kind** recognizes commands (`match`), summarizes their output (`summarize` →
 `{state: running|waiting|ok|failed|unknown|gone, line, counts, details}`), and may show a
-detailed view (`view`), fetch data from elsewhere (`refresh`, e.g. a CI API), choose what
-`L` opens (`open`), and act when a matching command starts or ends in the agent's harness
+detailed view (`view`, in sections, with items shown in full by `item`), fetch data from
+elsewhere (`refresh`, e.g. a CI API), choose what opens outside the board (`open`), and act when a matching command starts or ends in the agent's harness
 (`onStart`, `onEnd`). The built-in kinds:
 - `maven`: reactor modules and their state, test classes done from the surefire/failsafe
   reports (the class running now from the log), progress against the previous run of the
   same directory (its reports, taken when a run starts: `onStart`; kept in
   `<plan>/live/baselines/` so a `mvn clean` loses nothing), BUILD SUCCESS/FAILURE, failing
-  tests with their message. The pom decides what runs (includes, groups, `-Dtest`), so
+  tests with their message (`item`: the failure's stack trace). The pom decides what runs (includes, groups, `-Dtest`), so
   sources are never counted: without a previous run there is no total;
 - `tests`: totals from jest/vitest, pytest, TAP (`node --test`), unittest, go/cargo;
   details: failing tests;
 - `pipeline`: pipeline id and URL (GitLab `/-/pipelines/N`, GitHub `actions/runs/N`) and
-  the latest status word; `L` opens the URL;
+  the latest status word; `open` is the URL;
 - `wait` (polling loops) and `build` (other build tools): shown like a log, recorded as `log`;
 - `log` (and any other text file): error/warning counts and the last line.
 
@@ -856,8 +856,11 @@ Every frontend shows the same: `atf show` / `atf brief` ("live:"), the pi peek, 
 `/peek`, `atf live <task> [--watch]` (the full view), and the herdr board: a badge on task
 rows (`⚙ 2/3 api · 74/~99 tests` while a build runs, `⧖ pipeline #4712 running` while the
 agent waits, `✗ BUILD FAILURE …`), a "live" section in the task details and the
-Overview's context panel, and `L` to open it (the kind's `open`, else `atf live --watch`
-for kinds with a view, else the output followed in a herdr tab or a finished one in `less`).
+Overview's context panel (the compact view, at most about 8 lines), and `L`: the live view
+in the board (the full view updated while it runs, sections folded, ⏎ on an item shows it
+in full, `t` the raw output), where `o` opens it outside (the kind's `open`, else `atf live
+--watch` for kinds with a view, else the output followed in a herdr tab or a finished one
+in `less`).
 
 ### 14.6 Plugins
 
