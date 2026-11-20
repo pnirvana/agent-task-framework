@@ -65,14 +65,19 @@ export function fit(segs, width, fill = false) {
   return out;
 }
 const wrap = (text, width) => {
+  width = Math.max(8, width);
   const lines = [];
   for (const para of String(text).split('\n')) {
     let line = '';
-    for (const word of para.split(/\s+/)) {
-      if ((line + ' ' + word).trim().length > width) {
-        if (line) lines.push(line);
-        line = word.length > width ? word.slice(0, width) : word;
-      } else line = (line + ' ' + word).trim();
+    for (let word of para.split(/\s+/)) {
+      if ((line + ' ' + word).trim().length <= width) {
+        line = (line + ' ' + word).trim();
+        continue;
+      }
+      if (line) lines.push(line);
+      // a word longer than the line (a path, a URL): split it, nothing is lost
+      while (word.length > width) lines.push(word.slice(0, width)), (word = word.slice(width));
+      line = word;
     }
     lines.push(line);
   }
@@ -608,16 +613,18 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     }
     if (t.notes.length) {
       L.push([], [['notes', 'bold']]);
-      for (const n of t.notes.slice(-6))
-        for (const [i, l] of wrap(`${n.kind !== 'info' ? `[${n.kind}] ` : ''}${n.message}`, W - 12).entries())
-          L.push([[i ? ' '.repeat(10) : `  ${(n.actor || '').slice(0, 7).padEnd(8)}`, 'cyan'], [l, n.kind === 'question' || n.kind === 'warning' ? 'yellow' : '']]);
+      for (const n of t.notes.slice(-6)) {
+        L.push([[`  ${n.actor || ''}`, 'cyan'], [`  ${n.kind !== 'info' ? n.kind + ' · ' : ''}${ago(n.ts)} ago`, 'dim']]);
+        for (const l of wrap(n.message, W - 5)) L.push([['    ' + l, n.kind === 'question' || n.kind === 'warning' ? 'yellow' : '']]);
+      }
     }
     const hist = t.history.slice(-8);
     if (hist.length) {
       L.push([], [['activity', 'bold']]);
       for (const h of hist) {
         const what = h.type === 'status' ? `${h.from} → ${h.to}` : h.type === 'assigned' ? `assigned ${h.assignee ?? '-'}` : `progress${h.percent != null ? ' ' + h.percent + '%' : ''}`;
-        L.push([[`  ${ago(h.ts).padStart(4)} `, 'dim'], [(h.actor || '') + ' ', 'cyan'], [what, ''], [h.message ? ' — ' + h.message : '', 'dim']]);
+        L.push([[`  ${ago(h.ts).padStart(4)} `, 'dim'], [(h.actor || '') + ' ', 'cyan'], [what, '']]);
+        if (h.message) for (const l of wrap(h.message, W - 10)) L.push([['        ' + l, 'dim']]);
       }
     }
     return L;
@@ -1253,6 +1260,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const para = (text, style = '', max = 6, ind = ' ') => {
       const ls = wrap(String(text), W - ind.length - 1);
       ls.slice(0, max).forEach((l, i) => L.push([[ind + (i === max - 1 && ls.length > max ? l.replace(/\s*\S*$/, ' …') : l), style]]));
+      if (ls.length > max) L.push([[`${ind}(${ls.length - max + 1} more lines: ⏎ details)`, 'dim']]);
     };
     const label = (txt, extra = '') => L.push([[` ${txt}`, 'bold'], [extra ? '  ' + extra : '', 'dim']]);
     if (r.type === 'need' && (r.kind === 'coordinator' || r.kind === 'prompt')) {
@@ -1342,7 +1350,10 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (trail.length && !(t.status === 'blocked' || t.status === 'review' || t.status === 'failed') ) {
       L.push([]);
       label('latest');
-      for (const h of trail) L.push([[`   ${ago(h.ts).padStart(3)} `, 'dim'], [clip(h.message.replace(/\s+/g, ' '), W - 9).trimEnd(), h === trail[trail.length - 1] ? '' : 'dim']]);
+      for (const h of trail)
+        wrap(h.message.replace(/\s+/g, ' '), W - 9)
+          .slice(0, 3)
+          .forEach((l, i) => L.push([[i ? '        ' : `   ${ago(h.ts).padStart(3)} `, 'dim'], [l, h === trail[trail.length - 1] ? '' : 'dim']]));
     }
     L.push(...liveDetail(st, t, W, { recorded: 2, tail: 2 }));
     if (t.checkpoint && !TERMINAL.has(t.status)) {
@@ -1353,7 +1364,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (t.status === 'review' && t.acceptance.length) {
       L.push([]);
       label('acceptance');
-      for (const ac of t.acceptance) L.push([['   □ ', 'dim'], [clip(ac, W - 6).trimEnd(), '']]);
+      for (const ac of t.acceptance) wrap(ac, W - 6).forEach((l, i) => L.push([[i ? '     ' : '   □ ', 'dim'], [l, '']]));
     }
     const arts = reviewArtifacts(r);
     if (arts.length) {
@@ -1365,7 +1376,10 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (others.length) {
       L.push([]);
       label('notes from others');
-      for (const n of others) L.push([[`   ${(n.actor ?? '').slice(0, 11).padEnd(12)}`, 'cyan'], [clip(n.message.replace(/\s+/g, ' '), W - 16).trimEnd(), '']]);
+      for (const n of others) {
+        L.push([[`   ${n.actor ?? ''}`, 'cyan'], [`  ${n.kind !== 'info' ? n.kind + ' · ' : ''}${ago(n.ts)} ago`, 'dim']]);
+        para(n.message, n.kind === 'question' || n.kind === 'warning' ? 'yellow' : '', 10, '     ');
+      }
     }
     if (t.description) {
       L.push([]);

@@ -1961,3 +1961,26 @@ n = 2
   fs.writeFileSync(path.join(dir, '.atf', 'config.json'), JSON.stringify({ protocol: 1, changes: 'artifacts' }));
   assert.equal(readConfig(path.join(dir, '.atf')).changes, 'artifacts');
 });
+
+test('board: notes wrap to the pane width, long words included, nothing cut off', () => {
+  const { dir, env, run } = sandbox(); // coordinator "lead"
+  run(['add', 'Cart API', '--assign', 'be']);
+  run(['start', 'T1'], { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' });
+  const long = 'Please keep the session handling: /very/long/path/to/src/services/checkout/session-handling-implementation.ts depends on it. Also cover the empty cart case.';
+  run(['note', 'T1', long]);
+  const frames = JSON.parse(
+    execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '60', '50', JSON.stringify(['\x1b[B', '\r'])], {
+      cwd: dir,
+      env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
+    }).toString(),
+  );
+  const text = (f) => f.split('\n').map((l) => l.trim()).join(' ').replace(/\s+/g, ' ');
+  for (const f of [frames[1], frames[2]]) {
+    // the overview's "notes from others", then the task details
+    assert.ok(f.split('\n').every((l) => [...l].length <= 60), 'no line wider than the pane');
+    assert.match(text(f), /Please keep the session handling:/);
+    assert.match(text(f), /Also cover the empty cart case\./, 'the end of the note is there');
+    assert.match(f.replace(/\n\s*/g, ''), /session-handling-implementation\.ts/, 'a long path is split, not cut');
+  }
+  assert.match(frames[1], /notes from others\n\s+lead\s+\d+s ago/);
+});
