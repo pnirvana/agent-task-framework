@@ -180,6 +180,9 @@ Rows always know their project and plan, so `g`, `a`, `x`, `r`, `o`, `s` and ⏎
 | `v` | Tasks: task tree ↔ grouped by agent |
 | `⏎` / `Esc` / `A` | narrow scope to the selected plan / widen / all projects |
 | `↑↓` / `jk`, PgUp/PgDn | select / scroll |
+| `ctrl+d` / `ctrl+u`, `ctrl+f` / `ctrl+b` | half a page / a page down and up |
+| `G` / `gg` (End / Home) | to the end / the top (a single `g` still goes to the agent, after 0.3 s) |
+| `/` | search the view (Tasks, Changes, plan, task details, help): matches are highlighted, a list selects the matching row, a long view scrolls to it; case-insensitive unless the query has a capital. While a search is on, `n` / `N` go to the next / previous match and `esc` ends it (the Log keeps its own `/` filter) |
 | `←→` / `hl`, `space` | collapse / expand subtrees (`←` on a leaf jumps to its parent) |
 | `⏎` | full task details (scrollable) |
 | `g` | focus the owning agent's pane (closes the popup) |

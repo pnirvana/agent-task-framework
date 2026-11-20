@@ -1984,3 +1984,68 @@ test('board: notes wrap to the pane width, long words included, nothing cut off'
   }
   assert.match(frames[1], /notes from others\n\s+lead\s+\d+s ago/);
 });
+
+test('board: Neovim-style scrolling in long views (G, gg, ctrl+d / ctrl+u)', () => {
+  const { dir, env, run } = sandbox();
+  run(['add', 'Cart API', '--assign', 'be']);
+  run(['start', 'T1'], { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' });
+  for (let i = 1; i <= 6; i++) run(['note', 'T1', `note ${i}: ${'a long remark that wraps over several lines of the narrow board '.repeat(2)}`]);
+  // the Overview, T1, ⏏ details; then G, gg, ctrl+d, ctrl+u
+  const frames = JSON.parse(
+    execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '60', '22', JSON.stringify(['\x1b[B', '\r', 'G', 'g', 'g', '\x04', '\x15'])], {
+      cwd: dir,
+      env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
+    }).toString(),
+  );
+  const [, , top, end, , gg, half, back] = frames.map((f) => f.replace(/\d+s ago/g, 'Ns ago'));
+  assert.match(top, /T1 ◐ in_progress {2}Cart API/);
+  assert.doesNotMatch(top, /activity/, 'the details are longer than the pane');
+  assert.match(end, /activity\n.*todo → in_progress/, 'G: the end');
+  assert.doesNotMatch(end, /T1 ◐ in_progress/);
+  assert.equal(gg, top, 'gg: back to the top');
+  assert.notEqual(half, top, 'ctrl+d: down');
+  assert.doesNotMatch(half, /todo → in_progress/, 'half a page, not to the end');
+  assert.equal(back, top, 'ctrl+u: up again');
+});
+
+test('board: / searches the view; n / N between matches, esc ends it', () => {
+  const { dir, env, run } = sandbox();
+  run(['add', 'Alpha']);
+  run(['add', 'Beta', '--assign', 'be']);
+  run(['add', 'Gamma']);
+  run(['start', 'T2'], { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' });
+  for (let i = 1; i <= 6; i++) run(['note', 'T2', `note ${i}: ${'a remark long enough to wrap over the narrow board '.repeat(2)}`]);
+  const render = (keys) =>
+    JSON.parse(
+      execFileSync('node', [path.join(path.dirname(ATF), '..', 'test', 'render-board.mjs'), '60', '22', JSON.stringify(keys)], {
+        cwd: dir,
+        env: { ...env, HERDR_ENV: '0', HERDR_PLUGIN_ID: '' },
+      }).toString(),
+    ).map((f) => f.replace(/\d+[smh] ago/g, 'N ago'));
+  // Tasks: the match's row is selected (⏎ then opens it); smartcase: "Gam" is case-sensitive
+  let f = render(['1', '/', 'G', 'a', 'm', '\r', '\r']);
+  assert.match(f.at(-2), /\/Gam {2}1\/1 {3}n \/ N next \/ previous {3}esc end search/);
+  assert.match(f.at(-1), /T3 ○ todo {2}Gamma/);
+  // the task details: scrolled to the match; n wraps around; esc ends the search, not the view
+  f = render(['1', '/', 'B', 'e', 't', 'a', '\r', '\r', '/', 'n', 'o', 't', 'e', ' ', '6', '\r', 'n', '\x1b', '\x1b']);
+  const [found, again, ended, back] = f.slice(-4);
+  assert.match(found, /note 6: a remark/);
+  assert.doesNotMatch(found, /T2 ◐ in_progress/, 'scrolled down to it');
+  assert.match(found, /\/note 6 {2}1\/1/);
+  assert.equal(again, found, 'n: the only match again');
+  assert.doesNotMatch(ended, /\/note 6/);
+  assert.match(ended, /note 6: a remark/, 'esc ends the search where it is');
+  assert.doesNotMatch(back, /note 6: a remark/, 'a second esc leaves the details');
+  // text only in the selected task's preview (below the rows): ⏎ opens its details at the match
+  // (at plan scope, where Tasks shows the selected task's preview: ⏎ on the plan first)
+  const toBeta = ['\r', '1', '/', 'B', 'e', 't', 'a', '\r', '\x1b'];
+  f = render([...toBeta, '/', 'r', 'e', 'm', 'a', 'r', 'k']);
+  assert.match(f.at(-1), /no row matches; 12 in T2's details: ⏎ opens them/);
+  f = render([...toBeta, '/', 'r', 'e', 'm', 'a', 'r', 'k', '\r', 'n']);
+  assert.match(f.at(-2), /\/remark {2}1\/12/, 'in the details now');
+  assert.match(f.at(-1), /\/remark {2}2\/12/, 'n: on to the next match there');
+  // two matches on one line are two matches: n / N step between them
+  run(['note', 'T3', 'foo and foo again']);
+  f = render(['\r', '1', '/', 'G', 'a', 'm', '\r', '\x1b', '\r', '/', 'f', 'o', 'o', '\r', 'n', 'n', 'N']);
+  assert.deepEqual(f.slice(-4).map((x) => x.match(/\/foo {2}(\d+\/\d+)/)?.[1]), ['1/2', '2/2', '1/2', '2/2']);
+});

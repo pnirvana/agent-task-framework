@@ -16,7 +16,7 @@ import { liveAgent as liveAgentOf, agentFor as agentForOf, coordinatorOf as coor
 const ATF_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../bin/atf.mjs');
 
 const ESC = '\x1b[';
-const STYLE = { reset: 0, bold: 1, dim: 2, inverse: 7, selected: '44;97', red: 31, green: 32, yellow: 33, blue: 34, magenta: 35, cyan: 36, gray: 90 };
+const STYLE = { reset: 0, bold: 1, dim: 2, inverse: 7, selected: '44;97', match: '22;30;43', matchcur: '22;30;46', red: 31, green: 32, yellow: 33, blue: 34, magenta: 35, cyan: 36, gray: 90 };
 const sty = (names) => (names ? names.split(' ').map((n) => `${ESC}${STYLE[n]}m`).join('') : '');
 const STATUS = {
   todo: ['○', 'gray'],
@@ -127,6 +127,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     tab: 'overview',
     overlay: null, // detail | help
     sel: { overview: 0, tasks: 0, plan: 0, changes: 0 },
+    search: null, // {key (view), q, line, index}: / in a view
+    drawn: {}, // view -> {texts, top, h, list}: what it drew last (for the search)
     changes: new Map(), // plan key -> {seq, at, data, pending}: changesets (§15)
     scrolls: {},
     open: new Map(), // plan key -> expanded? (multi-plan Tasks view)
@@ -1451,6 +1453,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       T('                ↑↓ or ctrl+j/ctrl+k select, ⏎ goes to the plan;'),
       T('                in the Log it filters the log to the picked plan (or all plans)'),
       K('Tab / 0-4', 'switch view: 0 Overview · 1 Tasks · 2 Plan · 3 Log · 4 Changes'),
+      K('ctrl+d / ctrl+u', 'half a page down / up; ctrl+f / ctrl+b (PgDn / PgUp) a page'),
+      K('G / gg', 'to the end / the top (also End / Home), in lists and in long views'),
+      K('/', 'search the view (Tasks, Changes, plan, task details, help): matches light up,'),
+      T('                lists select the row, long views scroll to it; smartcase. While a search is'),
+      T('                on: n / N next / previous match, esc ends it (then n, N reply / note again)'),
       K('f', 'show / hide closed plans (all views)'),
       K('?  q  ctrl+c', 'this help · close details or quit · quit'),
       [],
@@ -1630,6 +1637,10 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       ];
     }
     if (ui.flash && ui.flash.until > Date.now()) return [[[' ' + ui.flash.msg, ui.flash.style]]];
+    if (ui.search?.q && ui.search.key === searchKey()) {
+      const n = searchMatches(ui.search).length;
+      return [[[` /${ui.search.q}`, 'bold'], [n ? `  ${ui.search.line != null ? (ui.search.index ?? 1) : '-'}/${n}` : '  no match', n ? '' : 'red'], ['   n / N next / previous   esc end search', 'dim']]];
+    }
     const esc = ui.scope.level === 'all' ? 'esc quit' : 'esc widen';
     const keys = {
       overview: overviewKeys(ui.rows.overview[ui.sel.overview]),
@@ -1637,7 +1648,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       plan: multi() ? `↑↓ select  ←→ fold  ⏎ open plan  o docs  r note  N plan note  s/S coordinator  g jump  c close  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}` : `↑↓ scroll  o docs  r / N note  s/S coordinator  ${esc}  ? help`,
       changes: `↑↓ move  ←→ fold  z fold all  ⏎/d diff of the row (file, task, package, plan)  D plan diff  g agent  ${multi() ? `f ${ui.showClosed ? 'hide' : 'show'} closed  ` : ''}${esc}  ? help`,
       log: `↑↓ scroll  / search  N plan note  ${multi() ? 'p plan  ' : ''}${ui.log.plan || ui.log.query ? 'esc clear filter  ' : esc + '  '}tab views  ? help`,
-      detail: '↑↓ scroll  ⏎/esc back  a approve  x changes  r message  N plan note  o open  d diff  L live  g agent  s/S coordinator',
+      detail: '↑↓ ^d/^u G/gg scroll  ⏎/esc back  a approve  x changes  r message  N plan note  o open  d diff  L live  g agent  s/S coordinator',
       help: '↑↓ scroll  any other key: back',
     }[view()];
     return [[[' ' + keys, 'dim']]];
@@ -1657,7 +1668,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   function scrolled(lines, all, key, bodyH) {
     const max = Math.max(0, all.length - bodyH);
     ui.scrolls[key] = Math.max(0, Math.min(ui.scrolls[key] ?? 0, max));
-    lines.push(...all.slice(ui.scrolls[key], ui.scrolls[key] + bodyH));
+    ui.drawn[key] = { texts: all.map(lineText), top: ui.scrolls[key], h: bodyH, list: false };
+    lines.push(...all.slice(ui.scrolls[key], ui.scrolls[key] + bodyH).map((l, i) => highlight(l, key, ui.scrolls[key] + i)));
   }
 
   /** Keep a selected line visible in a list view. */
@@ -1666,7 +1678,141 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (selLine < sc + 1) sc = Math.max(0, selLine - 1);
     if (selLine >= sc + bodyH - 1) sc = selLine - bodyH + 2;
     ui.scrolls[key] = sc;
-    lines.push(...all.slice(sc, sc + bodyH));
+    ui.drawn[key] = { texts: all.map(lineText), top: sc, h: bodyH, list: true };
+    lines.push(...all.slice(sc, sc + bodyH).map((l, i) => highlight(l, key, sc + i)));
+  }
+
+  // ---------- search (/ in a view; n / N; esc ends it) ----------
+  // Views whose lines can be searched: long views scroll to a match, lists select its row
+  // (their lines are their rows). The Log has its own / (a filter).
+  const SEARCHABLE = new Set(['detail', 'plan', 'help', 'tasks', 'changes']);
+  const searchKey = (v = view()) => (v === 'plan' && multi() ? null : SEARCHABLE.has(v) ? v : null);
+  const lineText = (l) => (l || []).map((seg) => seg[0] ?? '').join('');
+  function searchRe(q) {
+    if (!q) return null;
+    // smartcase: case-insensitive unless the query has a capital letter
+    return new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), /[A-Z]/.test(q) ? 'g' : 'gi');
+  }
+  /** Where the query occurs in one line's text: [[start, end], …]. */
+  function occurrences(text, q) {
+    const re = searchRe(q);
+    if (!re) return [];
+    return [...String(text).matchAll(re)].filter((m) => m[0].length).map((m) => [m.index, m.index + m[0].length]);
+  }
+  /**
+   * A line with every match marked, the current one in another colour. Matching runs on
+   * the whole line's text, so a match may span segments of different styles.
+   */
+  function highlight(l, key, idx) {
+    const sr = ui.search;
+    if (!sr?.q || sr.key !== key) return l;
+    const occ = occurrences(lineText(l), sr.q);
+    if (!occ.length) return l;
+    const styleAt = (start) => (idx === sr.line && start === sr.start ? 'matchcur' : 'match');
+    const out = [];
+    let pos = 0;
+    for (const [rawText, st] of l) {
+      const text = String(rawText ?? '');
+      let cut = 0;
+      while (cut < text.length) {
+        const abs = pos + cut;
+        const hit = occ.find(([a, b]) => abs >= a && abs < b);
+        if (hit) {
+          const end = Math.min(text.length, hit[1] - pos);
+          out.push([text.slice(cut, end), styleAt(hit[0])]);
+          cut = end;
+        } else {
+          const next = occ.find(([a]) => a > abs);
+          const end = next ? Math.min(text.length, next[0] - pos) : text.length;
+          out.push([text.slice(cut, end), st]);
+          cut = end;
+        }
+      }
+      pos += text.length;
+    }
+    return out;
+  }
+  /** Every match in the view, in order: [{line, start}], from what it drew last. */
+  function searchMatches(sr) {
+    const d = ui.drawn[sr.key];
+    if (!d || !sr.q) return [];
+    return d.texts.flatMap((t, line) => occurrences(t, sr.q).map(([start]) => ({ line, start })));
+  }
+  /** Go to the next (dir 1) / previous (-1) match; dir 0: the first at or after where we are. */
+  function searchGo(dir) {
+    const sr = ui.search;
+    const d = ui.drawn[sr?.key];
+    if (!sr?.q || !d) return;
+    const ms = searchMatches(sr);
+    sr.count = ms.length;
+    if (!ms.length) return void ((sr.line = null), (sr.start = null), (sr.index = 0));
+    // where we are: the current match, else the selected row / the top of the view
+    const from = sr.line != null ? { line: sr.line, start: sr.start } : { line: d.list ? (ui.sel[sr.key] ?? 0) : d.top, start: -1 };
+    const cmp = (m) => m.line - from.line || m.start - from.start;
+    let i;
+    if (dir > 0) i = ms.findIndex((m) => cmp(m) > 0);
+    else if (dir < 0) i = ms.findLastIndex((m) => cmp(m) < 0);
+    else i = ms.findIndex((m) => cmp(m) >= 0);
+    if (i < 0) i = dir < 0 ? ms.length - 1 : 0; // wrap around
+    sr.line = ms[i].line;
+    sr.start = ms[i].start;
+    sr.index = i + 1;
+    if (d.list) ui.sel[sr.key] = sr.line;
+    else if (sr.line < d.top || sr.line >= d.top + d.h) ui.scrolls[sr.key] = Math.max(0, sr.line - Math.floor(d.h / 3));
+  }
+  /** Matches in the Tasks view's preview of the selected task (its details). */
+  function previewMatches(q) {
+    const p = ui.drawn.preview;
+    if (!p || !q) return 0;
+    return p.texts.reduce((n, t) => n + occurrences(t, q).length, 0);
+  }
+  /** What the search finds, for the field's hint. */
+  function searchHint(key, q) {
+    if (!q) return 'type to search · ⏎ keep · esc cancel';
+    const n = searchMatches({ key, q }).length;
+    const inPreview = key === 'tasks' && !n ? previewMatches(q) : 0;
+    if (inPreview) return `no row matches; ${inPreview} in ${ui.drawn.preview.task}'s details: ⏎ opens them at the first`;
+    return `${n ? `${n} match${n === 1 ? '' : 'es'}` : 'no match'} · ⏎ keep (n / N next / previous, esc ends) · esc cancel`;
+  }
+  /** Open the selected task's details with the search in them (from the Tasks preview). */
+  function searchIntoDetails(q) {
+    const p = ui.drawn.preview;
+    ui.overlay = 'detail';
+    ui.scrolls.detail = 0;
+    ui.drawn.detail = { texts: p.texts, top: 0, h: Math.max(1, (out.rows || 24) - 8), list: false };
+    ui.search = { key: 'detail', q, line: null, start: null };
+    searchGo(0);
+  }
+  function startSearch() {
+    const key = searchKey();
+    if (!key) return flash('search (/) works in Tasks, Changes, the plan, task details and help; the Log filters with /', 'dim');
+    const before = ui.search;
+    const at = { sel: ui.sel[key], scroll: ui.scrolls[key] };
+    ui.input = {
+      label: '/',
+      value: before?.key === key ? before.q : '',
+      hint: searchHint(key, before?.key === key ? before.q : ''),
+      onChange: (q) => {
+        // from where the search started, to the first match
+        ui.sel[key] = at.sel;
+        ui.scrolls[key] = at.scroll;
+        ui.search = { key, q, line: null, start: null };
+        searchGo(0);
+        if (ui.input) ui.input.hint = searchHint(key, q);
+      },
+      onSubmit: (q) => {
+        if (!q.trim()) return void (ui.search = null);
+        if (key === 'tasks' && !searchMatches({ key, q }).length && previewMatches(q)) return searchIntoDetails(q);
+        ui.search = { ...(ui.search?.key === key ? ui.search : { key, line: null, start: null }), q };
+        if (ui.search.line == null) searchGo(0);
+      },
+      onCancel: () => {
+        ui.search = before;
+        ui.sel[key] = at.sel;
+        ui.scrolls[key] = at.scroll;
+      },
+    };
+    draw();
   }
 
   function draw() {
@@ -1725,9 +1871,13 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
           room -= att.length;
         }
         const r = rows[ui.sel.tasks];
+        ui.drawn.preview = null;
         if (room > 3 && r?.type === 'task') {
+          const det = detailLines(r.st, r.task, W);
+          // the search covers the preview too (⏎ on a match there opens the details)
+          ui.drawn.preview = { texts: det.map(lineText), task: r.task };
           lines.push([['─'.repeat(W), 'gray']]);
-          lines.push(...detailLines(r.st, r.task, W).slice(0, room - 1));
+          lines.push(...det.slice(0, room - 1).map((l) => highlight(l, 'tasks', -1)));
         }
       }
     }
@@ -2272,8 +2422,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
 
   const UP = ['\x1b[A', 'k', '\x0b']; // ↑ k ctrl+k (ctrl+k/j arrive only where no herdr plugin takes them)
   const DOWN = ['\x1b[B', 'j', '\n']; // ↓ j ctrl+j
+  // Neovim-style moves, outside text fields: mapped onto the keys every view handles
+  const NAV = { '\x06': '\x1b[6~', '\x02': '\x1b[5~', '\x04': '\x1b[6~', '\x15': '\x1b[5~', '\x1b[4~': 'G', '\x1bOF': 'G', '\x1b[F': 'G', '\x1b[1~': '\x1b[H', '\x1bOH': '\x1b[H' };
+  const HALF = new Set(['\x04', '\x15']); // ctrl+d / ctrl+u: half a page
   function onKey(k) {
-    const page = Math.max(1, (out.rows || 24) - 8);
+    let page = Math.max(1, (out.rows || 24) - 8);
     const v = view();
     if (k === '\x03') return quit();
     if (ui.picker) return pickerKey(k);
@@ -2297,6 +2450,36 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       } else if (ui.input.value !== before) ui.input.onChange?.(ui.input.value);
       return draw();
     }
+    if (k in NAV) {
+      if (HALF.has(k)) page = Math.max(1, Math.ceil(page / 2));
+      k = NAV[k];
+    }
+    // gg: to the top. A single g keeps its meaning (to the agent) after a short wait for a second one
+    if (k === 'g' && !onKey.gNow) {
+      if (onKey.gTimer) {
+        clearTimeout(onKey.gTimer);
+        onKey.gTimer = null;
+        k = '\x1b[H';
+      } else {
+        onKey.gTimer = setTimeout(() => {
+          onKey.gTimer = null;
+          onKey.gNow = true;
+          try {
+            onKey('g');
+          } finally {
+            onKey.gNow = false;
+          }
+        }, 300);
+        return;
+      }
+    }
+    // search: n / N move between matches and esc ends it, while one is active in this view
+    // (they mean reply / plan note again afterwards); the Log keeps its own / filter
+    if (ui.search?.q && ui.search.key === searchKey(v)) {
+      if (k === 'n' || k === 'N') return searchGo(k === 'n' ? 1 : -1), draw();
+      if (k === '\x1b') return (ui.search = null), draw();
+    }
+    if (k === '/' && v !== 'log') return startSearch();
     if (v === 'log') {
       if (k === '/') {
         const before = ui.log.query;
@@ -2347,7 +2530,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       else if (k === '\x1b[5~') ui.sel.changes = Math.max(0, ui.sel.changes - page);
       else if (k === '\x1b[6~') ui.sel.changes = Math.min(n - 1, ui.sel.changes + page);
       else if (k === '\x1b[H') ui.sel.changes = 0;
-      else if (k === 'G' || k === '\x1b[F') ui.sel.changes = n - 1;
+      else if (k === 'G') ui.sel.changes = n - 1;
       else if (k === ' ' && foldable) setOpen(r, !isOpen(r));
       else if ((k === '\x1b[C' || k === 'l') && foldable) setOpen(r, true);
       else if (k === '\x1b[D' || k === 'h') {
@@ -2383,8 +2566,13 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       else if (ui.overlay) ui.overlay = null;
       else return quit();
     } else if (v === 'help') {
-      if (UP.includes(k)) ui.scrolls.help = Math.max(0, (ui.scrolls.help ?? 0) - 1);
-      else if (DOWN.includes(k)) ui.scrolls.help = (ui.scrolls.help ?? 0) + 1;
+      const sc = ui.scrolls.help ?? 0;
+      if (UP.includes(k)) ui.scrolls.help = Math.max(0, sc - 1);
+      else if (DOWN.includes(k)) ui.scrolls.help = sc + 1;
+      else if (k === '\x1b[5~') ui.scrolls.help = Math.max(0, sc - page);
+      else if (k === '\x1b[6~') ui.scrolls.help = sc + page;
+      else if (k === '\x1b[H') ui.scrolls.help = 0;
+      else if (k === 'G') ui.scrolls.help = Number.MAX_SAFE_INTEGER;
       else ui.overlay = null;
     } else if (k === '\x1b') {
       if (ui.back) back();
@@ -2427,7 +2615,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       else if (k === '\x1b[5~') ui.sel[key] = Math.max(0, ui.sel[key] - page);
       else if (k === '\x1b[6~') ui.sel[key] = Math.min(n - 1, ui.sel[key] + page);
       else if (k === '\x1b[H') ui.sel[key] = 0;
-      else if (k === 'G' || k === '\x1b[F') ui.sel[key] = n - 1;
+      else if (k === 'G') ui.sel[key] = n - 1;
       else if (k === '\r') open();
       else if (k === 'g') return goTo();
       else if (v === 'plan' && r?.type === 'plan' && ['\x1b[C', 'l', '\x1b[D', 'h', ' '].includes(k)) {
@@ -2466,6 +2654,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       else if (DOWN.includes(k)) ui.scrolls[key] = (ui.scrolls[key] ?? 0) + 1;
       else if (k === '\x1b[5~') ui.scrolls[key] = Math.max(0, (ui.scrolls[key] ?? 0) - page);
       else if (k === '\x1b[6~') ui.scrolls[key] = (ui.scrolls[key] ?? 0) + page;
+      else if (k === '\x1b[H') ui.scrolls[key] = 0;
+      else if (k === 'G') ui.scrolls[key] = Number.MAX_SAFE_INTEGER; // the view clamps it to its end
       else if (k === '\r' && v === 'detail') ui.back ? back() : (ui.overlay = null);
       else if (v === 'detail' && k === 'g') return goTo();
       else if (k === 'A') setScope({ level: 'all' });
