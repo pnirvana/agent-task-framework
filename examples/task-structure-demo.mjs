@@ -16,6 +16,9 @@
 //   T4    Migrate the refund table       a planned task whose slices are done: in review, for you
 //   T5    Update the API docs            a plain task, ready
 //   T6    Observability                  a planned task: two parallel slices in progress
+//   T7    Ask the payments team …        a task for you (not a question): the smoke test
+//                                        T3.3 waits on it; under YOUR TASKS, a marks it done
+//   T8    Request Grafana access …       a task for you; nothing waits on it
 //
 // Look at it on the board (atf-herdr board, or `atf board` / the herdr pane): 1 Tasks.
 // Planned tasks start folded (→ / space unfolds them); ⏎ on T3.2 shows its attempts and
@@ -66,6 +69,10 @@ atf('lead', ['add', 'Update the API docs', '--dep', 'T2']); // T5
 atf('lead', ['add', 'Observability', '--accept', 'a dashboard and alerts for repeated refunds']); // T6
 atf('lead', ['add', 'refund dashboard', '--parent', 'T6', '--assign', 'obs-1']); // T6.1
 atf('lead', ['add', 'alerts on duplicate keys', '--parent', 'T6', '--assign', 'obs-2']); // T6.2
+// things only the human can do: tasks for them, not questions; the smoke test waits on one
+atf('lead', ['add', 'Ask the payments team for a staging test merchant', '--assign', 'human', '--desc', 'the smoke test needs a merchant id on staging; payments-team channel, ask for one with refunds enabled']); // T7
+atf('lead', ['edit', 'T3.3', '--dep', 'T3.2,T7']);
+atf('lead', ['add', 'Request Grafana access for obs-1', '--assign', 'human', '--desc', 'the dashboard agent can build panels but not publish them: ask platform for editor rights on the refunds folder']); // T8
 
 // ---- T1 done; T2's slices done, plus one the coordinator added late (T2.4, not T17):
 // T2 goes to review by itself when the last one is done, and the coordinator approves

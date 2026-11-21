@@ -196,7 +196,9 @@ at the start of the input (`T5`) to expand it in place, press `alt+1…9` (or `/
 for a read-only peek with its full brief, the diff (`d`) and the files (`o`); `r` there
 puts `T5: ` into the input to answer. The coordinator's own questions about the plan are
 the entry `plan` (`/atf plan`, answer with `plan: …`). `/atf tasks` (or `t` in the peek)
-lists all tasks of the plan; `⏎` opens one. Nothing of this goes into the chat or the model's
+lists all tasks of the plan; `⏎` opens one. `/atf todo` (or `m` there) lists only your own
+tasks (things only you can do, with what waits on each); tell the coordinator in the chat
+when one is done. Nothing of this goes into the chat or the model's
 context. `atf-herdr coordinate` loads the extension; for a pi you start yourself use
 `pi -e <repo>/adapters/pi/atf.ts`, or install the repo as a pi package
 (`pi install git:github.com/pnirvana/agent-task-framework`).

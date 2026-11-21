@@ -15,6 +15,7 @@ import {
   launchPlan,
   RESUME_POLICIES,
   driverInbox,
+  humanTasks,
   planSummary,
   reviewRefusal,
   HUMAN,
@@ -736,7 +737,9 @@ function statusCmd(target, msgRequired) {
       if (FLAGS.for && FLAGS.on) die('--for is for questions; a block --on other tasks waits for them');
       // re-addressing a question or escalating a failure to the human: the coordinator
       // turns a task already blocked (or failed) into a question for the human
-      const readdress = target === 'blocked' && FLAGS.for && ['blocked', 'failed'].includes(t.status);
+      // … or turns a question into a wait on other tasks (e.g. a task for the human: T4
+      // asked "please tell the payments team", which is the human's T9 to do; T4 waits on it)
+      const readdress = target === 'blocked' && ((FLAGS.for && ['blocked', 'failed'].includes(t.status)) || (FLAGS.on && t.status === 'blocked' && actor.role === 'coordinator'));
       if (!FLAGS.force) {
         if (!readdress && !canTransition(t.status, target)) die(`cannot move ${t.id} from ${t.status} to ${target} (use --force)`);
         if (FLAGS.for === 'human' && actor.role !== 'coordinator' && actor.role !== 'human')
@@ -1425,11 +1428,13 @@ const commands = {
       for (const id of listPlanIds(root)) {
         const st = loadPlan(root, id);
         if (st.status !== 'active') continue;
-        for (const it of driverInbox(st)) if (!FLAGS.for || it.for === FLAGS.for) items.push({ project: projectName(root), root, plan: id, plan_title: st.title, title: it.task ? st.tasks[it.task].title : null, ...it });
+        // what needs someone now, then the human's own tasks (theirs to do, listed after)
+        for (const it of [...driverInbox(st), ...humanTasks(st)]) if (!FLAGS.for || it.for === FLAGS.for) items.push({ project: projectName(root), root, plan: id, plan_title: st.title, title: it.task ? st.tasks[it.task].title : null, ...it });
       }
-    items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
-    const color = { review: magenta, 'your-review': magenta, question: red, 'plan-question': red, failed: red, finished: green };
-    out(items, items.map((i) => `${(color[i.kind] || String)(i.kind.padEnd(13))} ${(i.for === 'coordinator' ? dim : magenta)(('for ' + i.for).padEnd(16))} ${dim(i.project + ' / ' + i.plan_title)}  ${i.task ? bold(i.task) + ' ' + i.title : ''}${i.message ? dim(' — ' + i.message) : ''} ${dim(ago(i.ts))}`).join('\n') || 'inbox empty');
+    items.sort((a, b) => (a.kind === 'your-task') - (b.kind === 'your-task') || (a.ts || '').localeCompare(b.ts || ''));
+    const color = { review: magenta, 'your-review': magenta, question: red, 'plan-question': red, failed: red, finished: green, 'your-task': cyan };
+    const line = (i) => `${(color[i.kind] || String)(i.kind.padEnd(13))} ${(i.for === 'coordinator' ? dim : magenta)(('for ' + i.for).padEnd(16))} ${dim(i.project + ' / ' + i.plan_title)}  ${i.task ? bold(i.task) + ' ' + i.title : ''}${i.kind === 'your-task' ? (i.waiting.length ? dim(` — ${i.waiting.join(', ')} wait${i.waiting.length === 1 ? 's' : ''} on it`) : '') : i.message ? dim(' — ' + i.message) : ''} ${dim(ago(i.ts))}`;
+    out(items, items.map(line).join('\n') || 'inbox empty');
   },
 
   brief(pos) {

@@ -243,6 +243,23 @@ show it, or they ask you). Two rules make that work:
      task questions, or to report status: the human already sees every task question
      on its task, and status on the board.
      A failure you cannot resolve: escalate it the same way (`atf block T4 --for human`).
+   - **Something the human must do** (tell a team about a bug, request access or an
+     onboarding, sign something): that is not a question, it is **a task for them**:
+     `atf add "Tell the payments team about the rounding bug" --assign human --desc
+     "<what to say or request, to whom, and why>"`. The work that needs it waits on it
+     as on any task: `--dep T9` on tasks not started yet (`atf edit T5 --dep T2,T9`: the
+     list is replaced, keep the existing ones), `atf block T4 --on T9 -m "…"` on a task
+     that is already blocked or in progress. The human sees it under "your tasks", apart
+     from what needs a decision now, and is notified once; nobody starts an agent for it.
+     When they mark it done (their note says what they did), the waiting work is ready
+     and `atf wait` reports it as usual. When they tell you in your chat that it is done
+     (pi lists their tasks with `/atf todo`), record it: `atf done T9 --relay "<their
+     words>"`. A question (`block --for human`) is only for a
+     **decision** the work cannot continue without.
+     **Reorganize** questions for the human that are really tasks for them (they pile up
+     under "needs you"): add the task for the human as above, turn the question into a
+     wait on it (`atf block T4 --on T9 -m "waits for the human's T9"`, which replaces
+     the question), and put every task scheduled to run after it on it too (`--dep`).
    - **An attempt that went wrong** (failed, took the wrong approach, or is stuck while
      the task itself still stands): retry it as a **new attempt on the same task**, not
      as a new task: `atf changes T4 -m "1. <what to do differently> 2. …"` (also on a

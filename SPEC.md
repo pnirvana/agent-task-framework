@@ -469,7 +469,21 @@ when it concerns the whole plan:
   `question` for the human).
 - **Failed task the coordinator cannot resolve:** escalated like a question.
 
-Frontends list these under "needs you" with the task's context (the question or review
+**Tasks for the human** are not requests of this kind. Something only the human can do
+(tell a team about a bug, request access or an onboarding) is a task assigned to `human`
+(`atf add "…" --assign human --desc "<what, to whom, why>"`), not a question:
+
+- Work that needs it waits on it as on any task (`--dep`, or `block --on` for a task
+  already blocked or in progress; the coordinator may turn a question-block into such a
+  wait, which replaces the question).
+- Nobody starts an agent for it (`atf wait` has no reason for a task owned by `human`).
+- Frontends list it apart from "needs you", under "your tasks", with what waits on it
+  (`humanTasks()` in `src/core.mjs`; `atf inbox` lists it after the requests), and notify
+  once when it appears.
+- The human marks it done (the board: `a`, with a note for the coordinator); what waited
+  on it is ready, and the coordinator hears of it through `atf wait` as of any task.
+
+Frontends list the requests under "needs you" with the task's context (the question or review
 summary, the checkpoint, artifacts, the subagent's original question if the coordinator
 escalated one). The skill tells the coordinator never to ask the human only in its
 prompt. A frontend may still show "coordinator waits for input" (from harness state)
@@ -698,6 +712,10 @@ or the model's context.
   status), owner, progress and `for you` on the requests. `⏎` opens a row's brief in the
   same overlay (`←/→` next task, `esc` back to the list), `r` replies to it, `w` goes to
   what waits. `/atf T3` opens any task, not only requests.
+- **Your tasks** (`/atf todo`, `m` in the task list): only the tasks assigned to the human
+  (§12.4), each with what waits on it. The widget shows them as one line apart from the
+  requests (`☐ 2 tasks for you (1 with work waiting on it) · /atf todo`). The human says
+  in the chat that one is done; the coordinator records it (`atf done T9 --relay …`).
 - **Peek-on-type**: when the input starts with a waiting item's id (`T5`, `t5`, `T5:`),
   the widget expands that item in place to a few lines of its brief (question,
   recommendation, original asker; for reviews the summary and file counts); it collapses

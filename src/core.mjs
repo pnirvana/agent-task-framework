@@ -455,7 +455,8 @@ export function attentionFor(plan, actorId, role) {
       // (`changes`: sent back after review; `unblocked`: its dependencies are done;
       // `answered`: its question was answered; `start`: ready, e.g. next in a package)
       // (after the human's input on the task is handled: that comes first, as `human`)
-      else if (t.owner && t.owner !== actorId && !busy.has(t.owner) && !t.human_input.length) {
+      // (not for the human's own tasks: nobody starts an agent for those)
+      else if (t.owner && t.owner !== actorId && t.owner !== HUMAN && !busy.has(t.owner) && !t.human_input.length) {
         if (t.ready) out.push({ task: id, reason: t.changes_requested ? 'changes' : 'start' });
         else if (t.can_resume) out.push({ task: id, reason: 'unblocked' });
         else if (t.answered) out.push({ task: id, reason: 'answered' });
@@ -496,6 +497,23 @@ export function driverInbox(plan) {
   if (plan.status === 'active' && leaves.length && leaves.every((id) => TERMINAL.has(plan.tasks[id].status)) && !plan.order.some((id) => plan.tasks[id].status === 'review'))
     items.push({ kind: 'finished', for: 'human', task: null, ts: plan.updated_at, actor: null, message: 'all tasks finished; close the plan' });
   return items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+}
+
+/**
+ * The human's own tasks (assigned to `human`): things they do (tell a team, request
+ * access), not questions. Open leaves, in plan order, each with the tasks that wait on it.
+ * Frontends list them apart from what needs the human now (driverInbox), and notify once.
+ */
+export function humanTasks(plan) {
+  const items = [];
+  for (const id of plan.order) {
+    const t = plan.tasks[id];
+    if (t.children.length || t.owner !== HUMAN || TERMINAL.has(t.status) || t.status === 'review') continue;
+    const waiting = plan.order.filter((x) => plan.tasks[x].waiting_on?.includes(id) || (plan.tasks[x].status === 'blocked' && plan.tasks[x].blocked_on.includes(id)));
+    const since = [...t.history].reverse().find((h) => h.type === 'assigned')?.ts ?? t.created_at;
+    items.push({ kind: 'your-task', for: 'human', task: id, ts: since, actor: t.created_by, message: t.description || t.title, waiting });
+  }
+  return items;
 }
 
 /** Compact per-plan summary for overviews. */

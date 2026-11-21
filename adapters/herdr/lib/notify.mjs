@@ -50,6 +50,8 @@ export function describe(it) {
       return `${it.task} asks: ${firstLine(it.message)}`;
     case 'your-review':
       return `${it.task} waits for your review${title}`;
+    case 'your-task':
+      return `a task for you: ${it.task} ${firstLine(t?.title, 80)}`;
     case 'review':
       return `${it.task} in review${title}`;
     case 'failed':
@@ -207,7 +209,7 @@ function tick({ agents = null, roots = null, extraRoots = [], ttys = null, now =
       if (st.status !== 'active' && st.status !== 'paused') continue;
       Object.defineProperty(st, 'root', { value: root, enumerable: false });
       const att = attentionOf(lv, { root, id, st, key: `${root}#${id}` });
-      for (const it of att.mine) items.set(keyOf(it), it);
+      for (const it of [...att.mine, ...att.todos]) items.set(keyOf(it), it); // a task for the human: notified once too
       if (st.status === 'active' && att.coord.live) watch = true;
     }
   }

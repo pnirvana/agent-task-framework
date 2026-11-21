@@ -1,7 +1,7 @@
 // What needs the human, per plan: the board's "needs you" and the notifications (notify.mjs)
 // read it from here, so both always agree. Liveness comes from herdr: `lv` is
 // {agents: agentIndex() map, sinceOf(pane) -> ms since that pane's agent has its status}.
-import { TERMINAL, driverInbox, HUMAN } from '../../../src/core.mjs';
+import { TERMINAL, driverInbox, humanTasks, HUMAN } from '../../../src/core.mjs';
 import { hasLiveWaiter } from '../../../src/store.mjs';
 import { sameServer, inProject, inHerdr } from './herdr.mjs';
 
@@ -80,5 +80,7 @@ export function attentionOf(lv, p) {
     const human = it.for === HUMAN || !handles;
     (human ? mine : queued).push(at(it));
   }
-  return { mine, queued, coord };
+  // the human's own tasks: listed apart from what needs them now (and notified once)
+  const todos = humanTasks(st).map(at);
+  return { mine, queued, coord, todos };
 }

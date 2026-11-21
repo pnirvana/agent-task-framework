@@ -557,6 +557,46 @@ test('outline ids: a subtask is numbered under its parent; lists follow the outl
   assert.match(runFail(['plan', 'new', 'x', '--ids', 'tree']).error, /flat or outline/);
 });
 
+test('tasks for the human: theirs to do, apart from what needs them now; a misfiled question is reorganized', () => {
+  const { run, runFail } = sandbox({ outline: true });
+  const w = { ATF_ACTOR: 'w', ATF_ROLE: 'subagent' };
+  const me = { ATF_ACTOR: 'human', ATF_ROLE: '' };
+  const wait = () => {
+    try {
+      return run(['wait', '--timeout', '500']);
+    } catch {
+      return runFail(['wait', '--timeout', '500']); // nothing for the coordinator
+    }
+  };
+  run(['add', 'Fix the rounding bug', '--assign', 'w']); // T1
+  run(['add', 'Release', '--dep', 'T1']); // T2
+  // the old way: the agent's question for the human piles up under "needs you"
+  run(['start', 'T1'], w);
+  run(['block', 'T1', '-m', 'please tell the payments team about the rounding bug'], w);
+  run(['block', 'T1', '--for', 'human', '-m', 'please tell the payments team about the rounding bug']);
+  assert.ok(run(['inbox', '--for', 'human']).some((i) => i.task === 'T1' && i.kind === 'question'));
+
+  // the coordinator reorganizes: a task for the human, the question becomes a wait on it
+  const t3 = run(['add', 'Tell the payments team about the rounding bug', '--assign', 'human', '--desc', 'they own the ledger; ask them to check last week\'s refunds']).task;
+  assert.equal(t3.id, 'T3');
+  run(['block', 'T1', '--on', 'T3', '-m', 'waits for the human: T3']);
+  run(['edit', 'T2', '--dep', 'T1,T3']);
+  let inbox = run(['inbox', '--for', 'human']);
+  assert.deepEqual(inbox.map((i) => [i.task, i.kind]), [['T3', 'your-task']], 'no question any more: a task for the human');
+  assert.deepEqual(inbox[0].waiting, ['T1', 'T2']);
+  // nobody starts an agent for it
+  const w1 = wait();
+  assert.ok(!(w1.attention ?? []).some((a) => a.task === 'T3'), JSON.stringify(w1.attention));
+
+  // the human does it: what waited on it can go on
+  run(['start', 'T3'], me);
+  run(['done', 'T3', '-m', 'told them, ticket PAY-123'], me);
+  assert.deepEqual(run(['inbox', '--for', 'human']), []);
+  assert.equal(run(['show', 'T1']).can_resume, true);
+  const w2 = wait();
+  assert.ok(w2.attention.some((a) => a.task === 'T1' && a.reason === 'unblocked'), JSON.stringify(w2.attention));
+});
+
 test('steps: the parts of a task, checked off one by one; percent follows', () => {
   const { run, runFail } = sandbox();
   const w = { ATF_ACTOR: 'd', ATF_ROLE: 'subagent' };

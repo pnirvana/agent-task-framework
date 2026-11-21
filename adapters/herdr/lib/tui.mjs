@@ -1047,6 +1047,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     review: ['◎ review', 'magenta'],
     stale: ['◌ stalled', 'red'],
     finished: ['● finished', 'green'],
+    'your-task': ['☐ to do', 'cyan bold'],
   };
   const NEED_RANK = Object.fromEntries(Object.keys(NEED).map((k, i) => [k, i]));
   const coordinatorOf = (st) => coordinatorOfPlan(lv(), st);
@@ -1153,7 +1154,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
             : it.kind === 'plan-question'
               ? `${it.actor ?? 'the coordinator'} asks about the plan`
               : `${t.id} ${t.title}`;
-    const who = it.kind === 'review' ? 'for the coordinator' : it.kind === 'your-review' || (it.kind === 'question' && it.for === HUMAN) ? 'for you' : it.actor && !['coordinator', 'prompt'].includes(it.kind) ? it.actor : '';
+    const who = it.kind === 'review' ? 'for the coordinator' : it.kind === 'your-review' || it.kind === 'your-task' || (it.kind === 'question' && it.for === HUMAN) ? 'for you' : it.actor && !['coordinator', 'prompt'].includes(it.kind) ? it.actor : '';
     return row(
       [mark(sel), [label.padEnd(11), sel ? `inverse ${color}` : color], [' ' + subject, sel ? 'bold' : 'bold']],
       [[multi() && !headed ? planLabel(it, W) + '  ' : '', 'dim'], [who ? who + '  ' : '', 'cyan'], [ago(it.ts).padStart(3), 'dim']],
@@ -1271,6 +1272,19 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
         add({ type: 'need', ...it, k: `need#${it.key}#${it.kind}#${it.task ?? it.actor ?? ''}` }, (sel) => needLine(it, W, sel, headed));
         const sub = needSub(it, W);
         if (sub) L.push(sub);
+      }
+    }
+    // the human's own tasks (tell a team, request access): theirs to do, not urgent; apart
+    // from NEEDS YOU so that stays what holds up the work now
+    const todos = att.flatMap((a) => a.todos);
+    if (todos.length) {
+      L.push([], [[' YOUR TASKS ', 'bold cyan'], [String(todos.length), 'bold cyan'], ['   a: done (with a note for the coordinator)', 'dim']]);
+      for (const it of todos) {
+        add({ type: 'need', ...it, k: `todo#${it.key}#${it.task}` }, (sel) => needLine(it, W, sel, false));
+        const t = it.st.tasks[it.task];
+        const waits = it.waiting.length ? `${it.waiting.join(', ')} wait${it.waiting.length === 1 ? 's' : ''} on it` : '';
+        const msg = [waits, t.description && t.description !== t.title ? t.description.replace(/\s+/g, ' ') : ''].filter(Boolean).join(' · ');
+        if (msg) L.push([[' '.repeat(15), ''], [clip(msg, Math.max(10, W - 17)).trimEnd(), 'dim']]);
       }
     }
     L.push([], [[' IN FLIGHT', 'bold']]);
@@ -1518,6 +1532,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       lab('● finished', 'green', 'all tasks of a plan are finished (c closes the plan)'),
       T('Questions, failed or stalled tasks and the coordinator’s reviews are listed here only'),
       T('when no coordinator is running for the plan; otherwise the plan row says "N queued".'),
+      T('YOUR TASKS: things only you can do (tell a team, request access), with what waits on'),
+      lab('☐ to do', 'cyan bold', 'a task for you, not a question: a marks it done, with a note for the coordinator'),
       T('IN FLIGHT: one row per plan (progress, coordinator state), then the tasks being worked'),
       T('on (in progress, being reworked after review, answered) with their latest progress.'),
       T('Below the list: the context of the selected row, enough to act on it.'),
@@ -2021,6 +2037,22 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     } catch (e) {
       flash(e.message, 'red');
     }
+  }
+
+  /** a on a task of the human's own: done, with an optional note (what they did, a ticket). */
+  function finishMine(r) {
+    const t = r.st.tasks[r.task];
+    ui.input = {
+      label: `${t.id} done: a note for the coordinator (optional): `,
+      value: '',
+      hint: '⏎ done',
+      onSubmit: (text) => {
+        const evs = [];
+        if (t.status === 'todo' || t.status === 'blocked') evs.push({ type: 'task.status', task: t.id, data: { status: 'in_progress' } });
+        evs.push({ type: 'task.status', task: t.id, data: { status: 'done', message: text.trim() || 'done' } });
+        writeAsHuman({ root: r.root, plan: r.plan, st: r.st }, evs, `${t.id} done${t.id && r.st.order.some((x) => r.st.tasks[x].waiting_on?.includes(t.id)) ? ': what waited on it can start' : ''}`);
+      },
+    };
   }
 
   /**
@@ -2825,7 +2857,13 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (k === 'd' && ['overview', 'tasks', 'detail', 'plan'].includes(v)) return diffSelected();
     if (['overview', 'tasks', 'detail', 'plan'].includes(v)) {
       // acting takes effect at once; the human's words go to the coordinator (§12.5)
-      if (v !== 'plan' && k === 'a') return reviewNow('approve');
+      if (v !== 'plan' && k === 'a') {
+        // a task of the human's own: done, with a note for the coordinator
+        const r = selectedTask();
+        const t = r && r.st.tasks[r.task];
+        if (t && t.owner === HUMAN && !t.children.length && t.status !== 'review') return finishMine(r);
+        return reviewNow('approve');
+      }
       if (v !== 'plan' && k === 'x') return changeNow(), draw();
       if (k === 'r' || k === 'n') return reply(), draw();
       if (k === 'o') return openArtifact();

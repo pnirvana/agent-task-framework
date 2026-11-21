@@ -22,7 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Text, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { driverInbox, brief } from "../../src/core.mjs";
+import { driverInbox, humanTasks, brief } from "../../src/core.mjs";
 import { loadPlan, eventsPath } from "../../src/store.mjs";
 
 const ATF_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../bin/atf.mjs");
@@ -139,6 +139,7 @@ export default function (pi: any) {
 
 	// ---------------------------------------------------------------- what waits for the human
 	let items: Item[] = [];
+	let todos: any[] = []; // the human's own tasks (humanTasks): listed apart, /atf todo
 	let planState: any = null;
 	let watched: string | null = null;
 	let expanded: string | null = null; // peek-on-type: the id typed at the start of the input
@@ -162,6 +163,7 @@ export default function (pi: any) {
 			planState = null;
 		}
 		const its = planState ? driverInbox(planState).filter((i: any) => i.for === "human") : [];
+		todos = planState ? humanTasks(planState) : [];
 		// the plan's own requests (its questions, "finished") are one entry, `plan`: one reply
 		// in the chat answers all open plan questions
 		const planIts = its.filter((i: any) => !i.task);
@@ -212,17 +214,24 @@ export default function (pi: any) {
 		safe(() => {
 			const u = ui();
 			if (!u?.setWidget) return;
-			if (!items.length) return u.setWidget("atf", undefined);
+			if (!items.length && !todos.length) return u.setWidget("atf", undefined);
 			const title = planState?.title ?? "";
 			u.setWidget("atf", (_tui: any, theme: any) => ({
 				render(width: number): string[] {
+					// the human's own tasks: one line, apart from what waits for them now
+					const waits = todos.filter((x) => x.waiting.length).length;
+					const todoLine = todos.length
+						? theme.fg("accent", `☐ ${todos.length} task${todos.length === 1 ? "" : "s"} for you`) + theme.fg("dim", `${waits ? ` (${waits} with work waiting on ${waits === 1 ? "it" : "them"})` : ""} · /atf todo`)
+						: null;
+					if (!items.length) return [truncateToWidth(todoLine + theme.fg("dim", ` · ${title}`), width)];
 					const lines = [theme.fg("warning", "⏳ for you") + theme.fg("dim", ` · ${title}`) + theme.fg("dim", `   alt+1…${items.length} details · type T5 to peek · /atf tasks`)];
 					for (const it of items) {
-						const id = it.id.padEnd(4);
+						const id = it.id.padEnd(Math.max(5, ...items.map((x) => x.id.length + 1)));
 						const head = `  ${theme.fg("dim", String(it.n))} ${theme.fg("accent", id)} ${theme.fg(it.kind === "your-review" ? "success" : "warning", it.label.padEnd(9))} `;
 						lines.push(truncateToWidth(head + it.text, width));
 						if (expanded && expanded.toLowerCase() === it.id.toLowerCase()) lines.push(...expandLines(it, theme, width).map((l) => truncateToWidth(l, width)));
 					}
+					if (todoLine) lines.push(truncateToWidth(todoLine, width));
 					return lines;
 				},
 				invalidate() {},
@@ -236,7 +245,7 @@ export default function (pi: any) {
 		try {
 			text = String(ui()?.getEditorText?.() ?? "");
 		} catch {}
-		const m = String(text).match(/^\s*(t\d+|plan)\b/i);
+		const m = String(text).match(/^\s*(t\d+(?:\.\d+)*|plan)\b/i);
 		const id = m && items.find((i) => i.id.toLowerCase() === m[1].toLowerCase()) ? m[1] : null;
 		if (id?.toLowerCase() !== expanded?.toLowerCase()) {
 			expanded = id;
@@ -255,13 +264,14 @@ export default function (pi: any) {
 		);
 
 	/** The plan's tasks as a tree, in creation order: the rows of the task list (row 0: the plan). */
-	const taskRows = (): { id: string; depth: number; t: any }[] => {
+	const taskRows = (mine = false): { id: string; depth: number; t: any }[] => {
 		if (!planState) return [];
-		const ts = Object.values(planState.tasks) as any[];
-		const num = (id: string) => Number(String(id).replace(/\D/g, "")) || 0;
+		// only the human's own tasks (/atf todo): a flat list, in plan order
+		if (mine) return todos.map((x) => ({ id: x.task, depth: 0, t: planState.tasks[x.task] }));
+		const ts = (planState.order as string[]).map((id) => planState.tasks[id]); // the plan's order (outline ids: the outline)
 		const out: { id: string; depth: number; t: any }[] = [{ id: "plan", depth: 0, t: null }];
 		const walk = (parent: string | null, depth: number) => {
-			for (const t of ts.filter((x) => (x.parent ?? null) === parent).sort((a, b) => num(a.id) - num(b.id))) {
+			for (const t of ts.filter((x) => (x.parent ?? null) === parent)) {
 				out.push({ id: t.id, depth, t });
 				walk(t.id, depth + 1);
 			}
@@ -292,7 +302,7 @@ export default function (pi: any) {
 		if (!arm || !planState) return ui()?.notify?.("No ATF plan yet (the coordinator has not run `atf wait`).", "info");
 		const want = String(startId ?? "").trim().toLowerCase();
 		const taskId = (id: string) => Object.keys(planState.tasks).find((k) => k.toLowerCase() === id) ?? null;
-		if (want && want !== "tasks" && want !== "plan" && !taskId(want)) return ui()?.notify?.(`No ${startId} in this plan (/atf tasks lists them).`, "warning");
+		if (want && !["tasks", "plan", "todo"].includes(want) && !taskId(want)) return ui()?.notify?.(`No ${startId} in this plan (/atf tasks lists them).`, "warning");
 		const projectDir = path.dirname(arm.root);
 		const reply = await ui().custom(
 			(tui: any, theme: any, keybindings: any, done: (r: string | null) => void) => {
@@ -303,6 +313,7 @@ export default function (pi: any) {
 				let cur = "plan";
 				let idx = 0; // in items
 				let sel = 0; // in taskRows()
+				let mineOnly = want === "todo"; // the list shows only the human's own tasks (m switches)
 				let body: string[] = ["loading…"];
 				let files: string[] = [];
 				let fileIdx = 0;
@@ -357,8 +368,14 @@ export default function (pi: any) {
 					const f = files[fileIdx % files.length];
 					update([theme.fg("accent", `── ${f}`) + theme.fg("dim", files.length > 1 ? `  (tab: next of ${files.length})` : ""), ...safeRead(path.resolve(projectDir, f)).split("\n")]);
 				};
-				const listLines = (rows: ReturnType<typeof taskRows>, inner: number): string[] =>
-					rows.map((r, k) => {
+				// a task of the human's: what waits on it
+				const waitsOn = (id: string) => {
+					const w = todos.find((x) => x.task === id)?.waiting ?? [];
+					return w.length ? theme.fg("warning", `  ${w.join(", ")} wait${w.length === 1 ? "s" : ""} on it`) : "";
+				};
+				const listLines = (rows: ReturnType<typeof taskRows>, inner: number): string[] => {
+					const idW = Math.max(4, ...rows.map((r) => r.id.length)) + 1; // outline ids (T2.10) are longer
+					return rows.map((r, k) => {
 						const mine = items.find((i) => i.id === r.id);
 						const pointer = k === sel ? theme.fg("accent", "› ") : "  ";
 						if (!r.t) {
@@ -373,15 +390,16 @@ export default function (pi: any) {
 						const meta = [t.owner ? `@${t.owner}` : "", st === "in_progress" && t.percent != null && !kids ? `${t.percent}%` : "", kids, t.ready && !t.owner ? "ready" : st.replace("_", " ")].filter(Boolean).join(" · ");
 						const title = k === sel ? theme.bold?.(t.title) ?? t.title : t.title;
 						return truncateToWidth(
-							pointer + "  ".repeat(r.depth) + theme.fg(color, g) + " " + theme.fg("accent", t.id.padEnd(4)) + title + theme.fg("dim", `  ${meta}`) + (mine ? theme.fg("warning", `  for you: ${mine.label}`) : ""),
+							pointer + "  ".repeat(r.depth) + theme.fg(color, g) + " " + theme.fg("accent", t.id.padEnd(idW)) + title + theme.fg("dim", `  ${meta}`) + (mine ? theme.fg("warning", `  for you: ${mine.label}`) : "") + waitsOn(r.id),
 							inner,
 						);
 					});
+				};
 
 				// start: the request asked for, a task, the list
-				const rows0 = taskRows();
+				const rows0 = taskRows(mineOnly);
 				const asItem = items.findIndex((i) => i.id.toLowerCase() === want);
-				if (want === "tasks" || (!want && !items.length)) showList();
+				if (want === "tasks" || want === "todo" || (!want && !items.length)) showList();
 				else if (!want || asItem >= 0) {
 					idx = Math.max(0, asItem);
 					loadBrief(items[idx].id);
@@ -402,14 +420,14 @@ export default function (pi: any) {
 						let view_: string[];
 						let more = "";
 						if (view === "list") {
-							const rows = taskRows();
+							const rows = taskRows(mineOnly);
 							sel = Math.max(0, Math.min(sel, rows.length - 1));
-							const all = listLines(rows, inner);
+							const all = rows.length ? listLines(rows, inner) : [theme.fg("dim", mineOnly ? "  nothing for you to do" : "  no tasks yet")];
 							scroll = Math.max(0, Math.min(Math.max(scroll, sel - h + 1), sel)); // keep the selection visible
 							view_ = all.slice(scroll, scroll + h);
 							if (all.length > h) more = `${scroll + 1}-${scroll + view_.length} of ${all.length}`;
-							title = ` tasks · ${planState?.title ?? arm.plan} `;
-							keys = `↑↓ select · ⏎ details · r reply${items.length ? " · w what waits for you" : ""} · esc close`;
+							title = ` ${mineOnly ? "your tasks" : "tasks"} · ${planState?.title ?? arm.plan} `;
+							keys = `↑↓ select · ⏎ details · r reply${mineOnly ? " (say it is done: the coordinator records it)" : ""} · m ${mineOnly ? "all tasks" : "your tasks"}${items.length ? " · w what waits for you" : ""} · esc close`;
 						} else {
 							const wrapped = body.flatMap((l) => (l === "" ? [""] : wrapTextWithAnsi(l, inner)));
 							scroll = Math.max(0, Math.min(scroll, Math.max(0, wrapped.length - h)));
@@ -440,8 +458,14 @@ export default function (pi: any) {
 							tui.requestRender();
 						};
 						if (view === "list") {
-							const rows = taskRows();
+							const rows = taskRows(mineOnly);
 							if (matchesKey(data, "escape") || data === "q") return done(null);
+							if (data === "m") {
+								mineOnly = !mineOnly;
+								sel = 0;
+								scroll = 0;
+								return redraw();
+							}
 							if (matchesKey(data, "enter") || matchesKey(data, "right") || data === "l") {
 								src = "tasks";
 								return void loadBrief(rows[sel]?.id ?? "plan");
@@ -469,6 +493,7 @@ export default function (pi: any) {
 						if (view === "brief" && data === "o") return void loadFile();
 						if (view === "brief" && data === "t") {
 							src = "tasks";
+							mineOnly = false;
 							sel = Math.max(0, taskRows().findIndex((r) => r.id === cur));
 							scroll = 0;
 							return showList();
@@ -484,7 +509,8 @@ export default function (pi: any) {
 								idx = (idx + step + items.length) % items.length;
 								return void loadBrief(items[idx].id);
 							}
-							const rows = taskRows();
+							const rows = taskRows(mineOnly);
+							if (!rows.length) return;
 							sel = (sel + step + rows.length) % rows.length;
 							return void loadBrief(rows[sel].id);
 						}
@@ -566,7 +592,23 @@ export default function (pi: any) {
 			},
 		});
 	pi.registerCommand?.("atf", {
-		description: "ATF: what waits for you (/atf T5 · /atf plan: one request · /atf tasks: all tasks of the plan)",
+		description: "ATF: what waits for you (/atf T5 · /atf plan: one request · /atf tasks: all tasks of the plan · /atf todo: your own tasks)",
+		// `/atf ` completes: the lists, what waits for the human, then any task of the plan
+		getArgumentCompletions: (prefix: string) => {
+			refresh();
+			const want = String(prefix ?? "").trim().toLowerCase();
+			const out: { value: string; label: string; description?: string }[] = [
+				{ value: "todo", label: "todo", description: todos.length ? `your own tasks (${todos.length})` : "your own tasks (none)" },
+				{ value: "tasks", label: "tasks", description: "all tasks of the plan" },
+				{ value: "plan", label: "plan", description: "the plan's own questions" },
+			];
+			const seen = new Set<string>();
+			for (const it of items) if (it.task) (seen.add(it.task), out.push({ value: it.task, label: it.task, description: `${it.label}: ${it.text}` }));
+			for (const x of todos) if (!seen.has(x.task)) (seen.add(x.task), out.push({ value: x.task, label: x.task, description: `your task: ${planState?.tasks[x.task]?.title ?? ""}` }));
+			for (const id of (planState?.order ?? []) as string[]) if (!seen.has(id)) out.push({ value: id, label: id, description: planState.tasks[id].title });
+			const hits = out.filter((i) => i.value.toLowerCase().startsWith(want));
+			return hits.length ? hits : null;
+		},
 		handler: async (args: string, ctx: any) => peek(ctx, (args || "").trim() || null),
 	});
 
