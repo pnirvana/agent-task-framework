@@ -59,7 +59,9 @@ const HELP = `atf — Agent Task Framework
 
 Setup / plans
   atf init                              create .atf/ in the current directory (the project root)
-  atf plan new <title> [--goal G] [--desc D] [--doc design.md]...   create plan, make it current
+  atf plan new <title> [--goal G] [--desc D] [--doc design.md]... [--ids outline|flat]
+                                        create plan, make it current; subtask ids are
+                                        numbered under their parent (T6.2), unless --ids flat
                                         (--doc: the plan's documents, read by every new coordinator)
   atf plan list | use <id>
   atf plan show [id]                    plan overview: structure, ownership, decisions, artifacts
@@ -344,7 +346,18 @@ function requireTask(state, id) {
   return t;
 }
 
-function nextTaskId(state) {
+function nextTaskId(state, parent = null) {
+  // outline ids (new plans): a subtask is numbered under its parent, T6 → T6.1, T6.2, …
+  if (state.outline_ids && parent) {
+    const prefix = parent + '.';
+    const re = { exec: (id) => (id.startsWith(prefix) && /^\d+$/.test(id.slice(prefix.length)) ? [id, id.slice(prefix.length)] : null) };
+    let k = 0;
+    for (const id of state.order) {
+      const m = re.exec(id);
+      if (m) k = Math.max(k, +m[1]);
+    }
+    return `${parent}.${k + 1}`;
+  }
   let n = 0;
   for (const id of state.order) {
     const m = /^T(\d+)$/.exec(id);
@@ -353,7 +366,14 @@ function nextTaskId(state) {
   return `T${n + 1}`;
 }
 
+/** An id as written by a person ("6.2", "t6") → the task's id, if there is one. */
+const canonId = (state, x) => (x && !state.tasks[x] ? [String(x).toUpperCase(), 'T' + x].find((y) => state.tasks[y]) ?? x : x);
+
 function taskFieldsFromFlags(f, state, selfId) {
+  f = { ...f };
+  if (f.parent) f.parent = canonId(state, f.parent);
+  if (f.from) f.from = canonId(state, f.from);
+  if (f.dep) f.dep = f.dep.flatMap((x) => String(x).split(',')).map((x) => canonId(state, x.trim()));
   const d = {};
   if (f.title !== undefined) d.title = f.title;
   if (f.desc !== undefined) d.description = f.desc;
@@ -852,6 +872,9 @@ const commands = {
       if (FLAGS.coordinator) data.coordinator = FLAGS.coordinator;
       if (FLAGS.doc) data.docs = FLAGS.doc;
       data.parent_review = true; // §5.2: parents with criteria of their own are reviewed against them
+      // §5.3: a subtask's id is numbered under its parent (T6.2); --ids flat: T1, T2, … as before
+      if (FLAGS.ids !== undefined && !['flat', 'outline'].includes(FLAGS.ids)) die('--ids must be flat or outline');
+      data.outline_ids = FLAGS.ids !== 'flat';
       transact(root, id, actor, () => [{ type: 'plan.created', data }]);
       setCurrentPlan(root, id);
       return out({ ok: true, plan: id }, `created plan ${bold(id)} (now current)\n${dim(`export ATF_PLAN=${id}`)}`);
@@ -946,9 +969,11 @@ const commands = {
     if (!title) die('task title required');
     let id;
     const { state } = transact(root, planId, actor, (st) => {
-      id = FLAGS.id || nextTaskId(st);
+      const fields = taskFieldsFromFlags(FLAGS, st, FLAGS.id ?? null);
+      id = FLAGS.id || nextTaskId(st, fields.parent ?? null);
       if (st.tasks[id]) die(`task exists: ${id}`);
-      const data = { title, ...taskFieldsFromFlags(FLAGS, st, id) };
+      if (fields.deps?.includes(id)) die('task cannot depend on itself');
+      const data = { title, ...fields };
       if (FLAGS.assign) data.assignee = FLAGS.assign;
       // agents add tasks inside their own work package (to split work), not elsewhere
       if (!FLAGS.force && actor.role !== 'coordinator' && actor.role !== 'human') {
@@ -969,6 +994,9 @@ const commands = {
       const t = requireTask(st, pos[0]);
       const data = taskFieldsFromFlags(FLAGS, st, t.id);
       if (!Object.keys(data).length) die('nothing to update');
+      // outline ids: a task's id says where it sits; moving it would make the id lie
+      if (st.outline_ids && data.parent !== undefined && (data.parent ?? null) !== (t.parent ?? null) && !FLAGS.force)
+        die(`${t.id}'s id says where it sits in the plan, so it cannot move${data.parent ? ` under ${data.parent}` : ' to the top level'}: cancel it and add it again there (atf cancel ${t.id} -m "moved"; atf add "${t.title}" ${data.parent ? `--parent ${data.parent}` : ''} …), or --force to move it and keep its id`);
       const evs = [{ type: 'task.updated', task: t.id, data }];
       rejectCycles(st, evs);
       return evs;

@@ -42,7 +42,7 @@ export function canTransition(from, to) {
 }
 
 const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume', 'agent', 'origin', 'reviewer', 'review'];
-const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume', 'coordinator', 'docs', 'parent_review'];
+const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume', 'coordinator', 'docs', 'parent_review', 'outline_ids'];
 /** Who a question-block is for: the coordinator (default) or the human (an escalation). */
 export const BLOCK_FOR = ['coordinator', 'human'];
 
@@ -311,6 +311,17 @@ export function derive(plan) {
   for (const id of plan.order) {
     const t = tasks[id];
     if (t.parent && tasks[t.parent]) tasks[t.parent].children.push(id);
+  }
+  // outline ids (T6.2 under T6): the plan's order is the outline, so lists read top to
+  // bottom as the tree does (a subtask added later still comes right after its siblings)
+  if (plan.outline_ids) {
+    const out = [];
+    const visit = (id) => {
+      out.push(id);
+      for (const c of tasks[id].children) visit(c);
+    };
+    for (const id of plan.order) if (!tasks[id].parent || !tasks[tasks[id].parent]) visit(id);
+    if (out.length === plan.order.length) plan.order = out;
   }
   // Ancestry + ownership. Assigning a parent task hands its whole subtree (a "work
   // package") to that actor: descendants without their own assignee inherit `owner`.

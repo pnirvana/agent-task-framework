@@ -134,6 +134,24 @@ done.
   the running slice with its live badge, how many slices wait, and `n/m` done. A leaf
   with steps shows `2/4 · <the current step>`.
 
+## Outline ids (added after the first build)
+
+Flat ids made the plan hard to read: a subtask's id says nothing about its parent, and a
+subtask added later gets a number far above the next planned tasks (T23 under T6, after
+T7 to T22). New plans number subtasks under their parent: `T6.1`, `T6.2`, a late one
+`T6.4`, and lists follow the outline.
+
+- **Real ids, not labels on screen.** An outline number only on the board would give a
+  task two names: the human would say 6.2 while the coordinator, the agents and the log
+  say T8.
+- **A plan property** (`outline_ids`, set by `atf plan new`; `--ids flat` keeps the old
+  scheme). Renumbering an existing plan would break the references in its log, notes and
+  prompts.
+- **No moves.** A task's id says where it sits, so `atf edit --parent` refuses (the
+  coordinator cancels it and adds it again; `--force` moves it and keeps its id).
+  Renaming on a move was rejected: every reference, dependency and running agent would
+  have to follow.
+
 ## Implementation order (built)
 
 1. **Attempts:** `changes` from failed and ended tasks, the attempt count in fold,

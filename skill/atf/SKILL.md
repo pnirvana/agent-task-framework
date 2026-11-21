@@ -182,7 +182,9 @@ show it, or they ask you). Two rules make that work:
    add them as subtasks under it (`atf add "…" --parent T4`, with `--dep` between them
    where they depend on each other): the task stays one row on the board, and the whole
    is checked once at the end. (Plans created before this existed keep every parent as a
-   container: `atf plan show` says `parent_review` when the plan has it.) Declare every
+   container: `atf plan show` says `parent_review` when the plan has it.) In new plans a
+   subtask's id is numbered under its parent (`T4.1`, `T4.2`), so a task cannot move to
+   another parent: cancel it and add it again where it belongs. Declare every
    dependency that crosses packages: undeclared cross-package
    dependencies are the main cause of agents waiting on each other.
 4. **Dispatch: you start every subagent.** **Every task of a plan is delegated through

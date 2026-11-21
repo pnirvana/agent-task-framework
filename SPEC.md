@@ -80,7 +80,7 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 ### Plan events
 | type | data |
 |------|------|
-| `plan.created` | `{title, goal?, description?, labels?, coordinator?, docs?, meta?, parent_review?}` (`coordinator` defaults to the creating actor; `docs`: the plan's documents, §12.7; `parent_review`: parents with criteria are reviewed against them, §5.2) |
+| `plan.created` | `{title, goal?, description?, labels?, coordinator?, docs?, meta?, parent_review?}` (`coordinator` defaults to the creating actor; `docs`: the plan's documents, §12.7; `parent_review`: parents with criteria are reviewed against them, §5.2; `outline_ids`: subtask ids numbered under their parent, §5.3) |
 | `plan.updated` | any subset of the above (shallow replace) |
 | `plan.status`  | `{status: active\|paused\|completed\|failed\|cancelled, message?, relayed?}` (closing: the human's decision, §13.3) |
 | `plan.review`  | `{summary, items: [{task, action: approve\|change\|note, message, file?, line?}]}`: one submitted review batch |
@@ -173,7 +173,16 @@ subtasks inside its package.
 - `next` picks, in order: ready tasks assigned to the actor, then ready unassigned tasks in
   the actor's packages, then (unless `--package`) ready tasks with no owner at all.
 - `block`, `review`, `done`, `fail` require a message.
-- Task ids are `T<n>`, allocated sequentially under the lock. Other ids are allowed.
+- Task ids are allocated under the lock. Other ids are allowed.
+  - **Outline ids** (plans with `outline_ids`, the default of `atf plan new`): top-level
+    tasks are `T1`, `T2`, … in sequence among themselves, and a subtask is numbered under
+    its parent: `T6.1`, `T6.2`, `T6.2.1`. A subtask added later is still `T6.3`, next to
+    its siblings. The plan's `order` is then the outline (depth first, children in the
+    order they were added), so every list reads as the tree does. A task does not move to
+    another parent (`atf edit --parent` refuses; `--force` moves it and keeps its id): its
+    id says where it sits, and renaming it would break every reference to it.
+  - **Flat ids** (older plans, or `atf plan new --ids flat`): `T<n>`, in sequence across
+    the whole plan.
 - Dependency cycles and parent cycles are rejected on write.
 - **Changes start a new attempt** (`atf changes T4 -m …`, the coordinator, or the
   task's reviewer): `task.status` to `todo` with `changes: true`, on a leaf task in

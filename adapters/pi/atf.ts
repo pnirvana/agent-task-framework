@@ -35,7 +35,7 @@ type Item = { n: number; id: string; task: string | null; kind: string; label: s
 function summarize(report: string): string {
 	const items = report
 		.split("\n")
-		.map((l) => l.match(/^(T\d+|plan)\s+(\S+)/))
+		.map((l) => l.match(/^(T\d+(?:\.\d+)*|plan)\s+(\S+)/))
 		.filter(Boolean)
 		.map((m) => `${m![1]} ${m![2]}`);
 	const uniq = [...new Set(items)];
@@ -577,7 +577,7 @@ export default function (pi: any) {
 				triggerCharacters: ["T", "p"],
 				async getSuggestions(lines: string[], line: number, col: number, options: any) {
 					const before = (lines[line] ?? "").slice(0, col);
-					const m = line === 0 && before.match(/^(T\d*|t\d+|pl?a?n?)$/);
+					const m = line === 0 && before.match(/^(T[\d.]*|t\d[\d.]*|pl?a?n?)$/);
 					if (!m || !items.length) return current.getSuggestions(lines, line, col, options);
 					const hits = items.filter((i) => i.id.toLowerCase().startsWith(m[1].toLowerCase()));
 					if (!hits.length) return current.getSuggestions(lines, line, col, options);

@@ -9,7 +9,7 @@ import { fold, rollupStatus, findCycles } from '../src/core.mjs';
 
 const ATF = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'atf.mjs');
 
-function sandbox() {
+function sandbox({ outline = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-test-'));
   const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', NO_COLOR: '1', ATF_REGISTRY: path.join(dir, 'registry.json'), HERDR_PLUGIN_CONFIG_DIR: path.join(dir, 'herdr-config'), XDG_CONFIG_HOME: path.join(dir, 'xdg-config') };
   delete env.ATF_VI_MODE; // the user's own board settings stay out of the tests
@@ -26,7 +26,7 @@ function sandbox() {
     throw new Error('expected failure: ' + args.join(' '));
   };
   run(['init']);
-  run(['plan', 'new', 'Test plan']);
+  run(['plan', 'new', 'Test plan', ...(outline ? [] : ['--ids', 'flat'])]); // most tests: flat ids (T1, T2, …), as older plans
   return { dir, env, run, runFail };
 }
 
@@ -529,6 +529,32 @@ test('attempts: a retry with new instructions is a new attempt on the same task,
 
   // a parent: send back the subtask instead
   assert.match(runFail(['changes', 'T3', '-m', 'x']).error, /T3 is a parent task/);
+});
+
+test('outline ids: a subtask is numbered under its parent; lists follow the outline; no moves', () => {
+  const { run, runFail } = sandbox({ outline: true });
+  assert.equal(run(['plan', 'show']).outline_ids, true, 'new plans have them');
+  run(['add', 'Design']); // T1
+  run(['add', 'Build']); // T2
+  run(['add', 'api', '--parent', 'T2']); // T2.1
+  run(['add', 'ui', '--parent', '2']); // T2.2 (the T is optional)
+  run(['add', 'Deploy']); // T3
+  run(['add', 'schema', '--parent', 'T2.1']); // T2.1.1
+  const late = run(['add', 'docs', '--parent', 'T2', '--dep', '2.1']).task; // added after T3: still T2.3
+  assert.equal(late.id, 'T2.3');
+  assert.deepEqual(late.deps, ['T2.1']);
+  assert.equal(run(['add', 'Release']).task.id, 'T4', 'top-level tasks count among themselves');
+  // lists read as the outline does, whatever the order they were added in
+  assert.deepEqual(run(['list']).map((t) => t.id), ['T1', 'T2', 'T2.1', 'T2.1.1', 'T2.2', 'T2.3', 'T3', 'T4']);
+  assert.equal(run(['show', 't2.2']).title, 'ui');
+  // a follow-up lands next to its origin, numbered there
+  assert.equal(run(['add', 'more ui', '--from', 'T2.2']).task.id, 'T2.4');
+  // the id says where a task sits: it does not move (unless forced)
+  assert.match(runFail(['edit', 'T2.2', '--parent', 'T3']).error, /cannot move under T3: cancel it and add it again there/);
+  assert.equal(run(['edit', 'T2.2', '--title', 'web ui']).task.title, 'web ui');
+  run(['edit', 'T2.2', '--parent', 'T3', '--force']);
+  assert.equal(run(['show', 'T2.2']).parent, 'T3');
+  assert.match(runFail(['plan', 'new', 'x', '--ids', 'tree']).error, /flat or outline/);
 });
 
 test('steps: the parts of a task, checked off one by one; percent follows', () => {
