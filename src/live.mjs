@@ -710,6 +710,11 @@ export function elapsed(since, now = Date.now()) {
 export function supersedeKey(a) {
   if (a.live) return `file|${a.ref}`;
   const first = String(a.cmd || '').split('\n').find((l) => l.trim() && !/^\s*atf\s/.test(l)) || '';
+  if (a.kind === 'deploy') {
+    // each service is its own result: a deploy replaces only an earlier one of the same target
+    const t = deployTarget(first);
+    return t?.target ? `deploy|${t.target}|${t.namespace ?? ''}` : `deploy|${first.trim()}`;
+  }
   return a.kind === 'log' ? `log|${a.cwd || ''}|${first.trim()}` : `${a.kind}|${a.cwd || ''}`;
 }
 
@@ -731,9 +736,11 @@ export function taskLive(task, runs = []) {
   const seen = new Set();
   const recorded = [];
   const earlier = [];
+  // runs of an earlier attempt (before the task was sent back) are history too
+  const att = task.attempts?.length > 1 ? task.attempts[task.attempts.length - 1].ts : null;
   for (const a of all) {
     const k = supersedeKey(a);
-    (seen.has(k) ? earlier : recorded).push(a);
+    (seen.has(k) || (att && a.cmd && a.since && a.since < att) ? earlier : recorded).push(a);
     seen.add(k);
   }
   const withSummary = (list, extra = {}) => list.map((a) => ({ ...a, active: false, ...extra, summary: summarize(a) }));
@@ -978,7 +985,7 @@ function summarizeDeploy(text, ctx = {}) {
   const who = what.length > 3 ? `${what.slice(0, 3).join(', ')} +${what.length - 3}` : what.join(', ') || t.target || t.tool || 'deploy';
   const ns = t.namespace ? ` (${t.namespace})` : '';
   const why = fail.length ? ': ' + clip(fail[fail.length - 1].trim().replace(/^error:\s*/i, ''), 60) : '';
-  const line = state === 'ok' ? `deployed ${who}${ns} ✓` : state === 'failed' ? `${who}${ns} ✗${why}` : `deploying ${who}${ns}…`;
+  const line = state === 'ok' ? `deployed ${who}${ns}` : state === 'failed' ? `${who}${ns} failed${why}` : `deploying ${who}${ns}…`;
   return { state, line: clip(line), counts: { tool: t.tool ?? null, action: t.action ?? null, target: t.target ?? null, namespace: t.namespace ?? null, deployed: names }, details: fail.slice(-5).map((l) => clip(l.trim(), 160)) };
 }
 

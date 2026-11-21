@@ -127,6 +127,9 @@ done.
   needs changes, or add one.
 - **The `deploy` kind is built in**, not a plugin. When one command deploys several
   services (a loop), it collects every release the output reports.
+- **Each deploy target is its own result.** A deploy run replaces only an earlier one of
+  the same target and namespace (a retried `ledger`), not other services' deploys. Runs
+  from an earlier attempt count as history, not as the task's current state.
 - **On the board,** a planned task (a parent with criteria) starts folded. Its row shows
   the running slice with its live badge, how many slices wait, and `n/m` done. A leaf
   with steps shows `2/4 · <the current step>`.

@@ -874,9 +874,10 @@ elsewhere (`refresh`, e.g. a CI API), choose what opens outside the board (`open
   command; from the output when one command deploys several, e.g. a loop over services:
   helm's `Release "x" has been upgraded`, kubectl's `successfully rolled out`) and how it
   ended (the exit code, then the tools' failure lines: a progress deadline, a timeout,
-  `ImagePullBackOff`, ansible's `failed=N`): `deployed gateway, refund (payments) ✓`,
-  `ledger ✗: … exceeded its progress deadline`. So a task that deploys several services
-  shows each deployment without the agent reporting it;
+  `ImagePullBackOff`, ansible's `failed=N`): `deployed gateway, refund (payments)`,
+  `ledger failed: … exceeded its progress deadline`. Each target is its own result: a
+  deploy replaces only an earlier one of the same target and namespace. So a task that
+  deploys several services shows each deployment without the agent reporting it;
 - `wait` (polling loops) and `build` (other build tools): shown like a log, recorded as `log`;
 - `log` (and any other text file): error/warning counts and the last line.
 

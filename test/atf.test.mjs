@@ -1440,12 +1440,15 @@ test('§14 live: classify commands, output files, summarizers', async () => {
   assert.equal(L.classify('ssh ops sh -c "argocd app sync refund-svc"'), 'deploy');
   assert.equal(L.classify('mvn deploy'), 'maven');
   assert.equal(L.classify('kubectl get pods'), null);
-  assert.equal(L.summarizeText('deploy', 'Release "refund" has been upgraded. Happy Helming!\nSTATUS: deployed\n', { cmd: 'helm upgrade --install refund charts/refund -n payments', exit: 0 }).line, 'deployed refund (payments) ✓');
+  assert.equal(L.summarizeText('deploy', 'Release "refund" has been upgraded. Happy Helming!\nSTATUS: deployed\n', { cmd: 'helm upgrade --install refund charts/refund -n payments', exit: 0 }).line, 'deployed refund (payments)');
   const rollout = L.summarizeText('deploy', 'error: deployment "ledger" exceeded its progress deadline\n', { cmd: 'kubectl rollout status deploy/ledger', exit: 1 });
   assert.equal(rollout.state, 'failed');
-  assert.equal(rollout.line, 'ledger ✗: deployment "ledger" exceeded its progress deadline');
+  assert.equal(rollout.line, 'ledger failed: deployment "ledger" exceeded its progress deadline');
   const loop = L.summarizeText('deploy', 'Release "gateway" has been upgraded.\nRelease "refund" has been upgraded.\nRelease "ledger" does not exist. Installing it now.\nRelease "fx" has been upgraded.\n', { cmd: 'for s in gateway refund ledger fx; do helm upgrade --install $s charts/$s; done', exit: 0 });
-  assert.equal(loop.line, 'deployed gateway, refund, ledger +1 ✓');
+  assert.equal(loop.line, 'deployed gateway, refund, ledger +1');
+  // each target is its own result; a retry of the same one replaces it
+  assert.notEqual(L.supersedeKey({ kind: 'deploy', cmd: 'helm upgrade gateway charts/gateway -n s' }), L.supersedeKey({ kind: 'deploy', cmd: 'helm upgrade refund charts/refund -n s' }));
+  assert.equal(L.supersedeKey({ kind: 'deploy', cmd: 'kubectl rollout status deploy/ledger -n s' }), L.supersedeKey({ kind: 'deploy', cmd: 'helm upgrade --install ledger charts/ledger -n s' }));
   assert.deepEqual(loop.counts.deployed, ['gateway', 'refund', 'ledger', 'fx']);
   assert.equal(L.summarizeText('deploy', 'Release "gateway" has been upgraded.\n', { cmd: 'helm upgrade gw charts/gw' }).state, 'running');
   assert.equal(L.classify('echo "mvn test"'), null);
