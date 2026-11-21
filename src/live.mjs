@@ -925,6 +925,63 @@ const pipelineMatch = (cmd, { unquoted }) =>
   // URLs are often quoted (`curl -s "…/pipelines/$id"`): the raw command for those
   (/\b(curl|wget|http)\b/.test(unquoted) && /\/(pipelines|jobs|actions\/runs)\b/.test(cmd));
 
+// ---------------------------------------------------------------- deployments
+// helm, kubectl, argocd, helmfile, skaffold, flux, ansible-playbook: what was deployed (from
+// the command, or from the output when one command deploys several, e.g. a loop) and how it
+// ended (exit code, then the tools' own success and failure lines).
+
+const DEPLOY_RE =
+  /(^|[\s;&|(/])(helm\s+(upgrade|install|rollback|uninstall)\b|(kubectl|oc)\s+(apply|replace|rollout\s+(status|restart|undo)|set\s+image)\b|argocd\s+app\s+(sync|wait|rollback)\b|helmfile\b[^;&|]*\b(apply|sync|deploy)\b|skaffold\s+(run|deploy)\b|flux\s+reconcile\b|ansible-playbook\b)/;
+const VALUE_FLAGS = new Set(['-n', '--namespace', '-f', '--values', '--set', '--set-string', '--set-file', '--version', '--timeout', '--kube-context', '--kubeconfig', '-o', '--output', '-l', '--selector', '--context', '-i', '--inventory', '-e', '--extra-vars', '--limit', '--tags', '-t']);
+
+/** The first deploy command of a command line: {tool, action, target, namespace}. */
+export function deployTarget(cmd) {
+  const m = String(cmd ?? '').match(DEPLOY_RE);
+  if (!m) return null;
+  const rest = String(cmd).slice(m.index + m[0].length).split(/[;&|]|\bdo\b|\bdone\b/)[0];
+  const words = m[0].trim().replace(/^[;&|(/]/, '').split(/\s+/);
+  const tool = words[0];
+  const action = words.slice(1).join(' ') || null;
+  const args = [];
+  let namespace = null;
+  const toks = rest.trim().split(/\s+/).filter(Boolean);
+  for (let i = 0; i < toks.length; i++) {
+    const tok = toks[i];
+    if (tok === '-n' || tok === '--namespace') namespace = toks[++i] ?? null;
+    else if (tok.startsWith('--namespace=')) namespace = tok.slice(12);
+    else if (tok === '-f' || tok === '--filename') args.push(path.basename(toks[++i] ?? '')); // kubectl apply -f k8s/ledger.yaml
+    else if (VALUE_FLAGS.has(tok)) i++;
+    else if (!tok.startsWith('-')) args.push(tok);
+  }
+  let target = args[0] ?? null;
+  if (tool === 'ansible-playbook') target = args.find((a) => /\.ya?ml$/.test(a)) ?? target;
+  if (target) target = target.replace(/^(deployment|deploy|statefulset|sts|daemonset|ds)\//, '');
+  if (target && /[$`]/.test(target)) target = null; // a loop variable: the output says which
+  return { tool, action, target, namespace };
+}
+
+function summarizeDeploy(text, ctx = {}) {
+  const lines = text.split('\n');
+  const t = deployTarget(ctx.cmd) ?? {};
+  // what the output reports as deployed (several when one command deploys several)
+  const done = new Set();
+  for (const l of lines) {
+    const r = l.match(/Release "([^"]+)" (has been upgraded|does not exist\. Installing it now)/) || l.match(/^NAME:\s+(\S+)/) || l.match(/(?:deployment|statefulset|daemonset)(?:\.apps)? "([^"]+)" successfully rolled out/) || l.match(/^(?:deployment|statefulset|daemonset)\.apps\/(\S+) (?:configured|created|unchanged|image updated|restarted)/);
+    if (r) done.add(r[1]);
+  }
+  const fail = lines.filter((l) => /\b(Error|error|FAILED|failed=[1-9]|unreachable=[1-9]|exceeded its progress deadline|timed out waiting|ImagePullBackOff|CrashLoopBackOff|Degraded)\b/.test(l));
+  const ansibleOk = lines.some((l) => /PLAY RECAP/.test(l)) && !lines.some((l) => /\b(failed|unreachable)=[1-9]/.test(l));
+  const okLine = lines.some((l) => /STATUS: deployed|successfully rolled out|Health Status:\s+Healthy|Sync Status:\s+Synced|Happy Helming/.test(l)) || ansibleOk;
+  const state = ctx.exit === undefined || ctx.exit === null ? (fail.length ? 'failed' : 'running') : ctx.exit === 0 && !(fail.length && !okLine) ? 'ok' : 'failed';
+  const names = [...done];
+  const what = t.target ? [t.target, ...names.filter((n) => n !== t.target)] : names;
+  const who = what.length > 3 ? `${what.slice(0, 3).join(', ')} +${what.length - 3}` : what.join(', ') || t.target || t.tool || 'deploy';
+  const ns = t.namespace ? ` (${t.namespace})` : '';
+  const why = fail.length ? ': ' + clip(fail[fail.length - 1].trim().replace(/^error:\s*/i, ''), 60) : '';
+  const line = state === 'ok' ? `deployed ${who}${ns} ✓` : state === 'failed' ? `${who}${ns} ✗${why}` : `deploying ${who}${ns}…`;
+  return { state, line: clip(line), counts: { tool: t.tool ?? null, action: t.action ?? null, target: t.target ?? null, namespace: t.namespace ?? null, deployed: names }, details: fail.slice(-5).map((l) => clip(l.trim(), 160)) };
+}
+
 const BUILTIN = [
   {
     kind: 'pipeline',
@@ -955,6 +1012,12 @@ const BUILTIN = [
     description: 'test runners (npm/jest/vitest/pytest/go/cargo/node --test/unittest): totals, failing tests',
     match: (cmd, { unquoted }) => /(^|[\s;&|(/])(npm|pnpm|yarn|bun)\s+(run\s+)?test\b|(^|[\s;&|(/])(npx\s+)?(jest|vitest|pytest|mocha)\b|\bgo\s+test\b|\bcargo\s+test\b|\bnode\s+--test\b|\bpython3?\s+-m\s+(pytest|unittest)\b/.test(unquoted),
     summarize: summarizeTests,
+  },
+  {
+    kind: 'deploy',
+    description: 'deployments (helm, kubectl apply/rollout/set image, argocd, helmfile, skaffold, flux, ansible-playbook): what was deployed, and how it ended',
+    match: (cmd, { unquoted }) => DEPLOY_RE.test(unquoted),
+    summarize: summarizeDeploy,
   },
   {
     kind: 'wait',

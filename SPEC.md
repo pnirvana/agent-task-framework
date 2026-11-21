@@ -80,7 +80,7 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 ### Plan events
 | type | data |
 |------|------|
-| `plan.created` | `{title, goal?, description?, labels?, coordinator?, docs?, meta?}` (`coordinator` defaults to the creating actor; `docs`: the plan's documents, §12.7) |
+| `plan.created` | `{title, goal?, description?, labels?, coordinator?, docs?, meta?, parent_review?}` (`coordinator` defaults to the creating actor; `docs`: the plan's documents, §12.7; `parent_review`: parents with criteria are reviewed against them, §5.2) |
 | `plan.updated` | any subset of the above (shallow replace) |
 | `plan.status`  | `{status: active\|paused\|completed\|failed\|cancelled, message?, relayed?}` (closing: the human's decision, §13.3) |
 | `plan.review`  | `{summary, items: [{task, action: approve\|change\|note, message, file?, line?}]}`: one submitted review batch |
@@ -95,6 +95,8 @@ JSON Schema: [`schema/event.schema.json`](schema/event.schema.json).
 | `task.assigned` | `{assignee: string\|null}` | `null` = unassign |
 | `task.status`   | `{status, message?, on?: id[], for?: coordinator\|human, changes?: true}` | `message` on `done` is the task's **result summary**; `on` with `blocked`: tasks it is blocked on; `for` with `blocked` (no `on`): who must answer the question (default the coordinator; `human`: escalated, §12.4); `changes` with `todo`: **changes requested** from review (`message` is the coordinator's instructions) |
 | `task.progress` | `{message?, percent?: 0..100}` | heartbeat / milestone |
+| `task.steps`    | `{steps: string[]}` | the parts of the task's work, declared by its agent (`atf steps`); a new list replaces the old one, and steps with the same title keep their state |
+| `task.step`     | `{n, status: todo\|in_progress\|done\|skipped, message?}` | a step's state (`atf step`, `n` from 1); the task's `percent` becomes the share of done and skipped steps, its `last_message` names the step |
 | `task.note`     | `{message, kind?: info\|question\|decision\|warning\|checkpoint}` | `checkpoint`: where the work stands (done / left / how to verify) |
 | `task.artifact` | `{kind: file\|commit\|branch\|pr\|url\|other, ref, description?, git?}` | pointer to an output; `git` (files in a repository): `{path, repo, head}` when reported (§15) |
 | `task.session`  | `{ref, kind?, actor?}` | opaque reference to an agent session that worked on the task (§9) |
@@ -139,9 +141,23 @@ merely waits on unfinished dependencies stays `todo` and is reported as not `rea
 
 ### 5.2 Hierarchy and work packages
 
-Tasks form a tree via `parent`. A parent task is a container: it is never worked on
-directly, and its status and percent roll up from its children. Top-level tasks are the
-plan's branches.
+Tasks form a tree via `parent`. A parent task is never worked on directly, and its
+percent rolls up from its children. Top-level tasks are the plan's branches.
+
+- **A parent without acceptance criteria is a container:** its status rolls up from its
+  children.
+- **A parent with acceptance criteria of its own keeps its promise**, in a plan with
+  `parent_review` (written by `atf plan new`; an older plan, without it, keeps all parents
+  as containers, so its finished work stays finished; a running one opts in with `atf
+  plan update --parent-review on`, which puts its parents whose children are done into
+  review at once). When its children
+  are done, it goes to `review`: the write that finishes the last child also writes
+  `task.status` `review` for the parent (`data.auto: "children-done"`). It is done only
+  when its reviewer approves it against its own criteria, as any task in review (§12.5):
+  the coordinator, or the human where it names them. When a child is open again (sent
+  back, reopened, or a new child added), the same write puts the parent back to `todo`
+  (`data.auto: "children-open"`). Its effective status is `review` while its children
+  are done and it is not approved, so a dependency on it waits for the approval.
 
 Assigning a parent task (`task.assigned` on a task with children) delegates a **work
 package**: that actor owns the whole subtree. Every descendant without its own assignee
@@ -159,16 +175,24 @@ subtasks inside its package.
 - `block`, `review`, `done`, `fail` require a message.
 - Task ids are `T<n>`, allocated sequentially under the lock. Other ids are allowed.
 - Dependency cycles and parent cycles are rejected on write.
+- **Changes start a new attempt** (`atf changes T4 -m …`, the coordinator, or the
+  task's reviewer): `task.status` to `todo` with `changes: true`, on a leaf task in
+  `review` or `done`, or one that `failed`, is `blocked` or went the wrong way while
+  `in_progress` (the coordinator only). A retry is an attempt on the same task, not a new
+  task: its dependents, changes (§15) and history stay with it.
 
 ### 5.4 Derived fields (computed by fold, never written)
 | field | meaning |
 |-------|---------|
 | `children` | ids whose `parent` is this task |
+| `steps` | `[{n, title, status, ts, actor}]` from `task.steps` / `task.step` |
+| `attempts` | `[{n, by, instructions, actors, started_at, ended: {status, message, ts, actor, stopped?}}]`: a new one at each `changes`; `actors` worked on it; `ended` is its last review/done/failed/cancelled, or `stopped: true` with the status it had when it was sent back |
 | `path`, `depth` | ancestor ids (root first) and their count |
 | `owner` | `assignee`, else the nearest assigned ancestor (work package owner) |
 | `waiting_on` | deps whose effective status is not `done` |
 | `ready` | `status == todo && waiting_on == [] && children == []` |
-| `rollup_status` | parents only, derived from children (see `rollupStatus()`): `failed` if any child failed; `blocked` if a child is question-blocked, or if everything still open is blocked `--on` other tasks; a child blocked `--on` next to other open work counts as in progress |
+| `children_status` | parents only: the status derived from the children alone (`rollupStatus()`) |
+| `rollup_status` | parents only, derived from children; `review` for a parent with criteria whose children are done and which is not approved yet (see `rollupStatus()`): `failed` if any child failed; `blocked` if a child is question-blocked, or if everything still open is blocked `--on` other tasks; a child blocked `--on` next to other open work counts as in progress |
 | `rollup_waiting` | parents only: `blocked` only because of `--on` waits, no question |
 | `rollup_percent` | parents only, mean of leaf percents (cancelled excluded) |
 | `percent` | last reported percent; `100` on done; reset on `todo` |
@@ -793,7 +817,9 @@ without asking the agent and without spending its tokens.
    of its own in progress:
    - each shell command is classified: `maven`, `tests` (npm/jest/vitest/pytest/go/cargo/
      node --test/unittest), `pipeline` (`glab ci|pipeline`, `gh run watch|view`, `gh pr
-     checks`, `curl …/pipelines`), `wait` (`while/until … sleep` loops, `watch -n`),
+     checks`, `curl …/pipelines`), `deploy` (`helm upgrade|install|rollback`, `kubectl
+     apply|rollout|set image`, `argocd app sync|wait`, helmfile, skaffold, `flux
+     reconcile`, `ansible-playbook`), `wait` (`while/until … sleep` loops, `watch -n`),
      `build` (gradle, make, docker build, …), or ordinary;
    - **while it runs** it is listed in `<plan>/live/<actor>.json` (ephemeral, not in the
      log: `{actor, pid, runs: [{id, task, kind, cmd, cwd, since, out}]}`; `out` is the
@@ -823,7 +849,7 @@ nothing wrong.
 Additive (§11). `task.artifact` gains optional fields `live` (watched while the task
 runs), `cmd`, `cwd`, `since`, `exit`, `duration_ms` and `extra` (what the kind's `onStart`
 returned, e.g. Maven's baseline file). A recorded run is an artifact with `cmd` and no
-`live`. Its `kind` is a live kind: the built-in `log`, `maven`, `tests`, `pipeline`, or a
+`live`. Its `kind` is a live kind: the built-in `log`, `maven`, `tests`, `pipeline`, `deploy`, or a
 plugin's (any `^[a-z][a-z0-9-]{0,31}$`). The log holds pointers and summaries only, never
 output. Readers that do not know a kind show it as any other artifact.
 
@@ -844,6 +870,13 @@ elsewhere (`refresh`, e.g. a CI API), choose what opens outside the board (`open
   details: failing tests;
 - `pipeline`: pipeline id and URL (GitLab `/-/pipelines/N`, GitHub `actions/runs/N`) and
   the latest status word; `open` is the URL;
+- `deploy`: what was deployed (the release, deployment or app, and namespace, from the
+  command; from the output when one command deploys several, e.g. a loop over services:
+  helm's `Release "x" has been upgraded`, kubectl's `successfully rolled out`) and how it
+  ended (the exit code, then the tools' failure lines: a progress deadline, a timeout,
+  `ImagePullBackOff`, ansible's `failed=N`): `deployed gateway, refund (payments) ✓`,
+  `ledger ✗: … exceeded its progress deadline`. So a task that deploys several services
+  shows each deployment without the agent reporting it;
 - `wait` (polling loops) and `build` (other build tools): shown like a log, recorded as `log`;
 - `log` (and any other text file): error/warning counts and the last line.
 

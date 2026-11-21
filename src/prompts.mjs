@@ -18,7 +18,15 @@ function wasReopened(t) {
 function situation(s, t) {
   if (t.changes_requested) {
     const fb = t.feedback[t.feedback.length - 1];
-    return `it came back from review (round ${fb.round}) with these instructions from ${fb.actor ?? 'the coordinator'}: "${fb.message}". Address every point, say in an atf note how, then send it to review again.`;
+    const att = t.attempts ?? [];
+    const prev = att[att.length - 2]?.ended;
+    const n = att.length || fb.round + 1;
+    // how the previous attempt ended decides the wording: reviewed, or failed / stopped
+    if (prev && (prev.status === 'failed' || prev.stopped)) {
+      const how = prev.status === 'failed' ? `failed${prev.message ? `: "${prev.message}"` : ''}` : `was stopped while ${prev.status}`;
+      return `this is attempt ${n}: the previous attempt ${how}. Instructions for this attempt from ${fb.actor ?? 'the coordinator'}: "${fb.message}". Read its checkpoint and notes in \`atf show ${t.id}\`: clean up what it left behind if the instructions say so, do not repeat what went wrong.`;
+    }
+    return `it came back from review (attempt ${n}) with these instructions from ${fb.actor ?? 'the coordinator'}: "${fb.message}". Address every point, say in an atf note how, then send it to review again.`;
   }
   if (t.can_resume) return `it was blocked on ${t.blocked_on.join(', ')}, which ${t.blocked_on.length > 1 ? 'are' : 'is'} done now.`;
   if (t.answered) {

@@ -476,7 +476,172 @@ test('review: request changes, resubmit, approve; follow-up joins the package', 
   assert.deepEqual(run(['show', 'T2']).followups, ['T3']);
   run(['changes', 'T2', '-m', 'wrong approach', '--fresh']);
   assert.equal(run(['resume-info', 'T2']).policy, 'fresh');
-  assert.match(runFail(['changes', 'T3', '-m', 'x']).error, /in review or done/);
+  assert.match(runFail(['changes', 'T3', '-m', 'x']).error, /T3 is todo; changes start a new attempt/);
+});
+
+test('attempts: a retry with new instructions is a new attempt on the same task, not a new task', () => {
+  const { run, runFail, dir, env } = sandbox();
+  const w = { ATF_ACTOR: 'deployer', ATF_ROLE: 'subagent' };
+  run(['add', 'Deploy the services', '--accept', 'all four deployed', '--assign', 'deployer']); // T1
+  run(['add', 'Smoke test', '--dep', 'T1']); // T2
+  run(['add', 'Parent']); // T3
+  run(['add', 'child', '--parent', 'T3']); // T4
+  let t = run(['show', 'T1']);
+  assert.equal(t.attempts.length, 1);
+
+  // attempt 1 fails; the coordinator retries it with new instructions
+  run(['start', 'T1'], w);
+  run(['fail', 'T1', '-m', 'kubectl apply: the charts need helm'], w);
+  assert.match(runFail(['changes', 'T1', '-m', 'x'], w).error, /review/i, 'not the agent: it cannot review its own task');
+  let c = run(['changes', 'T1', '-m', '1. deploy with helm upgrade --install, not kubectl apply', '--fresh']);
+  assert.equal(c.attempt, 2);
+  t = run(['show', 'T1']);
+  assert.equal(t.status, 'todo');
+  assert.equal(t.changes_requested, true);
+  assert.deepEqual(t.attempts.map((a) => [a.n, a.ended?.status ?? null, a.instructions]), [
+    [1, 'failed', null],
+    [2, null, '1. deploy with helm upgrade --install, not kubectl apply'],
+  ]);
+  assert.deepEqual(t.attempts[0].actors, ['deployer']);
+  assert.deepEqual(run(['show', 'T2']).deps, ['T1'], 'dependents still wait on the same task');
+  assert.equal(run(['list']).length, 4, 'no new task');
+
+  // the prompt of the next agent says why it is started again
+  const d = run(['dispatch', 'T1', '--name', 'deployer2']);
+  assert.match(d.prompt, /this is attempt 2: the previous attempt failed: "kubectl apply: the charts need helm"/);
+  assert.match(d.prompt, /helm upgrade --install/);
+
+  // attempt 2 goes the wrong way while in progress: the coordinator stops it, attempt 3
+  const w2 = { ATF_ACTOR: 'deployer2', ATF_ROLE: 'subagent' };
+  run(['start', 'T1'], w2);
+  c = run(['changes', 'T1', '-m', '1. deploy to staging first']);
+  assert.equal(c.attempt, 3);
+  t = run(['show', 'T1']);
+  assert.deepEqual(t.attempts[1].ended, { ...t.attempts[1].ended, status: 'in_progress', stopped: true });
+  run(['start', 'T1'], w2);
+  run(['done', 'T1', '-m', 'all four deployed'], w2);
+  t = run(['show', 'T1']);
+  assert.deepEqual(t.attempts.map((a) => a.ended?.status), ['failed', 'in_progress', 'done']);
+  const text = execFileSync('node', [ATF, 'show', 'T1'], { cwd: dir, env }).toString();
+  assert.match(text, /attempts \(3\):/);
+  assert.match(text, /1\. deployer failed — kubectl apply: the charts need helm/);
+  assert.match(text, /2\. instructions from .*: 1\. deploy with helm/);
+
+  // a parent: send back the subtask instead
+  assert.match(runFail(['changes', 'T3', '-m', 'x']).error, /T3 is a parent task/);
+});
+
+test('steps: the parts of a task, checked off one by one; percent follows', () => {
+  const { run, runFail } = sandbox();
+  const w = { ATF_ACTOR: 'd', ATF_ROLE: 'subagent' };
+  run(['add', 'Deploy the four services', '--assign', 'd']); // T1
+  run(['add', 'other', '--assign', 'x']); // T2
+  run(['start', 'T1'], w);
+  run(['steps', 'T1', 'deploy gateway', 'deploy refund', 'deploy ledger', 'deploy fx'], w);
+  run(['step', 'T1', '1'], w);
+  run(['step', 'T1', 'deploy refund', 'start'], w);
+  let t = run(['show', 'T1']);
+  assert.deepEqual(t.steps.map((x) => x.status), ['done', 'in_progress', 'todo', 'todo']);
+  assert.equal(t.percent, 25);
+  assert.equal(t.last_message, 'step 2/4 started: deploy refund');
+  run(['step', 'T1', '2', 'done', '-m', 'rev 14'], w);
+  run(['step', 'T1', '4', 'skip'], w);
+  t = run(['show', 'T1']);
+  assert.equal(t.percent, 75);
+  assert.equal(t.last_message, 'step 4/4 skipped: deploy fx');
+  // a new list keeps the state of steps with the same title
+  run(['steps', 'T1', 'deploy gateway', 'deploy refund', 'deploy ledger', 'smoke test'], w);
+  assert.deepEqual(run(['show', 'T1']).steps.map((x) => x.status), ['done', 'done', 'todo', 'todo']);
+  assert.match(runFail(['step', 'T1', '9'], w).error, /T1 has 4 steps/);
+  assert.match(runFail(['steps', 'T2', 'a'], w).error, /assigned to x/);
+  assert.match(runFail(['step', 'T2', '1'], { ATF_ACTOR: 'x', ATF_ROLE: 'subagent' }).error, /no steps/);
+});
+
+test('a parent with criteria of its own goes to review when its slices are done', () => {
+  const { run, runFail } = sandbox();
+  const w = { ATF_ACTOR: 'w', ATF_ROLE: 'subagent' };
+  run(['add', 'Deploy refunds', '--accept', 'deployed, end-to-end test green']); // T1: planned, criteria
+  run(['add', 'build', '--parent', 'T1', '--assign', 'w']); // T2
+  run(['add', 'deploy', '--parent', 'T1', '--dep', 'T2', '--assign', 'w']); // T3: a sequence
+  run(['add', 'Container']); // T4: no criteria: rolls up as before
+  run(['add', 'part', '--parent', 'T4', '--assign', 'w']); // T5
+  run(['add', 'Smoke test', '--dep', 'T1']); // T6
+  for (const id of ['T2', 'T3', 'T5']) {
+    run(['start', id], w);
+    run(['done', id, '-m', 'ok'], w);
+  }
+  let t = run(['show', 'T1']);
+  assert.equal(t.status, 'review', 'written in the same write as the last slice');
+  assert.equal(t.rollup_status, 'review');
+  assert.equal(run(['show', 'T4']).rollup_status, 'done', 'no criteria: done when its children are');
+  assert.deepEqual(run(['show', 'T6']).waiting_on, ['T1'], 'dependents wait for the review');
+  assert.ok(run(['wait', '--timeout', '1000']).attention.some((a) => a.task === 'T1' && a.reason === 'review'));
+  assert.match(runFail(['done', 'T1', '-m', 'x'], w).error, /only the coordinator/);
+  assert.match(runFail(['changes', 'T1', '-m', 'x']).error, /send back the subtask that needs changes, or add one/);
+
+  // the review finds a gap: a new slice puts T1 back to work; done again: review again
+  run(['add', 'migrate the schema', '--parent', 'T1', '--assign', 'w']); // T7
+  assert.equal(run(['show', 'T1']).status, 'todo');
+  run(['start', 'T7'], w);
+  run(['done', 'T7', '-m', 'ok'], w);
+  assert.equal(run(['show', 'T1']).status, 'review');
+  run(['done', 'T1', '-m', 'approved: deployed, e2e green']);
+  t = run(['show', 'T1']);
+  assert.equal(t.rollup_status, 'done');
+  assert.deepEqual(run(['show', 'T6']).waiting_on, []);
+
+  // a reopened slice reopens the approved parent
+  run(['changes', 'T3', '-m', '1. redeploy with the new config']);
+  assert.equal(run(['show', 'T1']).status, 'todo');
+  assert.notEqual(run(['show', 'T1']).rollup_status, 'done');
+});
+
+test('parent reviews are a property of the plan: older plans keep parents as containers', () => {
+  // an older plan's log (no parent_review): a parent with criteria, done children, a dependent
+  const old = fold([
+    ev(1, 'plan.created', undefined, { title: 'old' }),
+    ev(2, 'task.created', 'T1', { title: 'Backend', acceptance: ['API works'] }),
+    ev(3, 'task.created', 'T2', { title: 'endpoint', parent: 'T1' }),
+    ev(4, 'task.created', 'T3', { title: 'frontend', deps: ['T1'] }),
+    ev(5, 'task.status', 'T2', { status: 'in_progress' }),
+    ev(6, 'task.status', 'T2', { status: 'done', message: 'ok' }),
+    ev(7, 'plan.status', undefined, { status: 'completed' }),
+  ]);
+  assert.equal(old.tasks.T1.rollup_status, 'done', 'unchanged: a container');
+  assert.deepEqual(old.tasks.T3.waiting_on, []);
+
+  const { run, runFail } = sandbox();
+  const w = { ATF_ACTOR: 'w', ATF_ROLE: 'subagent' };
+  assert.equal(run(['plan', 'show']).parent_review, true, 'a new plan has them');
+  run(['plan', 'update', '--parent-review', 'off']); // as an older plan
+  run(['add', 'Backend', '--accept', 'API works']); // T1
+  run(['add', 'endpoint', '--parent', 'T1', '--assign', 'w']); // T2
+  run(['start', 'T2'], w);
+  run(['done', 'T2', '-m', 'ok'], w);
+  let t = run(['show', 'T1']);
+  assert.equal(t.status, 'todo', 'no review event written');
+  assert.equal(t.rollup_status, 'done');
+  // a running older plan opts in: its parents whose children are done go to review now
+  const u = run(['plan', 'update', '--parent-review', 'on']);
+  assert.deepEqual(u.review, ['T1']);
+  t = run(['show', 'T1']);
+  assert.equal(t.status, 'review');
+  assert.match(runFail(['plan', 'update', '--parent-review', 'maybe']).error, /on or off/);
+});
+
+test('a parent reviewed by the human waits for the human', () => {
+  const { run, runFail } = sandbox();
+  const w = { ATF_ACTOR: 'w', ATF_ROLE: 'subagent' };
+  run(['add', 'Checkout', '--accept', 'a customer can pay', '--reviewer', 'human']); // T1
+  run(['add', 'api', '--parent', 'T1', '--assign', 'w']); // T2
+  run(['start', 'T2'], w);
+  run(['done', 'T2', '-m', 'ok'], w);
+  assert.equal(run(['show', 'T1']).status, 'review');
+  assert.ok(!(run(['wait', '--timeout', '500']).attention ?? []).some((a) => a.task === 'T1'), 'not the coordinator\'s to approve');
+  assert.ok(run(['inbox', '--for', 'human']).some((i) => i.task === 'T1' && i.kind === 'your-review'));
+  assert.match(runFail(['done', 'T1', '-m', 'x']).error, /reviewed by human/);
+  run(['done', 'T1', '-m', 'works'], { ATF_ACTOR: 'human' });
+  assert.equal(run(['show', 'T1']).rollup_status, 'done');
 });
 
 test('reviews: --by human tasks are not for the coordinator; feedback drafts submit in one write', () => {
@@ -1269,6 +1434,20 @@ test('§14 live: classify commands, output files, summarizers', async () => {
   assert.equal(L.classify('for i in $(seq 1 30); do\n  r=$(curl -fsS "localhost:8765/api/v4/projects/demo/pipelines/$id")\n  sleep 10\ndone'), 'pipeline');
   assert.equal(L.classify('for i in 1 2 3; do\n  test -f done.txt && break\n  sleep 5\ndone'), 'wait');
   assert.equal(L.classify('npm test'), 'tests');
+  // deployments: what was deployed and how it ended
+  assert.equal(L.classify('helm upgrade --install refund ./charts/refund -n payments --wait'), 'deploy');
+  assert.equal(L.classify('kubectl rollout status deployment/ledger -n payments'), 'deploy');
+  assert.equal(L.classify('ssh ops sh -c "argocd app sync refund-svc"'), 'deploy');
+  assert.equal(L.classify('mvn deploy'), 'maven');
+  assert.equal(L.classify('kubectl get pods'), null);
+  assert.equal(L.summarizeText('deploy', 'Release "refund" has been upgraded. Happy Helming!\nSTATUS: deployed\n', { cmd: 'helm upgrade --install refund charts/refund -n payments', exit: 0 }).line, 'deployed refund (payments) ✓');
+  const rollout = L.summarizeText('deploy', 'error: deployment "ledger" exceeded its progress deadline\n', { cmd: 'kubectl rollout status deploy/ledger', exit: 1 });
+  assert.equal(rollout.state, 'failed');
+  assert.equal(rollout.line, 'ledger ✗: deployment "ledger" exceeded its progress deadline');
+  const loop = L.summarizeText('deploy', 'Release "gateway" has been upgraded.\nRelease "refund" has been upgraded.\nRelease "ledger" does not exist. Installing it now.\nRelease "fx" has been upgraded.\n', { cmd: 'for s in gateway refund ledger fx; do helm upgrade --install $s charts/$s; done', exit: 0 });
+  assert.equal(loop.line, 'deployed gateway, refund, ledger +1 ✓');
+  assert.deepEqual(loop.counts.deployed, ['gateway', 'refund', 'ledger', 'fx']);
+  assert.equal(L.summarizeText('deploy', 'Release "gateway" has been upgraded.\n', { cmd: 'helm upgrade gw charts/gw' }).state, 'running');
   assert.equal(L.classify('echo "mvn test"'), null);
   assert.equal(L.classify('ls -la'), null);
   assert.equal(L.cwdOf('cd api && mvn test', '/w'), '/w/api');

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
-import { TERMINAL, driverInbox, planSummary, HUMAN } from '../../../src/core.mjs';
+import { TERMINAL, driverInbox, planSummary, HUMAN, keepsCriteria } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, reviewEvents, hasLiveWaiter } from '../../../src/store.mjs';
 import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject, pluginConfig, focusPane } from './herdr.mjs';
 import { progressText } from './sync.mjs';
@@ -133,6 +133,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     scrolls: {},
     open: new Map(), // plan key -> expanded? (multi-plan Tasks view)
     collapsed: new Set(), // task keys collapsed in the tree
+    foldSeen: new Set(), // planned tasks (parents with criteria) folded once when first seen
     focus: null, // {root, plan}: plan for the Plan tab when the scope holds several
     cache: new Map(), // plan key -> {mtime, state}
     agents: new Map(),
@@ -376,19 +377,40 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const right = [];
     if (t.children.length) {
       const done = t.children.filter((c) => effStatus(st.tasks[c]) === 'done').length;
+      // what goes on inside: the slices being worked on (with the live badge of the first),
+      // how many wait, and the attempt it is on
+      const leaves = (id) => (st.tasks[id].children.length ? st.tasks[id].children.flatMap(leaves) : [id]);
+      const inside = t.children.flatMap(leaves).map((id) => st.tasks[id]);
+      const running = inside.filter((k) => k.status === 'in_progress');
+      const waiting = inside.filter((k) => k.status === 'todo' && k.waiting_on.length).length;
+      if (running.length && ui.collapsed.has(row.k)) {
+        const live = liveOf(st, running[0]);
+        const badge = live && liveBadge(live);
+        right.push([`▶ ${clip(running[0].title, 22).trimEnd()}${running.length > 1 ? ` +${running.length - 1}` : ''}`, 'yellow']);
+        if (badge) right.push([`${badge.glyph} ${clip(badge.text, 20).trimEnd()}`, badge.color]);
+      }
+      if (waiting && ui.collapsed.has(row.k)) right.push([`${waiting} waiting`, 'dim']);
       right.push([`${done}/${t.children.length}`, 'dim']);
+      if (t.status === 'review' && t.reviewer === HUMAN) right.push(['for you', 'red bold']);
       if (t.assignee && t.assignee !== row.under) right.push([`▣ ${t.assignee}`, 'cyan bold']);
     } else {
       if (t.status === 'todo' && t.waiting_on.length) right.push([`⧗ ${t.waiting_on.join(',')}`, 'dim']);
       if (t.status === 'blocked' && t.blocked_on.length) right.push([t.can_resume ? 'can resume' : `⧗ on ${t.blocked_on.join(',')}`, t.can_resume ? 'green' : 'dim']);
       if (t.human_input?.length) right.push(['✎ with coordinator', 'magenta']);
       if (t.status === 'blocked' && t.blocked_for === 'human' && !t.answered) right.push(['for you', 'red bold']);
-      if (t.changes_requested) right.push([`↺ changes`, 'magenta']);
+      const nAtt = t.attempts?.length ?? 1;
+      if (t.changes_requested) right.push([`↺ attempt ${nAtt}`, 'magenta']);
+      else if (nAtt > 1 && !TERMINAL.has(t.status)) right.push([`attempt ${nAtt}`, 'dim']);
       else if (t.ready && !t.owner) right.push(['ready', 'green']);
       const live = liveOf(st, t);
       const badge = live && liveBadge(live);
       if (badge) right.push([`${badge.glyph} ${clip(badge.text, 26).trimEnd()}`, badge.color]);
-      if (t.status === 'in_progress' && t.percent != null) right.push([`${t.percent}%`, 'yellow']);
+      if (t.steps?.length && !TERMINAL.has(t.status)) {
+        // the declared parts of the work: how many are finished, and the one being done
+        const fin = t.steps.filter((x) => x.status === 'done' || x.status === 'skipped').length;
+        const cur = t.steps.find((x) => x.status === 'in_progress') ?? t.steps.find((x) => x.status === 'todo');
+        right.push([`${fin}/${t.steps.length}${cur && t.status === 'in_progress' ? ` · ${clip(cur.title, 24).trimEnd()}` : ''}`, 'yellow']);
+      } else if (t.status === 'in_progress' && t.percent != null) right.push([`${t.percent}%`, 'yellow']);
       if (row.under && t.owner === row.under); // the agent heading above names it
       else if (t.assignee) right.push([t.assignee, 'cyan']);
       else if (t.owner) right.push([`↳${t.owner}`, 'cyan dim']);
@@ -430,6 +452,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       }
       const visit = (id, prefix, isLast, depth) => {
         const k = `${p.key}#${id}`;
+        // a planned task (a parent with criteria of its own) starts folded: its row sums up its slices
+        if (keepsCriteria(p.st.tasks[id], p.st) && !ui.foldSeen.has(k)) {
+          ui.foldSeen.add(k);
+          ui.collapsed.add(k);
+        }
         rows.push({ type: 'task', root: p.root, plan: p.id, st: p.st, key: p.key, task: id, k, prefix: depth ? prefix + (isLast ? '└─' : '├─') : '' });
         if (ui.collapsed.has(k)) return;
         const kids = p.st.tasks[id].children;
@@ -579,14 +606,32 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
         L.push([[`  ${STATUS[cs][0]} `, STATUS[cs][1]], [`${c} `, 'bold'], [ct.title + ' ', ''], [ct.owner && ct.owner !== t.owner ? '@' + ct.owner : '', 'cyan'], [ct.children.length ? `  (${ct.children.length} subtasks)` : '', 'dim']]);
       }
     }
+    if (t.steps?.length) {
+      const fin = t.steps.filter((x) => x.status === 'done' || x.status === 'skipped').length;
+      L.push([], [['steps', 'bold'], [`  ${fin}/${t.steps.length}`, 'dim']]);
+      const MARK = { todo: ['○', 'dim'], in_progress: ['◐', 'yellow'], done: ['✓', 'green'], skipped: ['–', 'dim'] };
+      for (const x of t.steps) L.push([[`  ${MARK[x.status][0]} `, MARK[x.status][1]], [`${x.n}. ${x.title}`, x.status === 'done' || x.status === 'skipped' ? 'dim' : x.status === 'in_progress' ? 'bold' : '']]);
+    }
     if (t.acceptance.length) {
       L.push([], [['acceptance', 'bold']]);
       for (const ac of t.acceptance) for (const [i, l] of wrap(ac, W - 6).entries()) L.push([[i ? '      ' : `  [${t.status === 'done' ? 'x' : ' '}] `, 'dim'], [l, '']]);
     }
-    if (t.feedback?.length) {
-      const fb = t.feedback[t.feedback.length - 1];
-      L.push([], [[t.changes_requested ? '↺ changes requested' : 'last review feedback', t.changes_requested ? 'bold magenta' : 'bold'], [`  round ${fb.round} · ${fb.actor ?? ''} ${ago(fb.ts)} ago`, 'dim']]);
-      for (const l of wrap(fb.message, W - 2)) L.push([[l, t.changes_requested ? 'magenta' : '']]);
+    if (t.attempts?.length > 1 || t.attempts?.[0]?.instructions) {
+      // every attempt: the instructions it started with, who worked on it, how it ended
+      L.push([], [[`attempts (${t.attempts.length})`, 'bold']]);
+      for (const a of t.attempts) {
+        const cur = a === t.attempts[t.attempts.length - 1];
+        if (a.instructions) {
+          L.push([[`  ${a.n}. `, 'bold'], [`instructions from ${a.by ?? '?'}`, 'dim']]);
+          for (const l of wrap(a.instructions, W - 6)) L.push([['     ', ''], [l, cur && t.changes_requested ? 'magenta' : '']]);
+        }
+        const end = a.ended ? (a.ended.stopped ? `stopped while ${a.ended.status}` : a.ended.status) : a.started_at ? 'in progress' : 'not started';
+        const head = a.instructions ? '     ' : `  ${a.n}. `;
+        const line = [[head, 'bold'], [a.actors.length ? a.actors.join(', ') + ' ' : '', 'cyan'], [end, end === 'failed' ? 'red' : 'dim'], [a.ended?.message ? ' — ' : '', 'dim']];
+        const msg = a.ended?.message ? wrap(a.ended.message, Math.max(20, W - 30)) : [];
+        L.push([...line, [msg[0] ?? '', '']]);
+        for (const l of msg.slice(1)) L.push([['      ' + l, '']]);
+      }
     }
     if (t.origin) L.push([], [['follow-up of ', 'dim'], [`${t.origin} ${st.tasks[t.origin]?.title ?? ''}`, '']]);
     if (t.followups?.length) L.push([[`follow-ups: ${t.followups.join(', ')}`, 'dim']]);
@@ -625,7 +670,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (hist.length) {
       L.push([], [['activity', 'bold']]);
       for (const h of hist) {
-        const what = h.type === 'status' ? `${h.from} → ${h.to}` : h.type === 'assigned' ? `assigned ${h.assignee ?? '-'}` : `progress${h.percent != null ? ' ' + h.percent + '%' : ''}`;
+        const what = h.type === 'status' ? `${h.from} → ${h.to}` : h.type === 'assigned' ? `assigned ${h.assignee ?? '-'}` : h.type === 'step' || h.type === 'steps' ? h.type : `progress${h.percent != null ? ' ' + h.percent + '%' : ''}`;
         L.push([[`  ${ago(h.ts).padStart(4)} `, 'dim'], [(h.actor || '') + ' ', 'cyan'], [what, '']]);
         if (h.message) for (const l of wrap(h.message, W - 10)) L.push([['        ' + l, 'dim']]);
       }
@@ -1168,7 +1213,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const rework = t.status === 'todo' && t.changes_requested;
     const [g, gc] = rework ? ['↺', 'magenta'] : t.answered ? ['⊘', 'green'] : STATUS[t.status];
     const crumb = t.path.length ? st.tasks[t.path[t.path.length - 1]].title + ' › ' : '';
-    const msg = rework ? `changes requested (round ${t.feedback.length}): ${t.feedback[t.feedback.length - 1]?.message ?? ''}` : t.answered ? 'question answered, resuming' : t.last_message || '';
+    const msg = rework ? `attempt ${t.attempts?.length ?? t.feedback.length + 1}: ${t.feedback[t.feedback.length - 1]?.message ?? ''}` : t.answered ? 'question answered, resuming' : t.last_message || '';
     const live = liveOf(st, t);
     const badge = live && liveBadge(live);
     const right = [];
@@ -1322,7 +1367,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (a) meta.push(`agent ${a.agent_status}${a.stale ? ' (stalled?)' : ''}`);
     if (t.status === 'in_progress' && t.percent != null) meta.push(`${t.percent}%`);
     if (t.reviewer || t.review) meta.push(`review by ${t.reviewer ?? 'coordinator'}`);
-    if (t.feedback?.length) meta.push(`review round ${t.feedback.length + (t.status === 'review' ? 1 : 0)}`);
+    if ((t.attempts?.length ?? 1) > 1) meta.push(`attempt ${t.attempts.length}`);
     meta.push(`updated ${ago(t.updated_at)} ago`);
     L.push([[' ' + meta.join('  ·  '), 'dim']]);
     // the lead: what this row asks of you, or where the work stands
@@ -1345,11 +1390,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     } else if (t.changes_requested) {
       const fb = t.feedback[t.feedback.length - 1];
       L.push([]);
-      label('changes requested', `round ${fb.round} · ${fb.actor ?? ''} ${ago(fb.ts)} ago`);
+      label('changes requested', `attempt ${t.attempts?.length ?? fb.round + 1} · ${fb.actor ?? ''} ${ago(fb.ts)} ago`);
       para(fb.message, 'magenta', 6, '   ');
     }
     // the trail: latest progress, then the checkpoint
-    const trail = t.history.filter((h) => h.message && (h.type === 'progress' || h.type === 'status')).slice(-4);
+    const trail = t.history.filter((h) => h.message && (h.type === 'progress' || h.type === 'status' || h.type === 'step')).slice(-4);
     if (trail.length && !(t.status === 'blocked' || t.status === 'review' || t.status === 'failed') ) {
       L.push([]);
       label('latest');

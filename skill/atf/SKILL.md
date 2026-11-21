@@ -65,6 +65,10 @@ For each task:
 2. Claim it: `atf start T3` (or `atf next` to pick up the next ready task).
 3. Report at real milestones, not on every step, roughly every few minutes of work:
    `atf progress T3 "migrations written, wiring handlers" --pct 40`
+   When the work has distinct parts (deploy four services, migrate three schemas),
+   declare them when you start: `atf steps T3 "deploy gateway" "deploy refund" …`, and
+   check each off as it is done: `atf step T3 2` (the board shows `2/4 · <the current
+   step>`, and the task's percent follows).
 4. Record outputs as you produce them:
    `atf artifact T3 src/auth/callback.ts` · `atf artifact T3 abc1234 --kind commit` ·
    `atf artifact T3 feature/login --kind branch` (reviewers open these directly)
@@ -100,8 +104,9 @@ For each task:
 7. **Started early?** If your task depends on unfinished tasks and you were told to start
    early (`atf start <id> --early`), do only what does not need them. Then write a
    checkpoint and `atf block <id> --on <deps> -m "<what you need>"`.
-8. **Changes requested**: your prompt (and `atf show <id>`, under "changes requested")
-   holds the coordinator's instructions. `atf start <id>`, address **every** point,
+8. **Changes requested, or a new attempt**: your prompt (and `atf show <id>`, under
+   "attempts") holds the coordinator's instructions, and what earlier attempts tried and
+   how they ended: do not repeat what went wrong. `atf start <id>`, address **every** point,
    record how in a note (`atf note <id> "1. … 2. …"`), and send it to review again with a
    summary of what changed. If you disagree with a point or it needs more than the task
    allows, do not silently skip or stretch it: block with the question.
@@ -169,8 +174,16 @@ show it, or they ask you). Two rules make that work:
    atf add "Checkout flow" --accept "…" --reviewer human # the human tests it
    ```
    Use `--review` for tasks you want to check before they count as done (the subagent
-   must finish with `atf review`). Parents are containers; their status rolls up from
-   subtasks. Declare every dependency that crosses packages: undeclared cross-package
+   must finish with `atf review`). A parent without criteria is a container: its status
+   rolls up from its subtasks. A parent **with** criteria of its own (`--accept`) keeps
+   its promise: when its subtasks are done it goes to `review`, and is done only when its
+   reviewer (you, or the human) approves it against those criteria. So when a task turns
+   out to need several pieces of work (parts in parallel, steps in sequence, or both),
+   add them as subtasks under it (`atf add "…" --parent T4`, with `--dep` between them
+   where they depend on each other): the task stays one row on the board, and the whole
+   is checked once at the end. (Plans created before this existed keep every parent as a
+   container: `atf plan show` says `parent_review` when the plan has it.) Declare every
+   dependency that crosses packages: undeclared cross-package
    dependencies are the main cause of agents waiting on each other.
 4. **Dispatch: you start every subagent.** **Every task of a plan is delegated through
    ATF**: in herdr with `atf-herdr spawn`, elsewhere with `atf dispatch` (below), never
@@ -228,8 +241,18 @@ show it, or they ask you). Two rules make that work:
      task questions, or to report status: the human already sees every task question
      on its task, and status on the board.
      A failure you cannot resolve: escalate it the same way (`atf block T4 --for human`).
+   - **An attempt that went wrong** (failed, took the wrong approach, or is stuck while
+     the task itself still stands): retry it as a **new attempt on the same task**, not
+     as a new task: `atf changes T4 -m "1. <what to do differently> 2. …"` (also on a
+     failed, blocked or in-progress task; `--fresh` for a new approach), then spawn. Its
+     dependents, changes and history stay with it, and the next agent sees every earlier
+     attempt in `atf show T4`. Say whether to clean up what the failed attempt left
+     behind (its checkpoint says what). Stop a still-running agent first.
    - **Review** every task in `review` against its acceptance criteria (read the change,
-     run its checks), then decide exactly one of:
+     run its checks), then decide exactly one of the options below. A parent in review
+     (its subtasks are done) is checked as a whole: do its parts together meet its
+     criteria (deployed, end to end)? If not, send back the subtask that needs changes,
+     or add one: either puts the parent back to work.
      - **Meets the criteria** → approve: `atf done T4 -m "approved: <what you checked>"`.
      - **Does not meet them** → `atf changes T4 -m "1. <concrete change> 2. <…>"`, then
        spawn a new agent for it. Be specific and number the points: they are the new
@@ -242,7 +265,8 @@ show it, or they ask you). Two rules make that work:
        dependencies): pass what it needs. Do not stretch a task beyond its criteria.
      - **The criteria themselves were wrong** → `atf edit T4 --accept "…"` (replaces the
        list), then request changes.
-     - **Cannot be done as specified** → `atf cancel T4 -m why` and re-plan.
+     - **Cannot be done as specified** (the task itself is wrong, not just the attempt)
+       → `atf cancel T4 -m why` and re-plan.
      If a subagent says the human must test something, decide whether that is needed;
      if so, hand the review to them: `atf edit T4 --reviewer human`.
    - **Reviews by the human.** Tasks whose reviewer is the human are not yours to approve

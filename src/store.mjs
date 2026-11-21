@@ -6,7 +6,7 @@ import { initConfigFile, PROJECT_TEMPLATE } from './config.mjs';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { fold, PROTOCOL_VERSION, reviewRefusal } from './core.mjs';
+import { fold, PROTOCOL_VERSION, reviewRefusal, parentTransitions } from './core.mjs';
 import { snapshotDrafts } from './changes.mjs';
 
 export const ROOT_NAME = '.atf';
@@ -149,6 +149,9 @@ export function transact(root, planId, actor, fn) {
       return ev;
     });
     if (written.length) {
+      // parents that keep their criteria (§5.2): their review follows from their children
+      for (const d of parentTransitions(fold(events.concat(written))))
+        written.push({ v: PROTOCOL_VERSION, seq: ++seq, id: 'ev_' + crypto.randomBytes(6).toString('hex'), ts: new Date().toISOString(), plan: planId, type: d.type, task: d.task, actor, data: d.data });
       fs.mkdirSync(planDir(root, planId), { recursive: true });
       fs.appendFileSync(eventsPath(root, planId), written.map((e) => JSON.stringify(e)).join('\n') + '\n');
       const next = fold(events.concat(written));

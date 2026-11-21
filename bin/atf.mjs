@@ -65,6 +65,8 @@ Setup / plans
   atf plan show [id]                    plan overview: structure, ownership, decisions, artifacts
   atf plan new <title> ... [--coordinator NAME]   (default: you become its coordinator)
   atf plan update [--title T] [--goal G] [--desc D] [--doc PATH]... [--resume fresh|auto|resume]
+                  [--parent-review on|off]   parents with criteria are reviewed when their
+                                        subtasks are done (new plans: on; older plans: off)
                   [--coordinator NAME]    (--doc replaces the list; --doc - clears it)
   atf plan checkpoint "<where the plan stands, what you wait for, what is next>"
                                         (coordinator) handoff to the next coordinator session
@@ -94,6 +96,9 @@ Tasks (worker)
                                         before its dependencies are done (do what you can,
                                         then block --on them)
   atf progress <task> <msg> [--pct N]   heartbeat / milestone
+  atf steps <task> "<step>" "<step>" …  the parts of the task's work (e.g. one per service
+                                        to deploy); its percent follows them
+  atf step <task> <n|title> [done|start|skip] [-m note]   check a step off
   atf note <task> <msg> [--kind ${NOTE_KINDS.join('|')}]
   atf artifact <task> <ref> [--kind ${ARTIFACT_KINDS.join('|')}] [--desc D]
   atf artifact <task> <file> --live [--kind log|maven|tests|pipeline] [--cwd DIR]
@@ -132,8 +137,10 @@ Tasks (worker)
                                         ask a specific reviewer (e.g. the human) instead
                                         of the coordinator
   atf changes <task> -m "1. … 2. …" [--fresh]
-                                        (coordinator) send a task in review/done back with
-                                        requested changes, then start an agent for it.
+                                        (coordinator) a new attempt with instructions: a
+                                        task in review or done sent back, or one that
+                                        failed, is blocked or went the wrong way; then
+                                        start an agent for it.
                                         As the human: a change request for the coordinator
   atf cancel | reopen | release <task> [-m msg]
 
@@ -417,7 +424,8 @@ function renderTaskLine(t, state, prefix = '') {
   const who = ownerLabel(t);
   if (who) bits.push(t.children.length && t.assignee ? `${who}${dim(' (package)')}` : who);
   if (t.status === 'in_progress' && t.percent != null) bits.push(yellow(`${t.percent}%`));
-  if (t.changes_requested) bits.push(magenta(`↺ changes (round ${t.feedback.length})`));
+  if (t.changes_requested) bits.push(magenta(`↺ attempt ${t.attempts?.length ?? t.feedback.length + 1}`));
+  else if ((t.attempts?.length ?? 1) > 1) bits.push(dim(`attempt ${t.attempts.length}`));
   else if (t.ready) bits.push(green('ready'));
   if (t.status === 'todo' && t.waiting_on.length) bits.push(dim(`waits on ${t.waiting_on.join(',')}`));
   if (t.status === 'blocked' && t.blocked_on.length) bits.push(t.can_resume ? green(`can resume (${t.blocked_on.join(',')} done)`) : dim(`blocked on ${t.blocked_on.join(',')}`));
@@ -471,7 +479,7 @@ function renderActorLine(a, state) {
 }
 function renderPlan(state) {
   const L = [renderStatus(state).split('\n').slice(0, 3).join('\n')];
-  L.push(dim(`created ${state.created_at?.slice(0, 16).replace('T', ' ')} by ${state.created_by ?? '?'} · updated ${ago(state.updated_at)}`));
+  L.push(dim(`created ${state.created_at?.slice(0, 16).replace('T', ' ')} by ${state.created_by ?? '?'} · updated ${ago(state.updated_at)} · ${state.parent_review ? 'parent_review: parents with criteria are reviewed when their subtasks are done' : 'parents are containers (atf plan update --parent-review on)'}`));
   if (state.status_message) L.push('', bold('status: ') + state.status_message);
   if (state.description) L.push('', state.description);
   if (state.docs?.length) L.push('', bold('documents:') + dim(' (read these first: the plan\'s design and approach)'), ...state.docs.map((d) => `  ${d}`));
@@ -544,10 +552,18 @@ function renderTask(t, state) {
   if (t.labels.length) L.push(`labels:   ${t.labels.join(', ')}`);
   if (t.percent != null && !t.children.length) L.push(`progress: ${t.percent}%`);
   if (t.rollup_percent != null) L.push(`progress: ${t.rollup_percent}% (rolled up)`);
-  if (t.feedback?.length) {
-    const fb = t.feedback[t.feedback.length - 1];
-    L.push('', (t.changes_requested ? magenta(bold('changes requested')) : bold('last review feedback')) + dim(` (round ${fb.round}, ${fb.actor ?? '?'}):`), fb.message);
+  if (t.attempts?.length > 1 || t.attempts?.[0]?.instructions) {
+    // every earlier attempt: who worked on it, how it ended, and the instructions that followed
+    L.push('', bold(`attempts (${t.attempts.length}):`));
+    for (const a of t.attempts) {
+      const cur = a === t.attempts[t.attempts.length - 1];
+      if (a.instructions) L.push(`  ${bold(`${a.n}.`)} ${dim(`instructions from ${a.by ?? '?'}:`)} ${cur && t.changes_requested ? magenta(a.instructions) : a.instructions}`);
+      const who = a.actors.length ? a.actors.join(', ') : null;
+      const end = a.ended ? (a.ended.stopped ? `stopped while ${a.ended.status}` : a.ended.status) : a.started_at ? 'in progress' : 'not started';
+      L.push(`  ${a.instructions ? '   ' : bold(`${a.n}.`) + ' '}${who ? cyan(who) + ' ' : ''}${end === 'failed' ? red(end) : dim(end)}${a.ended?.message ? dim(' — ') + a.ended.message : ''}`);
+    }
   }
+  if (t.steps?.length) L.push('', ...stepsText(t).split('\n').map((l, i) => (i ? l : bold('steps') + dim(l.slice(t.id.length + 6)))));
   if (t.description) L.push('', t.description);
   if (t.acceptance.length) L.push('', bold('acceptance criteria:'), ...t.acceptance.map((a) => `  - [${t.status === 'done' ? 'x' : ' '}] ${a}`));
   if (t.checkpoint && !TERMINAL.has(t.status))
@@ -565,7 +581,7 @@ function renderTask(t, state) {
     L.push('', bold('recent activity:'));
     for (const h of hist) {
       const what =
-        h.type === 'status' ? `${h.from} → ${h.to}` : h.type === 'assigned' ? `assigned ${h.assignee ?? '(none)'}` : `progress${h.percent != null ? ` ${h.percent}%` : ''}`;
+        h.type === 'status' ? `${h.from} → ${h.to}` : h.type === 'assigned' ? `assigned ${h.assignee ?? '(none)'}` : h.type === 'step' || h.type === 'steps' ? h.type : `progress${h.percent != null ? ` ${h.percent}%` : ''}`;
       L.push(`  ${dim(h.ts.slice(11, 19))} ${h.relayed ? magenta('human') + dim(' via ') + cyan(h.actor) + ' ' : h.actor ? cyan(h.actor) + ' ' : ''}${what}${h.relayed ? dim(` — “${h.relayed.quote}”`) : ''}${h.message && h.message !== h.relayed?.quote ? dim(' — ' + h.message) : ''}`);
     }
   }
@@ -759,6 +775,20 @@ function statusCmd(target, msgRequired) {
   };
 }
 
+/** Steps are the owner's (or the coordinator's) to declare and check off. */
+function stepGuard(t, actor) {
+  if (FLAGS.force) return;
+  const boss = actor.role === 'coordinator' || actor.role === 'human';
+  if (t.owner && t.owner !== actor.id && !boss) die(`${t.id} is ${t.assignee ? 'assigned to' : 'in a work package owned by'} ${t.owner} (use --force)`);
+}
+
+const STEP_MARK = { todo: '○', in_progress: '◐', done: '✓', skipped: '–' };
+/** A task's steps, one per line. */
+function stepsText(t) {
+  const fin = t.steps.filter((x) => x.status === 'done' || x.status === 'skipped').length;
+  return [`${t.id} steps ${fin}/${t.steps.length}`, ...t.steps.map((x) => `  ${x.status === 'done' ? green(STEP_MARK.done) : x.status === 'in_progress' ? yellow(STEP_MARK.in_progress) : dim(STEP_MARK[x.status])} ${x.n}. ${x.status === 'done' || x.status === 'skipped' ? dim(x.title) : x.title}`)].join('\n');
+}
+
 // ---------- commands ----------
 const commands = {
   config(pos) {
@@ -821,6 +851,7 @@ const commands = {
       if (FLAGS.desc) data.description = FLAGS.desc;
       if (FLAGS.coordinator) data.coordinator = FLAGS.coordinator;
       if (FLAGS.doc) data.docs = FLAGS.doc;
+      data.parent_review = true; // §5.2: parents with criteria of their own are reviewed against them
       transact(root, id, actor, () => [{ type: 'plan.created', data }]);
       setCurrentPlan(root, id);
       return out({ ok: true, plan: id }, `created plan ${bold(id)} (now current)\n${dim(`export ATF_PLAN=${id}`)}`);
@@ -859,9 +890,20 @@ const commands = {
         if (!RESUME_POLICIES.includes(FLAGS.resume)) die(`--resume must be one of ${RESUME_POLICIES.join(', ')}`);
         data.resume = FLAGS.resume;
       }
+      if (FLAGS['parent-review'] !== undefined) {
+        // §5.2: an older plan (its parents are containers) opts in to parent reviews
+        if (!['on', 'off'].includes(FLAGS['parent-review'])) die('--parent-review must be on or off');
+        data.parent_review = FLAGS['parent-review'] === 'on';
+      }
       if (!Object.keys(data).length) die('nothing to update');
-      transact(root, planId, actor, () => [{ type: 'plan.updated', data }]);
-      return out({ ok: true }, 'plan updated');
+      let before;
+      const { state } = transact(root, planId, actor, (st) => {
+        if (data.parent_review && st.status !== 'active' && !FLAGS.force) die(`the plan is ${st.status}: parent reviews are for a plan still running (use --force)`);
+        before = st;
+        return [{ type: 'plan.updated', data }];
+      });
+      const toReview = state.order.filter((id) => state.tasks[id].children.length && state.tasks[id].status === 'review' && before.tasks[id].status !== 'review');
+      return out({ ok: true, review: toReview }, `plan updated${toReview.length ? `; in review now (their subtasks are done): ${toReview.join(', ')}` : ''}`);
     }
     if (sub === 'note' || sub === 'ask' || sub === 'checkpoint') {
       // plan-level notes: `ask` = a question for the human about the whole plan;
@@ -1033,7 +1075,11 @@ const commands = {
     }
     const { state } = transact(root, planId, actor, (st) => {
       const t = requireTask(st, pos[0]);
-      if (!['review', 'done'].includes(t.status) && !FLAGS.force) die(`${t.id} is ${t.status}; request changes on a task in review or done (use --force)`);
+      // a new attempt with new instructions: after review, after done, and after an attempt
+      // that failed or went the wrong way (blocked, or in progress with its agent gone)
+      if (t.children.length && !FLAGS.force) die(`${t.id} is a parent task: send back the subtask that needs changes, or add one (\`atf add "…" --parent ${t.id}\`); either puts ${t.id} back to work (use --force)`);
+      if (!['review', 'done', 'failed', 'blocked', 'in_progress'].includes(t.status) && !FLAGS.force) die(`${t.id} is ${t.status}; changes start a new attempt on a task in review, done, failed, blocked or in progress (use --force)`);
+      if (t.status === 'in_progress' && actor.role !== 'coordinator' && !FLAGS.force) die(`${t.id} is in progress; only the coordinator stops an attempt that went the wrong way (use --force)`);
       // v2: the coordinator sends work back, also on behalf of another reviewer (the human
       // tells the coordinator what to change); approving stays the reviewer's
       const why = actor.role === 'coordinator' ? null : reviewRefusal(t, actor);
@@ -1044,7 +1090,11 @@ const commands = {
       return evs;
     });
     const t = requireTask(state, pos[0]);
-    out({ ok: true, task: t }, `${t.id} ${magenta('↺ changes requested')} (round ${t.feedback.length})${t.owner ? ` → back to ${cyan(t.owner)}` : ''}${FLAGS.fresh ? dim(' · next attempt starts fresh') : ''}`);
+    const prev = t.attempts[t.attempts.length - 2];
+    out(
+      { ok: true, task: t, attempt: t.attempts.length },
+      `${t.id} ${magenta('↺ changes requested')}: attempt ${t.attempts.length}${prev?.ended ? dim(` (attempt ${prev.n} ${prev.ended.stopped ? `stopped while ${prev.ended.status}` : prev.ended.status})`) : ''}${t.owner ? ` → back to ${cyan(t.owner)}` : ''}${FLAGS.fresh ? dim(' · starts fresh') : ''}${t.status === 'todo' && prev?.ended?.stopped && prev.ended.status === 'in_progress' ? dim(' · its agent may still be running: stop it') : ''}`,
+    );
   },
 
   release(pos) {
@@ -1059,6 +1109,40 @@ const commands = {
       return evs;
     });
     out({ ok: true, task: requireTask(state, pos[0]) }, `${pos[0]} released`);
+  },
+
+  steps(pos) {
+    // the parts of a task's work, declared when it starts (a new list replaces the old one;
+    // steps with the same title keep their state)
+    const { root, planId, actor } = ctx();
+    const titles = pos.slice(1).map((x) => String(x).trim()).filter(Boolean);
+    if (!pos[0] || !titles.length) die('usage: atf steps <task> "<step>" "<step>" …');
+    const { state } = transact(root, planId, actor, (st) => {
+      const t = requireTask(st, pos[0]);
+      if (t.children.length) die(`${t.id} has subtasks: steps are the parts of one task's work`);
+      stepGuard(t, actor);
+      return [{ type: 'task.steps', task: t.id, data: { steps: titles } }];
+    });
+    const t = requireTask(state, pos[0]);
+    out({ ok: true, steps: t.steps }, stepsText(t));
+  },
+
+  step(pos) {
+    // check a step off: atf step T3 2 [done|start|skip|todo] [-m note]
+    const { root, planId, actor } = ctx();
+    const word = { done: 'done', start: 'in_progress', started: 'in_progress', skip: 'skipped', skipped: 'skipped', todo: 'todo' };
+    const status = word[pos[2] ?? 'done'];
+    if (!pos[0] || !pos[1] || !status) die('usage: atf step <task> <n|title> [done|start|skip|todo] [-m note]');
+    const { state } = transact(root, planId, actor, (st) => {
+      const t = requireTask(st, pos[0]);
+      stepGuard(t, actor);
+      if (!t.steps.length) die(`${t.id} has no steps: declare them with atf steps ${t.id} "<step>" …`);
+      const n = /^\d+$/.test(pos[1]) ? Number(pos[1]) : t.steps.findIndex((x) => x.title.toLowerCase() === String(pos[1]).toLowerCase()) + 1;
+      if (!t.steps[n - 1]) die(`${t.id} has ${t.steps.length} steps: ${t.steps.map((x) => `${x.n}. ${x.title}`).join(', ')}`);
+      return [{ type: 'task.step', task: t.id, data: { n, status, ...(FLAGS.message ? { message: FLAGS.message } : {}) } }];
+    });
+    const t = requireTask(state, pos[0]);
+    out({ ok: true, steps: t.steps }, stepsText(t));
   },
 
   progress(pos) {

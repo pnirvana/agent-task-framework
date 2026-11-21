@@ -21,6 +21,7 @@ export const byHuman = (n) => n?.actor === HUMAN || n?.relayed?.from === HUMAN;
 export const PLAN_STATUSES = ['active', 'paused', 'completed', 'failed', 'cancelled'];
 export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'review', 'done', 'failed', 'cancelled'];
 export const TERMINAL = new Set(['done', 'failed', 'cancelled']);
+export const STEP_STATUSES = ['todo', 'in_progress', 'done', 'skipped'];
 export const NOTE_KINDS = ['info', 'question', 'decision', 'warning', 'checkpoint', 'feedback'];
 export const RESUME_POLICIES = ['auto', 'resume', 'fresh'];
 export const ARTIFACT_KINDS = ['file', 'commit', 'branch', 'pr', 'url', 'other', 'log', 'maven', 'tests', 'pipeline'];
@@ -41,7 +42,7 @@ export function canTransition(from, to) {
 }
 
 const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume', 'agent', 'origin', 'reviewer', 'review'];
-const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume', 'coordinator', 'docs'];
+const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume', 'coordinator', 'docs', 'parent_review'];
 /** Who a question-block is for: the coordinator (default) or the human (an escalation). */
 export const BLOCK_FOR = ['coordinator', 'human'];
 
@@ -75,7 +76,11 @@ function newTask(id, ev) {
     fresh_next: false, // the next attempt starts with a fresh agent (changes --fresh)
     feedback: [], // change requests: [{round, seq, ts, actor, message}]
     changes_requested: false, // sent back with requested changes, not yet resubmitted
+    // attempts at the task: a new one each time it is sent back with instructions (changes),
+    // whether it was in review, done, failed or ended in the wrong state
+    attempts: [{ n: 1, seq: ev.seq, ts: ev.ts, by: null, instructions: null, actors: [], started_at: null, ended: null }],
     checkpoint: null, // latest checkpoint note: where the work stands
+    steps: [], // the parts of the work, declared by the agent: [{n, title, status, ts, actor}]
     sessions: {}, // actor -> {kind, ref, ts}: opaque harness session references
     session: null, // latest session reference
     assignee: null,
@@ -221,6 +226,39 @@ export function fold(events) {
           t.feedback.push({ round: t.feedback.length + 1, ...entry, message: d.message ?? '' });
           t.changes_requested = true;
         } else if (['review', 'done', 'cancelled', 'failed'].includes(d.status)) t.changes_requested = false;
+        // attempts: changes start a new one; work and endings are recorded on the current one
+        const att = t.attempts[t.attempts.length - 1];
+        if (d.changes) {
+          if (!att.ended && !att.started_at) Object.assign(att, { by: entry.actor, instructions: d.message ?? null, seq: ev.seq, ts: ev.ts }); // never worked on: same attempt, new instructions
+          else {
+            if (!att.ended) att.ended = { status: from, message: null, ts: ev.ts, actor: entry.actor, stopped: true }; // sent back while still open
+            t.attempts.push({ n: att.n + 1, seq: ev.seq, ts: ev.ts, by: entry.actor, instructions: d.message ?? null, actors: [], started_at: null, ended: null });
+          }
+        } else if (d.status === 'in_progress') {
+          att.started_at ??= ev.ts;
+          if (entry.actor && !att.actors.includes(entry.actor)) att.actors.push(entry.actor);
+          att.ended = null; // back to work (e.g. after review without changes, or a reopen)
+        } else if (['review', 'done', 'failed', 'cancelled'].includes(d.status)) att.ended = { status: d.status, message: d.message ?? null, ts: ev.ts, actor: entry.actor };
+        break;
+      }
+      case 'task.steps': {
+        // the parts of the task's work (`atf steps`): a new list keeps the state of steps
+        // with the same title
+        if (!Array.isArray(d.steps)) break;
+        const before = new Map(t.steps.map((x) => [x.title, x]));
+        t.steps = d.steps.map((title, i) => ({ n: i + 1, title: String(title), status: before.get(String(title))?.status ?? 'todo', ts: before.get(String(title))?.ts ?? null, actor: before.get(String(title))?.actor ?? null }));
+        t.history.push({ ...entry, type: 'steps', message: `${t.steps.length} steps: ${t.steps.map((x) => x.title).join(' · ')}` });
+        break;
+      }
+      case 'task.step': {
+        const x = t.steps[Number(d.n) - 1];
+        if (!x || !STEP_STATUSES.includes(d.status)) break;
+        Object.assign(x, { status: d.status, ts: ev.ts, actor: entry.actor });
+        const finished = t.steps.filter((y) => y.status === 'done' || y.status === 'skipped').length;
+        // the task's percent follows its steps; its latest message names the step
+        t.percent = Math.round((finished / t.steps.length) * 100);
+        t.last_message = `step ${x.n}/${t.steps.length} ${d.status === 'in_progress' ? 'started' : d.status}: ${x.title}${d.message ? ` (${d.message})` : ''}`;
+        t.history.push({ ...entry, type: 'step', step: x.n, status: d.status, message: t.last_message });
         break;
       }
       case 'task.progress':
@@ -295,11 +333,16 @@ export function derive(plan) {
       const k = tasks[c];
       return k.children.length ? { status: k.rollup_status, waiting: !!k.rollup_waiting } : { status: k.status, waiting: k.status === 'blocked' && k.blocked_on.length > 0 };
     });
-    t.rollup_status = rollupStatus(kids);
+    t.children_status = rollupStatus(kids);
+    t.rollup_status = t.children_status;
+    // a parent with acceptance criteria of its own keeps its promise: once its children are
+    // done it is reviewed against them (written as its own status, see parentTransitions)
+    if (keepsCriteria(t, plan) && t.children_status === 'done' && t.status !== 'done') t.rollup_status = 'review';
     t.rollup_waiting = t.rollup_status === 'blocked' && !kids.some((k) => k.status === 'blocked' && !k.waiting);
     return t.rollup_percent;
   };
   for (const t of Object.values(tasks)) {
+    delete t.children_status;
     delete t.rollup_status;
     delete t.rollup_percent;
     delete t.rollup_waiting;
@@ -382,7 +425,11 @@ export function attentionFor(plan, actorId, role) {
   const busy = new Set(plan.order.filter((id) => plan.tasks[id].status === 'in_progress' && !plan.tasks[id].children.length).map((id) => plan.tasks[id].owner));
   for (const id of plan.order) {
     const t = plan.tasks[id];
-    if (t.children.length) continue;
+    if (t.children.length) {
+      // a parent that keeps its criteria, in review once its children are done
+      if (role === 'coordinator' && t.status === 'review' && (!t.reviewer || t.reviewer === 'coordinator' || t.reviewer === actorId)) out.push({ task: id, reason: 'review' });
+      continue;
+    }
     if (t.owner === actorId) {
       if (t.ready) out.push({ task: id, reason: t.changes_requested ? 'changes' : 'ready' });
       else if (t.can_resume) out.push({ task: id, reason: 'unblocked' });
@@ -426,7 +473,7 @@ export function driverInbox(plan) {
   const since = (t, status) => [...t.history].reverse().find((h) => h.type === 'status' && h.to === status)?.ts ?? t.updated_at;
   for (const id of plan.order) {
     const t = plan.tasks[id];
-    if (t.children.length) continue;
+    if (t.children.length && t.status !== 'review') continue; // a parent: only its own review
     if (t.status === 'review') {
       const human = !!t.reviewer && t.reviewer !== 'coordinator';
       items.push({ kind: human ? 'your-review' : 'review', for: t.reviewer === HUMAN ? 'human' : human ? t.reviewer : 'coordinator', task: id, ts: since(t, 'review'), actor: t.owner, message: t.last_message, reviewer: t.reviewer });
@@ -435,7 +482,7 @@ export function driverInbox(plan) {
   }
   for (const q of plan.questions ?? []) items.push({ kind: 'plan-question', for: 'human', task: null, ts: q.ts, actor: q.actor, message: q.message });
   const leaves = plan.order.filter((id) => !plan.tasks[id].children.length);
-  if (plan.status === 'active' && leaves.length && leaves.every((id) => TERMINAL.has(plan.tasks[id].status)))
+  if (plan.status === 'active' && leaves.length && leaves.every((id) => TERMINAL.has(plan.tasks[id].status)) && !plan.order.some((id) => plan.tasks[id].status === 'review'))
     items.push({ kind: 'finished', for: 'human', task: null, ts: plan.updated_at, actor: null, message: 'all tasks finished; close the plan' });
   return items.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
 }
@@ -508,6 +555,32 @@ export function inferRole(plan, actorId) {
   const prev = known && !known.role_inferred ? known.role : null; // only roles the actor itself wrote
   if (prev && prev !== 'agent') return { role: prev, source: 'role used in earlier events of this plan' };
   return { role: 'agent', source: 'default (not the plan\'s coordinator, no ATF_ROLE)' };
+}
+
+/**
+ * A parent with acceptance criteria of its own, in a plan that has parent reviews
+ * (`parent_review`, set by `atf plan new`; older plans keep parents as containers):
+ * reviewed against its criteria when its children are done.
+ */
+export const keepsCriteria = (t, plan) => !!plan?.parent_review && t.children.length > 0 && t.acceptance.length > 0;
+
+/**
+ * The status events a write implies for parents that keep their criteria (§5.2): `review`
+ * when the last child is done, back to `todo` when a child (or a new one) is open again.
+ * Written in the same transaction as the change that caused them (store.transact).
+ */
+export function parentTransitions(plan) {
+  const out = [];
+  for (const id of plan.order) {
+    const t = plan.tasks[id];
+    if (!keepsCriteria(t, plan)) continue;
+    const childrenDone = t.children_status === 'done';
+    if (childrenDone && !['review', 'done'].includes(t.status))
+      out.push({ type: 'task.status', task: id, data: { status: 'review', auto: 'children-done', message: 'its subtasks are done: review it against its own acceptance criteria' } });
+    else if (!childrenDone && ['review', 'done'].includes(t.status) && t.children_status !== 'cancelled')
+      out.push({ type: 'task.status', task: id, data: { status: 'todo', auto: 'children-open', message: 'a subtask is open again' } });
+  }
+  return out;
 }
 
 /**
