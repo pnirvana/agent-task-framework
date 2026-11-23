@@ -543,7 +543,11 @@ export async function refreshLive(x, { force = false } = {}) {
   return p;
 }
 
-const cache = new Map(); // file|kind -> {mtime, size, at, version, result}
+// file|kind -> {mtime, size, at, version, result}, least recently used first. The board
+// summarizes every recorded run of every active task on each draw (the rows' live badges):
+// the cache has to hold all of them, or every cursor move parses their logs again.
+const cache = new Map();
+const CACHE_MAX = 5000; // a summary is small (under 1 KB)
 /**
  * Summarize a live artifact or run ({kind, ref|out, cwd?, since?, exit?, extra?}). Reads
  * the file's tail; cached by mtime and size (and the kind's `stale` ms, for kinds that
@@ -565,13 +569,18 @@ export function summarize(x) {
   const f = fetched.get(file);
   const key = `${file}|${def.kind}`;
   const c = cache.get(key);
-  if (c && c.mtime === st.mtimeMs && c.size === st.size && c.version === (f?.version ?? 0) && (!def.stale || Date.now() - c.at < def.stale)) return c.result;
+  if (c && c.mtime === st.mtimeMs && c.size === st.size && c.version === (f?.version ?? 0) && (!def.stale || Date.now() - c.at < def.stale)) {
+    cache.delete(key); // most recently used: to the end
+    cache.set(key, c);
+    return c.result;
+  }
   const ctx = { ...ctxOf(x), fetched: f?.data ?? null, fetchError: f?.error ?? null };
   const result = { ...summarizeText(def.kind, readTail(file, def.tailBytes ?? 256 << 10) ?? '', ctx), mtime: st.mtimeMs, size: st.size };
   // the exit code beats the text: a run that ended 0 is not still running
   if (x.exit != null && result.state !== 'failed') result.state = x.exit === 0 ? (['running', 'unknown', 'waiting'].includes(result.state) ? 'ok' : result.state) : 'failed';
+  cache.delete(key);
   cache.set(key, { mtime: st.mtimeMs, size: st.size, at: Date.now(), version: f?.version ?? 0, result });
-  if (cache.size > 200) cache.delete(cache.keys().next().value);
+  if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
   return result;
 }
 
