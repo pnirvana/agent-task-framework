@@ -772,7 +772,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       for (const l of wrap(s.checkpoint.message, W - 3)) L.push([['  ' + l, '']]);
     }
     const coord = coordinatorOf(s);
-    L.push([], [[' coordinator  ', 'bold'], [coord.id ?? '?', 'cyan'], [coord.live ? `  ${coord.live.agent_status} in ${coord.live.pane_id}` : coord.away ? '  in another herdr session' : '  not running', coord.live ? 'dim' : 'red'], [s.session ? `  · session ${path.basename(s.session.ref)}` : '', 'dim'], ['   s resume · S fresh', 'dim']]);
+    L.push([], [[' coordinator  ', 'bold'], [coord.id ?? '?', 'cyan'], [coord.live ? `  ${coord.live.agent_status} in ${coord.live.pane_id}` : coord.away ? '  in another herdr session' : '  not running', coord.live ? 'dim' : 'red'], [s.session ? `  · session ${path.basename(s.session.ref)}` : '', 'dim'], [coord.live ? '   s go to it · S fresh' : '   s start (resume) · S fresh', 'dim']]);
     const roots = s.order.filter((id) => !s.tasks[id].parent || !s.tasks[s.tasks[id].parent]);
     if (roots.length) {
       L.push([], [[' breakdown', 'bold'], ['  (top-level branches)', 'dim']]);
@@ -826,7 +826,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
    * plans come first, then by last update; projects with recent open work come first.
    * `all` adds an "all plans" entry (picked as null).
    */
-  function openPicker({ title, plans, all = false, current = null, onPick }) {
+  function openPicker({ title, plans, all = false, current = null, onPick, info = null }) {
     const rank = (p) => (p.st.status === 'active' ? 0 : p.st.status === 'paused' ? 1 : 2);
     const byRecent = (a, b) => rank(a) - rank(b) || (b.st.updated_at || '').localeCompare(a.st.updated_at || '');
     // display order = selection order: projects by their best plan, plans inside them
@@ -847,6 +847,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
         return all && !words.length ? [null, ...hit] : hit;
       },
       onPick,
+      info, // (plan) -> [text, style] shown on its row (e.g. its coordinator's state)
     };
     const i = ui.picker.items().findIndex((p) => (p?.key ?? null) === current);
     ui.picker.sel = Math.max(0, i);
@@ -894,7 +895,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       body.push(
         row(
           [[sel ? '› ' : '  ', 'cyan bold'], [g + ' ', gc], ...highlight([[p.st.title, (sel ? 'inverse ' : '') + (open ? 'bold cyan' : 'cyan')], [p.st.goal ? '  ' + p.st.goal.replace(/\s+/g, ' ') : '', 'dim']], words)],
-          [[need ? ` ⚑${need}` : '', 'red bold'], [`  ${p.st.counts.done ?? 0}/${sum.total}`, 'dim'], [` ${(open ? p.st.status : p.st.status).padEnd(9)}`, open ? 'blue' : p.st.status === 'completed' ? 'green' : 'yellow'], [ago(p.st.updated_at).padStart(4), 'dim']],
+          [...(pk.info ? [[`  ${pk.info(p)[0]}`, pk.info(p)[1]]] : []), [need ? ` ⚑${need}` : '', 'red bold'], [`  ${p.st.counts.done ?? 0}/${sum.total}`, 'dim'], [` ${(open ? p.st.status : p.st.status).padEnd(9)}`, open ? 'blue' : p.st.status === 'completed' ? 'green' : 'yellow'], [ago(p.st.updated_at).padStart(4), 'dim']],
           iw,
         ),
       );
@@ -1453,7 +1454,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
 
   /** Keys that apply to the selected Overview row (shown in the footer). */
   function overviewKeys(r) {
-    if (!r) return '↑↓ select  ? help';
+    if (!r) return '↑↓ select  s coordinator  ? help';
     const k = [];
     const t = r.task ? r.st.tasks[r.task] : null;
     if (r.type === 'need' && (r.kind === 'coordinator' || r.kind === 'prompt')) {
@@ -1462,9 +1463,9 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     } else if (r.type === 'plan' || !t) {
       if (r.kind === 'no-coordinator') k.push('s resume coordinator', 'S fresh coordinator', '⏎ open plan');
       else {
-        k.push('⏎ open plan', 'g coordinator', r.kind === 'plan-question' ? 'r answer' : 'r note');
+        k.push('⏎ open plan', r.kind === 'plan-question' ? 'r answer' : 'r note');
         if (r.st.docs?.length) k.push('o docs');
-        k.push('s/S coordinator');
+        k.push('s coordinator');
       }
       if (r.kind === 'finished' || r.type === 'plan') k.push('c close plan');
     } else {
@@ -1472,7 +1473,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       k.push(t.status === 'blocked' && !t.blocked_on.length ? 'r answer' : 'r message');
       if (reviewArtifacts(r).length) k.push('o open');
       if (t.owner) k.push('g agent');
-      k.push('⏎ details');
+      k.push('s coordinator', '⏎ details');
     }
     if (r.type !== 'plan' && r.kind !== 'plan-question') k.push('N plan note');
     return k.join('  ') + '  ? help  esc ' + (ui.scope.level === 'all' ? 'quit' : 'back');
@@ -1598,8 +1599,9 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       K('d', 'the combined diff of the task (a parent: its subtree) or the plan (see 4 Changes)'),
       [],
       H('The coordinator (one per plan, always running)'),
-      K('s', 'start the coordinator of the selected plan, resuming its last session (if one'),
-      T('                runs already: go to it)'),
+      K('s', 'go to the coordinator, from every view: of the plan under the cursor (or in'),
+      T('                scope), else picked from the active plans; one not running is started,'),
+      T('                resuming its last session'),
       K('S', 'start a fresh coordinator session (press twice): a running coordinator first'),
       T('                writes its plan checkpoint, then is replaced'),
       T('A plan without a running coordinator shows "⚠ no coord" under NEEDS YOU.', 'dim'),
@@ -1711,11 +1713,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const esc = ui.scope.level === 'all' ? 'esc quit' : 'esc widen';
     const keys = {
       overview: overviewKeys(ui.rows.overview[ui.sel.overview]),
-      tasks: `↑↓ move  ←→ fold  v ${ui.byAgent ? 'tree' : 'by agent'}  ⏎ details  a approve  x changes  r message  N plan note  o open  d diff  L live  g agent  s/S coordinator  p plan  ${esc}`,
-      plan: multi() ? `↑↓ select  ←→ fold  ⏎ open plan  o docs  r note  N plan note  s/S coordinator  g jump  c close  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}` : `↑↓ scroll  o docs  r / N note  s/S coordinator  ${esc}  ? help`,
-      changes: `↑↓ move  ←→ fold  z fold all  ⏎/d diff of the row (file, task, package, plan)  D plan diff  g agent  ${multi() ? `f ${ui.showClosed ? 'hide' : 'show'} closed  ` : ''}${esc}  ? help`,
-      log: `↑↓ scroll  / search  N plan note  ${multi() ? 'p plan  ' : ''}${ui.log.plan || ui.log.query ? 'esc clear filter  ' : esc + '  '}tab views  ? help`,
-      detail: '↑↓ ^d/^u G/gg scroll  ⏎/esc back  a approve  x changes  r message  N plan note  o open  d diff  L live  g agent  s/S coordinator',
+      tasks: `↑↓ move  ←→ fold  v ${ui.byAgent ? 'tree' : 'by agent'}  ⏎ details  a approve  x changes  r message  N plan note  o open  d diff  L live  g agent  s coordinator  p plan  ${esc}`,
+      plan: multi() ? `↑↓ select  ←→ fold  ⏎ open plan  o docs  r note  N plan note  s coordinator  g jump  c close  f ${ui.showClosed ? 'hide' : 'show'} closed  ${esc}` : `↑↓ scroll  o docs  r / N note  s coordinator  ${esc}  ? help`,
+      changes: `↑↓ move  ←→ fold  z fold all  ⏎/d diff of the row (file, task, package, plan)  D plan diff  g agent  s coordinator  ${multi() ? `f ${ui.showClosed ? 'hide' : 'show'} closed  ` : ''}${esc}  ? help`,
+      log: `↑↓ scroll  / search  N plan note  s coordinator  ${multi() ? 'p plan  ' : ''}${ui.log.plan || ui.log.query ? 'esc clear filter  ' : esc + '  '}tab views  ? help`,
+      detail: '↑↓ ^d/^u G/gg scroll  ⏎/esc back  a approve  x changes  r message  N plan note  o open  d diff  L live  g agent  s coordinator',
       help: '↑↓ scroll  any other key: back',
       live: liveKeys(),
       liveitem: '↑↓ ^d/^u G/gg scroll  / search  esc/← back to the live view  o open outside',
@@ -2066,6 +2068,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     };
     if (ui.scope.level === 'plan') return of(ui.scope.root, ui.scope.plan);
     const v = view();
+    if ((v === 'live' || v === 'liveitem') && ui.live) return of(ui.live.root, ui.live.plan);
     if (v === 'log') {
       const p = ui.log.plan && scopePlans().find((x) => x.key === ui.log.plan);
       if (p) return of(p.root, p.id);
@@ -2275,7 +2278,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const m = lv?.meta?.[ui.sel.live];
     const enter = m?.item ? '⏎ in full  ' : '';
     const folds = lv && !lv.raw && lv.meta.some((x) => x.head) ? '←→ z fold  ' : '';
-    return `↑↓ gg G ${lv?.follow ? 'following' : 'follow'}  ${enter}${folds}t ${lv?.raw ? 'view' : 'raw'}  [ ] runs  / search  o outside  esc back`;
+    return `↑↓ gg G ${lv?.follow ? 'following' : 'follow'}  ${enter}${folds}t ${lv?.raw ? 'view' : 'raw'}  [ ] runs  / search  o outside  s coordinator  esc back`;
   }
 
   /** Keys of the live view and of an item in it; true if handled. */
@@ -2588,14 +2591,42 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   /**
-   * s / S: start the coordinator of the selected plan (any row of it, or the plan in
-   * scope): `s` resumes its session (or reports the one running), `S` starts a fresh
-   * session, replacing a running coordinator after it wrote its checkpoint (press twice).
+   * s / S, in every view: the coordinator of the plan the cursor is on (any row of it, the
+   * live view's task, the plan in scope, the only plan in scope); a picker of the active
+   * plans when that leaves a choice. `s` goes to it, and starts it (resuming its last
+   * session) when none runs; `S` starts a fresh session (press twice).
    */
-  function startCoordinator(fresh) {
-    const r = selectedRow();
-    const target = r?.root && r?.plan ? r : ui.scope.level === 'plan' ? { root: ui.scope.root, plan: ui.scope.plan, st: cachedPlan(ui.scope.root, ui.scope.plan) } : null;
-    if (!target) return flash('select a plan (or a task of it)');
+  function toCoordinator(fresh) {
+    const pr = planTarget();
+    if (pr) return coordinatorFor(pr, fresh);
+    const inScope = scopePlans().filter((p) => isOpenStatus(p.st));
+    const plans = inScope.length ? inScope : allPlans().filter((p) => isOpenStatus(p.st));
+    if (!plans.length) return flash('no active plan');
+    if (plans.length === 1) return coordinatorFor({ root: plans[0].root, plan: plans[0].id, st: plans[0].st }, fresh);
+    openPicker({
+      title: fresh ? 'fresh coordinator for plan' : 'go to the coordinator of plan',
+      plans,
+      info: (p) => coordState({ coord: coordinatorOf(p.st) }),
+      onPick: (p) => p && coordinatorFor({ root: p.root, plan: p.id, st: p.st }, fresh),
+    });
+  }
+
+  /** s on a plan: to its running coordinator's pane, else start it; S: a fresh session. */
+  async function coordinatorFor(target, fresh) {
+    if (!fresh) {
+      const c = coordinatorOf(target.st);
+      if (c.away) return flash(`the coordinator of "${target.st.title}" runs in another herdr session`, 'red');
+      if (c.live && (await focusPane(c.live.pane_id))) return popup ? quit() : draw();
+    }
+    startCoordinator(fresh, target);
+  }
+
+  /**
+   * Start the coordinator of `target` ({root, plan, st}): resuming its session (or going to
+   * the one running), or `fresh`: a new session, replacing a running coordinator after it
+   * wrote its checkpoint (press twice).
+   */
+  function startCoordinator(fresh, target) {
     if (!isOpenStatus(target.st)) return flash(`"${target.st.title}" is ${target.st.status}`);
     if (!spawnCmd || !inHerdr()) return flash('starting a coordinator needs herdr');
     const key = keyOf(target.root, target.plan);
@@ -2782,6 +2813,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (k === 'n' || k === 'N') return searchGo(k === 'n' ? 1 : -1), draw();
       if (k === '\x1b') return (ui.search = null), draw();
     }
+    // the coordinator, from every view (of the plan under the cursor, else picked)
+    if ((k === 's' || k === 'S') && v !== 'help') return toCoordinator(k === 'S'), draw();
     if (k === '/' && v !== 'log') return startSearch();
     if ((v === 'live' || v === 'liveitem') && liveKey(k, v, page)) return draw();
     if (v === 'log') {
@@ -2868,8 +2901,6 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (k === 'r' || k === 'n') return reply(), draw();
       if (k === 'o') return openArtifact();
       if (k === 'L') return openLiveView();
-      if (k === 's') return startCoordinator(false);
-      if (k === 'S') return startCoordinator(true);
     }
     if (k === 'q') {
       if (ui.back) back();

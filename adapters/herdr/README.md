@@ -11,7 +11,7 @@ actionable inside herdr. Optional: ATF itself does not depend on any of this.
 | **Notifications** | when you are needed (what the board shows as ⚑ needs you), once per item: in herdr, and optionally in the terminal herdr runs in (also over SSH: Windows Terminal toasts, taskbar flash, a tab mark) or through your own command |
 | **Stall detection** | board flags `stale?` when a task is in progress but its herdr agent has been idle > 90s (an agent that stopped without reporting) |
 | **Overview** | tab `0`, where the board starts: what needs you (agents waiting for input, your reviews, finished plans; under a heading per plan when the scope holds several), then per plan only the tasks being worked on with their latest progress; a context panel for the selected row; approve, request changes, reply, open the review artifact or jump to the agent's terminal with one key |
-| **Spawn** | `s` on a ready task or package (or `atf-herdr spawn T3`) places a pane in the workspace's `agents` tab (your tab with the coordinator and the board keeps its layout), starts the agent (pi by default; the atf skill is discovered once installed with `atf skill install`), assigns the task and sends the kickoff prompt |
+| **Spawn** | `atf-herdr spawn T3` (the coordinator's) places a pane in the workspace's `agents` tab (your tab with the coordinator and the board keeps its layout), starts the agent (pi by default; the atf skill is discovered once installed with `atf skill install`), assigns the task and sends the kickoff prompt |
 | **Reviews** | `a` / `x` / `n` on any task draft an approval, change request or note (`d` drops, `S` submits all at once: one write per plan, so the coordinator wakes once and each owner gets all its points). Tasks that ask you to test something show as `◎ for you` |
 | **Agent lifecycle** | the coordinator starts every subagent (fresh by default); finished subagents are closed; an idle coordinator is nudged when something needs it; `atf-herdr coordinate` starts or resumes a plan's coordinator, or replaces it with a fresh session |
 
@@ -76,8 +76,8 @@ Then `herdr server reload-config`.
    inbox; ⏎ drills into any plan or task. Inside either, ⏎ narrows the scope to a plan,
    Esc widens it again and `A` jumps to all projects.
 3. Start the plan's **coordinator** (it plans, decides and starts every subagent; see
-   SPEC §12): from the board (`s` on a plan resumes its coordinator session, `S` starts a
-   fresh one) or `atf-herdr coordinate [--plan ID] [--fresh]`. The coordinator starts
+   SPEC §12): from the board (`s` in any view goes to the coordinator of the plan under the
+   cursor, resuming its session when none runs; `S` starts a fresh one) or `atf-herdr coordinate [--plan ID] [--fresh]`. The coordinator starts
    subagents with `spawn`:
    ```sh
    atf-herdr spawn T3 --name worker-1            # pi, placed in the workspace's agents tab
@@ -190,7 +190,7 @@ Rows always know their project and plan, so `g`, `a`, `x`, `r`, `o`, `s` and ⏎
 | `o` | open the task's artifact (PR, branch diff, commit, file, URL) or the plan's documents |
 | `d` | the combined diff of the selected file, task, work package or plan in your diff viewer (`D` in Changes: the whole plan) |
 | `L` | the live view of what the task's agent runs or watches, in the board (below) |
-| `s` / `S` | start the plan's coordinator: resume its session / a fresh session (press twice; replaces a running one after its checkpoint) |
+| `s` / `S` | in every view: `s` goes to the coordinator of the plan under the cursor (or in scope; a picker of the active plans, with their coordinator's state, when that leaves a choice) and starts it, resuming its session, when none runs. `S`: a fresh session (press twice; replaces a running one after its checkpoint) |
 | `p` | plan picker: a popup listing every plan by project with its goal and state; typing filters it; ⏎ goes to the plan (in the Log: filters the log to it) |
 | `/` | Log: search |
 | `?` | help |
