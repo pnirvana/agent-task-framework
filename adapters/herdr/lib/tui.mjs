@@ -560,6 +560,12 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     return L;
   }
 
+  // the Overview's sections, and the keys that go straight to them
+  const SECTION_KEYS = { '!': 'needs', Y: 'todos', F: 'flight' };
+  const SECTION_TITLE = { needs: 'NEEDS YOU', todos: 'YOUR TASKS', flight: 'IN FLIGHT' };
+  const STEP_MARK = { todo: ['○', 'dim'], in_progress: ['◐', 'yellow'], done: ['✓', 'green'], skipped: ['–', 'dim'] };
+  const stepDone = (x) => x.status === 'done' || x.status === 'skipped';
+
   function detailLines(st, id, W) {
     const t = st.tasks[id];
     if (!t) return [];
@@ -609,8 +615,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (t.steps?.length) {
       const fin = t.steps.filter((x) => x.status === 'done' || x.status === 'skipped').length;
       L.push([], [['steps', 'bold'], [`  ${fin}/${t.steps.length}`, 'dim']]);
-      const MARK = { todo: ['○', 'dim'], in_progress: ['◐', 'yellow'], done: ['✓', 'green'], skipped: ['–', 'dim'] };
-      for (const x of t.steps) L.push([[`  ${MARK[x.status][0]} `, MARK[x.status][1]], [`${x.n}. ${x.title}`, x.status === 'done' || x.status === 'skipped' ? 'dim' : x.status === 'in_progress' ? 'bold' : '']]);
+      for (const x of t.steps) L.push([[`  ${STEP_MARK[x.status][0]} `, STEP_MARK[x.status][1]], [`${x.n}. ${x.title}`, x.status === 'done' || x.status === 'skipped' ? 'dim' : x.status === 'in_progress' ? 'bold' : '']]);
     }
     if (t.acceptance.length) {
       L.push([], [['acceptance', 'bold']]);
@@ -1226,10 +1231,19 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (a?.stale) right.push([' stalled?', 'red bold']);
     right.push([`  ${ago(t.updated_at).padStart(3)}`, 'dim']);
     return row(
-      [mark(sel), ['  ' + g + ' ', gc], [t.id + ' ', sel ? 'inverse bold' : 'bold'], [crumb, 'gray'], [t.title, ''], [t.percent != null && t.status === 'in_progress' ? `  ${t.percent}%` : '', 'yellow'], badge ? [`  ${badge.glyph} ${badge.text}`, badge.color] : ['', ''], [msg ? '  ' + msg.replace(/\s+/g, ' ') : '', 'dim']],
+      [mark(sel), ['  ' + g + ' ', gc], [t.id + ' ', sel ? 'inverse bold' : 'bold'], [crumb, 'gray'], [t.title, ''], [t.percent != null && t.status === 'in_progress' && !t.steps?.length ? `  ${t.percent}%` : '', 'yellow'], [stepsText(t), 'yellow'], badge ? [`  ${badge.glyph} ${badge.text}`, badge.color] : ['', ''], [msg ? '  ' + msg.replace(/\s+/g, ' ') : '', 'dim']],
       right,
       W,
     );
+  }
+
+  /** "  2/4 · deploy ledger" for a task with steps (the current one while it is worked on), or ''. */
+  function stepsText(t) {
+    if (!t.steps?.length || TERMINAL.has(t.status)) return '';
+    const cur = t.steps.find((x) => x.status === 'in_progress') ?? t.steps.find((x) => x.status === 'todo');
+    // the row's message names the step already when it is about one (atf step)
+    const named = /^step \d+\//.test(t.last_message || '');
+    return `  ${t.steps.filter(stepDone).length}/${t.steps.length}${cur && t.status === 'in_progress' && !named ? ` · ${clip(cur.title, 24).trimEnd()}` : ''}`;
   }
 
   /** Why a plan has nothing in flight, in a few words. */
@@ -1255,13 +1269,14 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   function overviewTabLines(W, plans) {
     const L = [];
     const rows = [];
-    const add = (r, render) => rows.push({ ...r, line: L.push(null) - 1, render });
+    let sec = 'needs'; // the section rows are added to ([ / ] jump between them)
+    const add = (r, render) => rows.push({ ...r, sec, line: L.push(null) - 1, render });
     if (ui.scope.level === 'all' && initDir && !findRoot(initDir))
       L.push([[' No ATF project in ', 'yellow'], [initDir, 'cyan'], ['  — press ', 'yellow'], ['i', 'bold green'], [' to create one there', 'yellow']], []);
     const open = plans.filter((p) => isOpenStatus(p.st));
     const att = open.map((p) => ({ p, ...attentionOf(p) }));
     const needs = att.flatMap((a) => a.mine).sort((x, y) => NEED_RANK[x.kind] - NEED_RANK[y.kind] || (x.ts || '').localeCompare(y.ts || ''));
-    L.push(needs.length ? [[' NEEDS YOU ', 'bold red'], [String(needs.length), 'bold red']] : [[' NEEDS YOU ', 'bold'], ['nothing: every plan is moving on its own', 'dim']]);
+    L.push(needs.length ? [[' NEEDS YOU ', 'bold red'], [String(needs.length), 'bold red'], ['   !', 'dim']] : [[' NEEDS YOU ', 'bold'], ['nothing: every plan is moving on its own', 'dim']]);
     // grouped by plan, the plan with the most urgent item first (order kept within a plan);
     // a heading per plan unless the scope is one plan
     const groups = new Map();
@@ -1279,7 +1294,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     // from NEEDS YOU so that stays what holds up the work now
     const todos = att.flatMap((a) => a.todos);
     if (todos.length) {
-      L.push([], [[' YOUR TASKS ', 'bold cyan'], [String(todos.length), 'bold cyan'], ['   a: done (with a note for the coordinator)', 'dim']]);
+      sec = 'todos';
+      L.push([], [[' YOUR TASKS ', 'bold cyan'], [String(todos.length), 'bold cyan'], ['   Y · a: done (with a note for the coordinator)', 'dim']]);
       for (const it of todos) {
         add({ type: 'need', ...it, k: `todo#${it.key}#${it.task}` }, (sel) => needLine(it, W, sel, false));
         const t = it.st.tasks[it.task];
@@ -1288,7 +1304,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
         if (msg) L.push([[' '.repeat(15), ''], [clip(msg, Math.max(10, W - 17)).trimEnd(), 'dim']]);
       }
     }
-    L.push([], [[' IN FLIGHT', 'bold']]);
+    sec = 'flight';
+    L.push([], [[' IN FLIGHT', 'bold'], ['   F', 'dim']]);
     if (!open.length) L.push([[ui.showClosed ? '   No plans in scope.' : '   No active plans. A coordinator starts one with `atf plan new <title>`.', 'dim']]);
     for (const a of att) {
       const p = a.p;
@@ -1406,10 +1423,24 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       const fb = t.feedback[t.feedback.length - 1];
       L.push([]);
       label('changes requested', `attempt ${t.attempts?.length ?? fb.round + 1} · ${fb.actor ?? ''} ${ago(fb.ts)} ago`);
-      para(fb.message, 'magenta', 6, '   ');
+      // being worked on: the instructions are the agent's now, the progress below matters more
+      para(fb.message, 'magenta', t.status === 'in_progress' ? 2 : 6, '   ');
+    }
+    // the declared parts of the work: where it stands (around the current step, at most 6)
+    if (t.steps?.length) {
+      const fin = t.steps.filter(stepDone).length;
+      L.push([]);
+      label('steps', `${fin}/${t.steps.length}`);
+      const cur = Math.max(0, t.steps.findIndex((x) => !stepDone(x)));
+      const from = t.steps.length <= 6 ? 0 : Math.max(0, Math.min(cur - 1, t.steps.length - 6));
+      const shown = t.steps.slice(from, from + 6);
+      if (from) L.push([[`   ✓ ${from} earlier step${from === 1 ? '' : 's'} done`, 'dim']]);
+      for (const x of shown) L.push([[`   ${STEP_MARK[x.status][0]} `, STEP_MARK[x.status][1]], [clip(`${x.n}. ${x.title}`, W - 7).trimEnd(), stepDone(x) ? 'dim' : x.status === 'in_progress' ? 'bold' : '']]);
+      const rest = t.steps.length - from - shown.length;
+      if (rest > 0) L.push([[`     + ${rest} more`, 'dim']]);
     }
     // the trail: latest progress, then the checkpoint
-    const trail = t.history.filter((h) => h.message && (h.type === 'progress' || h.type === 'status' || h.type === 'step')).slice(-4);
+    const trail = t.history.filter((h) => h.message && (h.type === 'progress' || h.type === 'status' || h.type === 'step')).slice(-2);
     if (trail.length && !(t.status === 'blocked' || t.status === 'review' || t.status === 'failed') ) {
       L.push([]);
       label('latest');
@@ -1419,7 +1450,9 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
           .forEach((l, i) => L.push([[i ? '        ' : `   ${ago(h.ts).padStart(3)} `, 'dim'], [l, h === trail[trail.length - 1] ? '' : 'dim']]));
     }
     L.push(...liveDetail(st, t, W, { recorded: 2, tail: 2 }));
-    if (t.checkpoint && !TERMINAL.has(t.status)) {
+    // a checkpoint of an earlier attempt describes a state the new attempt has moved on from
+    const attemptStart = t.attempts?.length > 1 ? t.attempts[t.attempts.length - 1].ts : null;
+    if (t.checkpoint && !TERMINAL.has(t.status) && !(attemptStart && t.checkpoint.ts < attemptStart)) {
       L.push([]);
       label('checkpoint', `${ago(t.checkpoint.ts)} ago`);
       para(t.checkpoint.message, '', 4, '   ');
@@ -1432,8 +1465,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const arts = reviewArtifacts(r);
     if (arts.length) {
       L.push([]);
-      label('artifacts', 'o opens the first');
-      arts.slice(0, 5).forEach((x, i) => L.push([[`   ${i ? ' ' : '›'} ${x.kind.padEnd(7)}`, i ? 'dim' : 'cyan'], [x.ref, i ? '' : 'cyan'], [x.description ? '  ' + x.description : '', 'dim'], [x.task !== t.id ? `  (${x.task})` : '', 'dim']]));
+      label('artifacts', `o opens the first${arts.length > 3 ? ` · ${arts.length - 3} more: ⏎ details` : ''}`);
+      arts.slice(0, 3).forEach((x, i) => L.push([[`   ${i ? ' ' : '›'} ${x.kind.padEnd(7)}`, i ? 'dim' : 'cyan'], [x.ref, i ? '' : 'cyan'], [x.description ? '  ' + x.description : '', 'dim'], [x.task !== t.id ? `  (${x.task})` : '', 'dim']]));
     }
     const others = t.notes.filter((n) => n.actor && n.actor !== t.owner && n.kind !== 'checkpoint').slice(-2);
     if (others.length) {
@@ -1476,6 +1509,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       k.push('s coordinator', '⏎ details');
     }
     if (r.type !== 'plan' && r.kind !== 'plan-question') k.push('N plan note');
+    if (ui.rows.overview.length > 1) k.push('! Y F { } sections  [ ] plans');
     return k.join('  ') + '  ? help  esc ' + (ui.scope.level === 'all' ? 'quit' : 'back');
   }
 
@@ -1537,7 +1571,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       lab('☐ to do', 'cyan bold', 'a task for you, not a question: a marks it done, with a note for the coordinator'),
       T('IN FLIGHT: one row per plan (progress, coordinator state), then the tasks being worked'),
       T('on (in progress, being reworked after review, answered) with their latest progress.'),
-      T('Below the list: the context of the selected row, enough to act on it.'),
+      T('Below the list: the context of the selected row, enough to act on it (a task: its'),
+      T('steps first, then the latest progress, live runs, checkpoint, artifacts).'),
+      K('! Y F', 'straight to NEEDS YOU / YOUR TASKS / IN FLIGHT (also shown on the headings)'),
+      K('{ }', 'to the previous / next section'),
+      K('[ ]', 'to the previous / next plan, within a section and on into the next one'),
       K('a  x  r  o  s  S', 'act on the selected row (see "Acting" and "The coordinator")'),
       K('o', 'open the task’s artifact: PR / URL in the browser; branch diff, commit or file'),
       T('                in a new herdr tab "review T<n>" in the project'),
@@ -1901,14 +1939,23 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     else if (v === 'overview') {
       // the list on top, the selected row's context below it
       const { lines: all, selLine } = overviewTabLines(W, plans);
-      const ctx = contextLines(ui.rows.overview[ui.sel.overview], W);
-      const panelMax = ctx.length ? Math.max(6, Math.floor(bodyH * 0.42)) : 0; // the list comes first
+      const r0 = ui.rows.overview[ui.sel.overview];
+      const ctx = contextLines(r0, W);
+      // the list comes first; a task's context (steps, live runs) gets more room
+      const panelMax = ctx.length ? Math.max(6, Math.floor(bodyH * (r0?.task ? 0.6 : 0.42))) : 0;
       const listH = Math.max(Math.min(all.length, bodyH - Math.min(panelMax, ctx.length + 1)), Math.min(all.length, bodyH - panelMax));
       list(lines, all, selLine, 'overview', listH);
       const room = bodyH - listH;
       if (ctx.length && room > 2) {
         lines.push([['─'.repeat(W), 'gray']]);
-        lines.push(...ctx.slice(0, room - 1));
+        // cut off: say so (the details show all of it)
+        const fits = ctx.length <= room - 1;
+        let cut = fits ? room - 1 : room - 2;
+        // not after a blank line or a section's heading with nothing of it shown
+        const heading = (l) => !l?.length || (l[0][1] === 'bold' && l.length <= 2);
+        if (!fits) while (cut > 1 && heading(ctx[cut - 1])) cut--;
+        lines.push(...ctx.slice(0, cut));
+        if (!fits) lines.push([[` ⋮ ${ctx.length - cut} more lines${r0?.task ? ' · ⏎ details' : ''}`, 'dim']]);
       }
     } else if (v === 'detail') {
       const r = ui.rows.tasks[ui.sel.tasks];
@@ -2957,7 +3004,21 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       else if (k === '\x1b[6~') ui.sel[key] = Math.min(n - 1, ui.sel[key] + page);
       else if (k === '\x1b[H') ui.sel[key] = 0;
       else if (k === 'G') ui.sel[key] = n - 1;
-      else if (k === '\r') open();
+      else if (v === 'overview' && k in SECTION_KEYS) {
+        // straight to a section
+        const i = ui.rows.overview.findIndex((x) => x.sec === SECTION_KEYS[k]);
+        if (i >= 0) ui.sel.overview = i;
+        else flash(`${SECTION_TITLE[SECTION_KEYS[k]]}: nothing there`);
+      } else if (v === 'overview' && ['[', ']', '{', '}'].includes(k)) {
+        // } { the next / previous section, ] [ the next / previous plan (within a section,
+        // on into the next one): to its first row, or back to the first row of this one
+        const rs = ui.rows.overview;
+        const unit = (x) => (k === '{' || k === '}' ? x.sec : `${x.sec}|${x.key}`);
+        const firsts = rs.map((x, i) => (i === 0 || unit(rs[i - 1]) !== unit(x) ? i : -1)).filter((i) => i >= 0);
+        const at = ui.sel.overview;
+        const to = k === ']' || k === '}' ? firsts.find((i) => i > at) : [...firsts].reverse().find((i) => i < at);
+        if (to != null) ui.sel.overview = to;
+      } else if (k === '\r') open();
       else if (k === 'g') return goTo();
       else if (v === 'plan' && r?.type === 'plan' && ['\x1b[C', 'l', '\x1b[D', 'h', ' '].includes(k)) {
         const fold = k === ' ' ? !ui.cardFolded.has(r.key) : k === '\x1b[D' || k === 'h';
