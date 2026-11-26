@@ -5,7 +5,7 @@ import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
 import { TERMINAL, driverInbox, planSummary, HUMAN, keepsCriteria } from '../../../src/core.mjs';
 import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, reviewEvents, hasLiveWaiter } from '../../../src/store.mjs';
-import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject, pluginConfig, focusPane } from './herdr.mjs';
+import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject, pluginConfig, focusPane, pluginStateDir } from './herdr.mjs';
 import { progressText } from './sync.mjs';
 import { textField, keyField, fieldText, fieldRows, fieldMode } from './textfield.mjs';
 import { activeRuns, taskLive, liveBadge, elapsed, readTail, earlierText, liveView, hasView, liveOpen, liveItem, loadLiveKinds, enableAutoRefresh, supersedeKey, artifactKind } from '../../../src/live.mjs';
@@ -146,6 +146,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     picker: null, // plan picker: {title, query, sel, items(), onPick(item)}
     byAgent: false, // Tasks: grouped by agent (v) instead of the task tree
     cardFolded: new Set(), // plan tab: plan keys whose card is folded to its title line
+    todos: { open: false, since: null }, // Overview YOUR TASKS: unfolded? (since: what was seen when it opened)
     showClosed: false, // wider scopes: also list completed / cancelled plans
     confirm: null, // {action, key, until}: second press confirms
     input: null, // one-line text input: {label, value, onSubmit}
@@ -1145,7 +1146,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     return t?.last_message || it.message || '';
   }
 
-  function needLine(it, W, sel, headed = false) {
+  function needLine(it, W, sel, headed = false, fresh = false) {
     const [label, color] = NEED[it.kind] || [it.kind, ''];
     const t = it.task ? it.st.tasks[it.task] : null;
     const subject =
@@ -1163,7 +1164,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const who = it.kind === 'review' ? 'for the coordinator' : it.kind === 'your-review' || it.kind === 'your-task' || (it.kind === 'question' && it.for === HUMAN) ? 'for you' : it.actor && !['coordinator', 'prompt'].includes(it.kind) ? it.actor : '';
     return row(
       [mark(sel), [label.padEnd(11), sel ? `inverse ${color}` : color], [' ' + subject, sel ? 'bold' : 'bold']],
-      [[multi() && !headed ? planLabel(it, W) + '  ' : '', 'dim'], [who ? who + '  ' : '', 'cyan'], [ago(it.ts).padStart(3), 'dim']],
+      [[fresh ? '● new  ' : '', 'yellow bold'], [multi() && !headed ? planLabel(it, W) + '  ' : '', 'dim'], [who ? who + '  ' : '', 'cyan'], [ago(it.ts).padStart(3), 'dim']],
       W,
     );
   }
@@ -1246,6 +1247,53 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     return `  ${t.steps.filter(stepDone).length}/${t.steps.length}${cur && t.status === 'in_progress' && !named ? ` · ${clip(cur.title, 24).trimEnd()}` : ''}`;
   }
 
+  /**
+   * YOUR TASKS: when the human last looked at the list (an ISO time, kept across boards
+   * and restarts in the plugin state). A first board starts from now: nothing is "new".
+   */
+  const todosFile = () => path.join(pluginStateDir(), 'board.json');
+  function todosSeen() {
+    if (ui.todos.seen !== undefined) return ui.todos.seen;
+    try {
+      ui.todos.seen = JSON.parse(fs.readFileSync(todosFile(), 'utf8')).todosSeen ?? null;
+    } catch {
+      ui.todos.seen = null;
+    }
+    if (!ui.todos.seen) markTodosSeen();
+    return ui.todos.seen;
+  }
+  function markTodosSeen() {
+    ui.todos.seen = new Date().toISOString();
+    try {
+      let cur = {};
+      try {
+        cur = JSON.parse(fs.readFileSync(todosFile(), 'utf8'));
+      } catch {}
+      fs.writeFileSync(todosFile(), JSON.stringify({ ...cur, todosSeen: ui.todos.seen }, null, 2) + '\n');
+    } catch {}
+  }
+  /** Unfold (true) or fold YOUR TASKS; folding counts as having seen them. */
+  function setTodosOpen(open) {
+    if (open === ui.todos.open) return false;
+    if (open) ui.todos.since = todosSeen();
+    else ui.todos.since = null;
+    ui.todos.open = open;
+    markTodosSeen();
+    // the cursor stays on the header when its rows go away
+    if (!open && ui.rows.overview[ui.sel.overview]?.sec === 'todos') ui.sel.overview = Math.max(0, ui.rows.overview.findIndex((x) => x.k === 'todos#header'));
+    return true;
+  }
+  function todosHeader(todos, fresh, W, sel) {
+    const open = ui.todos.open;
+    const left = [mark(sel), [`${open ? '▾' : '▸'} YOUR TASKS `, sel ? 'inverse bold cyan' : 'bold cyan'], [String(todos.length), 'bold cyan']];
+    if (!open && fresh.length) {
+      const t = fresh[0].st.tasks[fresh[0].task];
+      left.push([`   ● ${fresh.length} new`, 'yellow bold'], [`  ${t.id} ${t.title}${fresh.length > 1 ? ` (+${fresh.length - 1})` : ''}`, '']);
+    }
+    const right = [[open ? 'Y · h fold · a: done' : 'Y · ⏎ unfold', 'dim'], !open && fresh.length ? [`  ${ago(fresh[0].ts).padStart(3)}`, 'dim'] : ['', '']];
+    return row(left, right, W);
+  }
+
   /** Why a plan has nothing in flight, in a few words. */
   function idleReason(p, a) {
     const st = p.st;
@@ -1295,9 +1343,15 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const todos = att.flatMap((a) => a.todos);
     if (todos.length) {
       sec = 'todos';
-      L.push([], [[' YOUR TASKS ', 'bold cyan'], [String(todos.length), 'bold cyan'], ['   Y · a: done (with a note for the coordinator)', 'dim']]);
-      for (const it of todos) {
-        add({ type: 'need', ...it, k: `todo#${it.key}#${it.task}` }, (sel) => needLine(it, W, sel, false));
+      // folded by default to one line; what arrived since the human last looked shows there
+      const seen = todosSeen();
+      const newer = (it) => !seen || (it.ts || '') > seen;
+      const fresh = todos.filter(newer).sort((x, y) => (y.ts || '').localeCompare(x.ts || ''));
+      const isNew = (it) => !ui.todos.since || (it.ts || '') > ui.todos.since;
+      L.push([]);
+      add({ type: 'section', sec: 'todos', items: todos, fresh, k: 'todos#header' }, (sel) => todosHeader(todos, fresh, W, sel));
+      if (ui.todos.open) for (const it of todos) {
+        add({ type: 'need', ...it, k: `todo#${it.key}#${it.task}` }, (sel) => needLine(it, W, sel, false, isNew(it)));
         const t = it.st.tasks[it.task];
         const waits = it.waiting.length ? `${it.waiting.join(', ')} wait${it.waiting.length === 1 ? 's' : ''} on it` : '';
         const msg = [waits, t.description && t.description !== t.title ? t.description.replace(/\s+/g, ' ') : ''].filter(Boolean).join(' · ');
@@ -1343,6 +1397,17 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       if (ls.length > max) L.push([[`${ind}(${ls.length - max + 1} more lines: ⏎ details)`, 'dim']]);
     };
     const label = (txt, extra = '') => L.push([[` ${txt}`, 'bold'], [extra ? '  ' + extra : '', 'dim']]);
+    if (r.type === 'section') {
+      // a peek at the folded list: newest first, the new ones marked
+      label('YOUR TASKS', ui.todos.open ? 'h folds them' : '⏎ unfolds them to act on one');
+      const byNew = [...r.items].sort((x, y) => (y.ts || '').localeCompare(x.ts || ''));
+      for (const it of byNew) {
+        const t = it.st.tasks[it.task];
+        const nw = r.fresh.includes(it) && !ui.todos.open;
+        L.push([[nw ? ' ● ' : '   ', 'yellow bold'], [clip(`${t.id} ${t.title}`, Math.max(10, W - 30)).trimEnd(), nw ? 'bold' : ''], [`  ${multi() ? planLabel(it, W) + ' · ' : ''}${ago(it.ts)}`, 'dim']]);
+      }
+      return L;
+    }
     if (r.type === 'need' && (r.kind === 'coordinator' || r.kind === 'prompt')) {
       L.push([[` ${r.actor}`, 'bold cyan'], [r.kind === 'prompt' ? '  at a prompt in its terminal' : '  waits for your input', r.kind === 'prompt' ? 'red' : 'yellow'], [`  ·  ${planLabel(r)}`, 'dim']]);
       const tail = paneTail(r.pane, 14);
@@ -1489,6 +1554,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   function overviewKeys(r) {
     if (!r) return '↑↓ select  s coordinator  ? help';
     const k = [];
+    if (r.type === 'section') return [ui.todos.open ? 'h fold' : '⏎ unfold', 's coordinator', '! Y F { } sections', '? help'].join('  ');
     const t = r.task ? r.st.tasks[r.task] : null;
     if (r.type === 'need' && (r.kind === 'coordinator' || r.kind === 'prompt')) {
       k.push('g go to its terminal');
@@ -1502,7 +1568,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       }
       if (r.kind === 'finished' || r.type === 'plan') k.push('c close plan');
     } else {
-      if (t.status === 'review') k.push('a approve', 'x changes');
+      if (t.owner === HUMAN && t.status !== 'review') k.push('a done', 'h fold');
+      else if (t.status === 'review') k.push('a approve', 'x changes');
       k.push(t.status === 'blocked' && !t.blocked_on.length ? 'r answer' : 'r message');
       if (reviewArtifacts(r).length) k.push('o open');
       if (t.owner) k.push('g agent');
@@ -1569,6 +1636,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       T('when no coordinator is running for the plan; otherwise the plan row says "N queued".'),
       T('YOUR TASKS: things only you can do (tell a team, request access), with what waits on'),
       lab('☐ to do', 'cyan bold', 'a task for you, not a question: a marks it done, with a note for the coordinator'),
+      lab('▸ YOUR TASKS', 'cyan bold', 'folded by default: ● N new counts tasks added since you last looked; ⏎ unfolds, h folds'),
       T('IN FLIGHT: one row per plan (progress, coordinator state), then the tasks being worked'),
       T('on (in progress, being reworked after review, answered) with their latest progress.'),
       T('Below the list: the context of the selected row, enough to act on it (a task: its'),
@@ -3005,8 +3073,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       else if (k === '\x1b[6~') ui.sel[key] = Math.min(n - 1, ui.sel[key] + page);
       else if (k === '\x1b[H') ui.sel[key] = 0;
       else if (k === 'G') ui.sel[key] = n - 1;
+      else if (v === 'overview' && r?.type === 'section' && ['\r', ' ', 'l', '\x1b[C'].includes(k)) setTodosOpen(k === ' ' ? !ui.todos.open : true);
+      else if (v === 'overview' && r?.sec === 'todos' && ['h', '\x1b[D'].includes(k)) setTodosOpen(false);
       else if (v === 'overview' && k in SECTION_KEYS) {
-        // straight to a section
+        // straight to a section (Y on YOUR TASKS while there toggles its fold)
+        if (k === 'Y' && r?.sec === 'todos') return setTodosOpen(!ui.todos.open), draw();
         const i = ui.rows.overview.findIndex((x) => x.sec === SECTION_KEYS[k]);
         if (i >= 0) ui.sel.overview = i;
         else flash(`${SECTION_TITLE[SECTION_KEYS[k]]}: nothing there`);

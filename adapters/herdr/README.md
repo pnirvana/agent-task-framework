@@ -126,6 +126,13 @@ Every tab shows its content for the scope (`Tab` / `0`–`4`):
     own work (its reviews, subagents' questions, failures, stalled agents) appears here
     only when no coordinator runs for the plan; otherwise the plan row counts it as
     queued. Each item has its message on a second line.
+  - **Your tasks**: tasks assigned to you (`☐ to do`: tell a team, request access),
+    folded to one line by default. Tasks added since you last unfolded the section are
+    counted there (`● 2 new`, with the newest one's title) and marked `● new` when you
+    unfold it; the time you last looked is kept across boards and restarts. `⏎` on the
+    line unfolds it, `h` (or `Y` while on it) folds it again; with the line selected
+    the context panel lists all of them, newest first. `a` on one marks it done, with an
+    optional note for the coordinator.
   - **In flight**: one row per plan (progress, agents, coordinator state, queued items,
     `✎N` = tasks with your input the coordinator has not acted on yet), then
     only the tasks being worked on now (in progress, reworked after a review, answered)
