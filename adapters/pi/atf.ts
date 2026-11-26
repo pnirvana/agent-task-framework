@@ -88,7 +88,14 @@ export default function (pi: any) {
 	// ---------------------------------------------------------------- wake
 	let child: ChildProcess | null = null;
 	let idle = true;
-	const status = (text?: string) => safe(() => ui()?.setStatus?.("atf", text));
+	// set only when it changes: every set re-renders pi's footer
+	let lastStatus: string | undefined;
+	const status = (text?: string) =>
+		safe(() => {
+			if (text === lastStatus) return;
+			lastStatus = text;
+			ui()?.setStatus?.("atf", text);
+		});
 	const stopWait = () => {
 		if (child) {
 			child.removeAllListeners("close");
@@ -210,12 +217,20 @@ export default function (pi: any) {
 		return out;
 	};
 
+	// the widget is set again only when what it shows changed: the plan is re-read on every
+	// write and every 5 s, and each set rebuilds pi's widget area and renders
+	let widgetSig: string | null = null;
+	let widgetUi: any = null;
 	const render = () =>
 		safe(() => {
 			const u = ui();
 			if (!u?.setWidget) return;
-			if (!items.length && !todos.length) return u.setWidget("atf", undefined);
 			const title = planState?.title ?? "";
+			const sig = JSON.stringify([items, todos.map((x) => [x.task, x.waiting.length]), title, expanded]);
+			if (sig === widgetSig && u === widgetUi) return;
+			widgetSig = sig;
+			widgetUi = u;
+			if (!items.length && !todos.length) return u.setWidget("atf", undefined);
 			u.setWidget("atf", (_tui: any, theme: any) => ({
 				render(width: number): string[] {
 					// the human's own tasks: one line, apart from what waits for them now
@@ -591,6 +606,70 @@ export default function (pi: any) {
 				if (items[n - 1]) await peek(ctx, items[n - 1].id);
 			},
 		});
+	/**
+	 * /atf render: record what pi writes to the terminal for 60 s, then a summary short
+	 * enough to read off the screen: full redraws (a cleared screen: the flicker) with the
+	 * size changes behind them, and the rows rewritten most often.
+	 */
+	let recording = false;
+	const recordRender = (ctx: any, secsWanted = 60) => {
+		ctxRef = ctx ?? ctxRef;
+		const u = ui();
+		if (recording) return u?.notify?.("atf render: already recording", "info");
+		let tui: any = null;
+		// a widget factory receives pi's TUI: set one for a moment to get hold of it
+		safe(() => {
+			u?.setWidget?.("atf-render", (t: any) => ((tui = t), { render: () => [], invalidate() {} }));
+			u?.setWidget?.("atf-render", undefined);
+		});
+		const term = tui?.terminal;
+		if (!term?.write) return u?.notify?.("atf render: pi's terminal is not reachable from the extension", "warning");
+		recording = true;
+		const write = term.write;
+		const t0 = Date.now();
+		let frames = 0;
+		let full = 0;
+		let bytes = 0;
+		const sizes = new Map<string, number>();
+		const rows = new Map<string, number>();
+		let last = `${tui.terminal.columns}x${tui.terminal.rows}`;
+		const strip = (x: string) => x.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[PX^_][^\x1b]*\x1b\\/g, "");
+		term.write = function (data: any) {
+			try {
+				const d = String(data);
+				frames++;
+				bytes += d.length;
+				const size = `${term.columns}x${term.rows}`;
+				if (d.includes("\x1b[2J")) {
+					full++;
+					const k = size === last ? `${size} (same size)` : `${last} → ${size}`;
+					sizes.set(k, (sizes.get(k) ?? 0) + 1);
+				}
+				last = size;
+				// rows written: "ESC[<row>;1H ESC[2K <text>"
+				for (const m of d.matchAll(/\x1b\[(\d+);1H\x1b\[2K([^\x1b]*(?:\x1b(?!\[\d+;1H)[^\x1b]*)*)/g)) {
+					const text = strip(m[2]).trim().slice(0, 50) || "(blank)";
+					const k = `row ${m[1]}: ${text}`;
+					rows.set(k, (rows.get(k) ?? 0) + 1);
+				}
+			} catch {}
+			return write.apply(this, arguments as any);
+		};
+		u?.notify?.(`atf render: recording for ${secsWanted} s; use pi as usual and let the flicker happen`, "info");
+		setTimeout(() => {
+			term.write = write;
+			recording = false;
+			const secs = Math.round((Date.now() - t0) / 1000);
+			const top = [...rows].sort((a, b) => b[1] - a[1]).slice(0, 5);
+			const lines = [
+				`atf render: ${secs} s, ${frames} frames, ${Math.round(bytes / 1024)} KB, ${full} full redraw${full === 1 ? "" : "s"}${full ? " (cleared screen)" : ""}`,
+				...[...sizes].map(([k, n]) => `  full redraw ${n}× at ${k}`),
+				...(top.length ? ["  rows rewritten most often:", ...top.map(([k, n]) => `    ${n}× ${k}`)] : ["  no row was rewritten"]),
+			];
+			ui()?.notify?.(lines.join("\n"), "info");
+		}, secsWanted * 1000).unref?.();
+	};
+
 	pi.registerCommand?.("atf", {
 		description: "ATF: what waits for you (/atf T5 · /atf plan: one request · /atf tasks: all tasks of the plan · /atf todo: your own tasks)",
 		// `/atf ` completes: the lists, what waits for the human, then any task of the plan
@@ -601,6 +680,7 @@ export default function (pi: any) {
 				{ value: "todo", label: "todo", description: todos.length ? `your own tasks (${todos.length})` : "your own tasks (none)" },
 				{ value: "tasks", label: "tasks", description: "all tasks of the plan" },
 				{ value: "plan", label: "plan", description: "the plan's own questions" },
+				{ value: "render", label: "render", description: "diagnose flicker: record what pi redraws (60 s; /atf render 20: 20 s)" },
 			];
 			const seen = new Set<string>();
 			for (const it of items) if (it.task) (seen.add(it.task), out.push({ value: it.task, label: it.task, description: `${it.label}: ${it.text}` }));
@@ -609,7 +689,11 @@ export default function (pi: any) {
 			const hits = out.filter((i) => i.value.toLowerCase().startsWith(want));
 			return hits.length ? hits : null;
 		},
-		handler: async (args: string, ctx: any) => peek(ctx, (args || "").trim() || null),
+		handler: async (args: string, ctx: any) => {
+			const r = (args || "").trim().toLowerCase().match(/^render(?:\s+(\d+))?$/);
+			if (r) return recordRender(ctx, r[1] ? Number(r[1]) : 60);
+			return peek(ctx, (args || "").trim() || null);
+		},
 	});
 
 	// autocomplete: `T` at the start of the input suggests the requests waiting for the human
@@ -640,6 +724,8 @@ export default function (pi: any) {
 	pi.on("session_start", async (_e: any, ctx: any) => {
 		ctxRef = ctx;
 		idle = true;
+		widgetSig = null; // a new session starts with pi's widgets and statuses cleared
+		lastStatus = undefined;
 		if (ctx?.hasUI !== false) {
 			unInput?.();
 			unInput =

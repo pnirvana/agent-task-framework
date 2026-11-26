@@ -199,7 +199,9 @@ the entry `plan` (`/atf plan`, answer with `plan: …`). `/atf tasks` (or `t` in
 lists all tasks of the plan; `⏎` opens one. `/atf todo` (or `m` there) lists only your own
 tasks (things only you can do, with what waits on each); tell the coordinator in the chat
 when one is done. Nothing of this goes into the chat or the model's
-context. `atf-herdr coordinate` loads the extension; for a pi you start yourself use
+context. If pi's screen flickers, `/atf render` records what pi redraws for 60 s and
+prints a summary: full redraws (a cleared screen) with the size changes behind them, and
+the rows rewritten most often. `atf-herdr coordinate` loads the extension; for a pi you start yourself use
 `pi -e <repo>/adapters/pi/atf.ts`, or install the repo as a pi package
 (`pi install git:github.com/pnirvana/agent-task-framework`).
 
