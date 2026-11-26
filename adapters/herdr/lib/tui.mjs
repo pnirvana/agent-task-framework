@@ -2095,6 +2095,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       label: `${t.id} done: a note for the coordinator (optional): `,
       value: '',
       hint: '⏎ done',
+      multiline: true,
       onSubmit: (text) => {
         const evs = [];
         if (t.status === 'todo' || t.status === 'blocked') evs.push({ type: 'task.status', task: t.id, data: { status: 'in_progress' } });
