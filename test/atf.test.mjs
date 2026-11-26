@@ -844,6 +844,65 @@ test('herdr sweep (v2): closes finished agents, never relaunches them, nudges th
     process.env = saved;
   }
 });
+test('herdr restore: after a restart the coordinator is relaunched in place, stale agents closed, the board reopened', async () => {
+  const { dir, run } = sandbox(); // coordinator "lead"
+  run(['add', 'api', '--assign', 'be']); // T1: in progress when herdr went down
+  run(['add', 'docs']); // T2
+  run(['start', 'T1'], { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' });
+  const root = path.join(dir, '.atf');
+  const { getCurrentPlan, transact } = await import('../src/store.mjs');
+  const planId = getCurrentPlan(root);
+  transact(root, planId, { id: 'atf-herdr', role: 'launcher' }, () => [{ type: 'plan.session', data: { ref: '/s/lead.jsonl', kind: 'pi', actor: 'lead' } }]);
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-state-'));
+  const calls = path.join(state, 'calls.log');
+  const fake = path.join(state, 'herdr');
+  // what herdr restored: the panes with their names, pi resumed in them (under their old
+  // agent names), a shell where the board was, and a pane of the user's own
+  const panes = [
+    { pane_id: 'w1:p1', tab_id: 'w1:t1', workspace_id: 'w1', label: 'lead', agent: 'pi', cwd: dir },
+    { pane_id: 'w1:p4', tab_id: 'w1:t1', workspace_id: 'w1', label: 'ATF board', cwd: dir },
+    { pane_id: 'w1:p2', tab_id: 'w1:t2', workspace_id: 'w1', label: 'be', agent: 'pi', cwd: dir },
+    { pane_id: 'w1:p7', tab_id: 'w1:t3', workspace_id: 'w1', agent: 'pi', cwd: dir },
+  ];
+  const agents = [
+    { name: 'lead', pane_id: 'w1:p1', agent_status: 'idle', cwd: dir, agent_session: { value: '/s/lead.jsonl' } },
+    { name: 'be', pane_id: 'w1:p2', agent_status: 'idle', cwd: dir, agent_session: { value: '/s/be.jsonl' } },
+    { name: 'mine', pane_id: 'w1:p7', agent_status: 'idle', cwd: dir, agent_session: { value: '/s/mine.jsonl' } },
+  ];
+  const j = (x) => JSON.stringify({ result: x });
+  fs.writeFileSync(
+    fake,
+    `#!/bin/sh\necho "$@" >> '${calls}'\ncase "$1 $2" in\n  "pane list") echo '${j({ panes })}';;\n  "agent list") echo '${j({ agents })}';;\n  "pane split") echo '${j({ pane: { pane_id: 'w1:p9' } })}';;\n  "agent get") echo '{"result":{}}';;\n  *) echo '{"result":{}}';;\nesac\n`,
+    { mode: 0o755 },
+  );
+  const rec = { launchedAt: Date.now() - 3_600_000, root, plan: planId, kind: 'pi' };
+  fs.writeFileSync(
+    path.join(state, 'agents.json'),
+    JSON.stringify({ [`${root}#lead`]: { ...rec, name: 'lead', actor: 'lead', role: 'coordinator', pane: 'w1:p1' }, [`${root}#be`]: { ...rec, name: 'be', task: 'T1', pane: 'w1:p2' } }),
+  );
+  const saved = { ...process.env };
+  Object.assign(process.env, { HERDR_BIN_PATH: fake, HERDR_PLUGIN_STATE_DIR: state, ATF_REGISTRY: path.join(dir, 'registry.json'), HERDR_PLUGIN_CONFIG_DIR: path.join(state, 'cfg') });
+  delete process.env.HERDR_SOCKET_PATH;
+  try {
+    const { restore, restoreSummary } = await import('../adapters/herdr/lib/restore.mjs');
+    const boards = [];
+    const r = await restore({ settleMs: 0, openBoard: (at) => (boards.push(at), null) });
+    const log = fs.readFileSync(calls, 'utf8');
+    assert.match(log, /pane close w1:p2/, "the subagent's stale pane is closed");
+    assert.match(log, /pane split --pane w1:p1 .*--env ATF_PLAN=[^ ]+ .*--env ATF_ROLE=coordinator/, 'the coordinator gets its environment back, in the spot of its old pane');
+    assert.match(log, /pane close w1:p1/);
+    assert.match(log, /agent start lead --kind pi --pane w1:p9 -- --session \/s\/lead\.jsonl/, 'resuming its session');
+    assert.match(log, /agent prompt w1:p9 \[ATF\] You were restarted[^\n]*T1 \(be\)/, 'told to reassess, with the task that lost its agent');
+    assert.doesNotMatch(log, /pane close w1:p7/, "the user's own pi is left alone");
+    assert.deepEqual(boards, [{ root, target: 'w1:p1', workspace: 'w1', tab: 'w1:t1' }], 'the board comes back beside the coordinator');
+    assert.equal(restoreSummary(r), 'coordinator of Test plan restarted; 1 task in progress handed to it; 1 stale agent pane closed; 1 board reopened');
+    const reg = JSON.parse(fs.readFileSync(path.join(state, 'agents.json'), 'utf8'));
+    assert.equal(reg[`${root}#lead`].pane, 'w1:p9');
+    assert.equal(reg[`${root}#be`].pane, null);
+  } finally {
+    process.env = saved;
+  }
+});
 test('herdr notifications: once per item that needs the human; terminal toast, bell and progress mark', async () => {
   const { dir, run } = sandbox(); // coordinator "lead"
   const sub = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };

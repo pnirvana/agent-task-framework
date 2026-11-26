@@ -31,6 +31,13 @@ title = "atf: enable live sync for this project"
 contexts = ["pane", "workspace"]
 command = ["sh", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/run.sh\" action-enable-sync"]
 
+# ---- after herdr started and restored its session: bring back what ATF started ----
+# (coordinators with their plan, boards; stale subagent panes closed). restore = "off"
+# in the plugin config turns it off; `atf-herdr restore` runs it by hand.
+
+[[startup]]
+command = ["sh", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/run.sh\" startup"]
+
 # ---- panes (opened by the actions above via `herdr plugin pane open`) ----
 
 [[panes]]

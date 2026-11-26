@@ -263,18 +263,23 @@ const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0
  * coordinator that is still running is first asked for a plan checkpoint, then replaced.
  * Returns {name, pane, mode}; mode 'running' if one runs already (nothing started).
  */
-export function launchCoordinator({ root, planId, fresh = false, kind, handoffMs = 180_000, say = () => {}, dryRun = false }) {
+export function launchCoordinator({ root, planId, fresh = false, kind, agent, handoffMs = 180_000, say = () => {}, dryRun = false, workspace: inWorkspace = null, inPlaceOf = null, prompt = null }) {
   const s = loadPlan(root, planId);
   const name = s.coordinator || resolveActor().id;
-  kind = kind || process.env.ATF_AGENT_KIND || pluginConfig().agent_kind || 'pi';
+  const prev = readRegistry()[regKey(root, name)];
+  kind = kind || (prev?.plan === planId && prev?.kind) || process.env.ATF_AGENT_KIND || pluginConfig().agent_kind || 'pi';
+  // the agent definition it ran with last time, unless another is asked for (none: '')
+  agent = agent ?? (prev?.plan === planId ? prev.agent : null) ?? null;
   const kindCfg = agentKinds()[kind] || { start: [] };
   const live = liveAgents(root);
   const livePane = new Map([...live.values()].map((a) => [a.pane_id, a]));
   const actor = s.actors[name];
-  const running = actor && sameServer(actor) ? liveAgentOf(s, actor, live, livePane) : live.get(name) || null;
+  let running = actor && sameServer(actor) ? liveAgentOf(s, actor, live, livePane) : live.get(name) || null;
+  // the pane it replaces: herdr restored a bare agent there, under the coordinator's name
+  if (inPlaceOf && running?.pane_id === inPlaceOf) running = null;
   const mode = !fresh && s.session?.ref && kindCfg.resume ? 'resume' : 'fresh';
   if (dryRun) return { name, pane: running?.pane_id ?? null, mode: running && !fresh ? 'running' : mode, session: mode === 'resume' ? s.session.ref : null };
-  let workspace = (actor && sameServer(actor) && actor.ctx?.herdr_workspace) || process.env.HERDR_WORKSPACE_ID || null;
+  let workspace = inWorkspace || (actor && sameServer(actor) && actor.ctx?.herdr_workspace) || process.env.HERDR_WORKSPACE_ID || null;
   if (running) {
     if (!fresh) return { name, pane: running.pane_id, mode: 'running' };
     workspace = running.workspace_id || workspace;
@@ -296,31 +301,109 @@ export function launchCoordinator({ root, planId, fresh = false, kind, handoffMs
   const env = { ATF_DIR: root, ATF_PLAN: planId, ATF_ACTOR: name, ATF_ROLE: 'coordinator', ATF_HARNESS: 'herdr', PATH: `${ATF_BIN}:${process.env.PATH}`, ...kindEnv(kindCfg) };
   // a harness whose wake extension cannot set the agent's env (Copilot): the arm file is set here
   if (kindCfg.wakeEnv) env.ATF_WAKE = path.join(stateDir(), `wake-${planId}.json`);
-  const envArgs = Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
-  const tab = herdr(['tab', 'create', ...(workspace ? ['--workspace', workspace] : []), '--cwd', path.dirname(root), '--label', `plan: ${s.title}`.slice(0, 40), '--focus', ...envArgs]);
-  const pane = tab?.root_pane?.pane_id;
-  if (!pane) throw new Error('could not open a tab for the coordinator');
+  const pane = coordinatorPane({ env, cwd: path.dirname(root), workspace, inPlaceOf, label: `plan: ${s.title}` });
   // herdr agent names are unique per server: another project may have a "coordinator"
   const hname = herdr(['agent', 'get', name])?.agent ? `${name}-${s.id.slice(-4)}` : name;
   const session = mode === 'resume' ? s.session.ref : '';
-  const withoutSkill = (list) => (skillInstalled() ? list.filter((a, i) => a !== '{skill}' && list[i + 1] !== '{skill}') : list);
   const newSession = crypto.randomUUID();
   const kindArgs = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []), ...(kindCfg.coordinator || [])];
-  const args = kindArgs.map((a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session).replace('{newsession}', newSession).replace('{wake}', WAKE_EXT));
+  const args = [...kindArgs.map((a) => a.replace('{skill}', SKILL_DIR).replace('{session}', session).replace('{newsession}', newSession).replace('{wake}', WAKE_EXT)), ...agentDefArgs(agent, kind, path.dirname(root))];
+  startIn(pane, hname, kind, args, root);
+  herdr(['pane', 'rename', pane, name]);
+  updateRegistry((reg) => {
+    reg[regKey(root, name)] = { name: hname, actor: name, role: 'coordinator', kind, agent: agent || null, root, plan: planId, pane, workspace: paneWorkspace(pane), socket: currentSocket(), launchedAt: Date.now() };
+  });
+  herdr(['agent', 'prompt', pane, prompt ?? coordinatorPrompt(s, mode, name)]);
+  // the plan's session: what `s` on the board resumes next time
+  const ref = herdr(['agent', 'get', pane])?.agent?.agent_session?.value || (kindArgs.includes('{newsession}') ? newSession : null);
+  if (ref && ref !== s.session?.ref) transact(root, planId, { id: 'atf-herdr', role: 'launcher', harness: 'herdr' }, () => [{ type: 'plan.session', data: { ref, kind, actor: name } }]);
+  return { name, hname, pane, mode };
+}
+
+const withoutSkill = (list) => (skillInstalled() ? list.filter((a, i) => a !== '{skill}' && list[i + 1] !== '{skill}') : list);
+
+/** The arguments of an agent definition (pi only), or none. */
+function agentDefArgs(agent, kind, cwd) {
+  if (!agent) return [];
+  if (kind !== 'pi') throw new Error(`agent definitions are supported for pi only ("${agent}", kind is ${kind})`);
+  const def = resolveAgentDef(agent, cwd);
+  if (!def) throw new Error(`unknown agent definition "${agent}" (see \`atf-herdr agents\`)`);
+  const r = piArgsForAgent(def, stateDir());
+  for (const n of r.notes) process.stderr.write(`atf-herdr: note: ${n}\n`);
+  return r.args;
+}
+
+/**
+ * The pane a coordinator starts in: a new tab, or (inPlaceOf) the spot of an existing
+ * pane, e.g. one herdr restored with a bare agent in it: split off it with the
+ * coordinator's environment, then that pane is closed, so the layout stays as it was.
+ */
+function coordinatorPane({ env, cwd, workspace, inPlaceOf, label }) {
+  const envArgs = Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
+  if (inPlaceOf) {
+    const pane = herdr(['pane', 'split', '--pane', inPlaceOf, '--direction', 'right', '--cwd', cwd, '--no-focus', ...envArgs])?.pane?.pane_id;
+    if (pane) {
+      herdr(['pane', 'close', inPlaceOf]);
+      return pane;
+    }
+  }
+  const tab = herdr(['tab', 'create', ...(workspace ? ['--workspace', workspace] : []), '--cwd', cwd, '--label', label.slice(0, 40), '--focus', ...envArgs]);
+  const pane = tab?.root_pane?.pane_id;
+  if (!pane) throw new Error('could not open a tab for the coordinator');
+  return pane;
+}
+
+function startIn(pane, hname, kind, args, root) {
   if (!herdr(['agent', 'start', hname, '--kind', kind, '--pane', pane, ...(args.length ? ['--', ...args] : [])], { timeout: 60_000 })) {
     const why = startFailure(kind, paneText(pane), path.dirname(root));
     herdr(['pane', 'close', pane]);
     throw new Error(`herdr could not start ${kind} agent "${hname}"${why ? `: ${why}` : ''}`);
   }
+}
+
+/**
+ * A coordinator for a project without a plan yet (atf-herdr new): it starts the design
+ * discussion with the human and creates the plan itself (`atf plan new`); the hook then
+ * ties that plan to this coordinator (linkNewPlan). Starts in `pane` (the workspace's).
+ */
+export function launchNewCoordinator({ root, pane, kind, agent, prompt = null }) {
+  const name = resolveActor().id;
+  kind = kind || process.env.ATF_AGENT_KIND || pluginConfig().agent_kind || 'pi';
+  const kindCfg = agentKinds()[kind] || { start: [] };
+  const args = [...withoutSkill([...(kindCfg.start || []), ...(kindCfg.coordinator || [])]).map((a) => a.replace('{skill}', SKILL_DIR).replace('{newsession}', crypto.randomUUID()).replace('{wake}', WAKE_EXT)), ...agentDefArgs(agent, kind, path.dirname(root))];
+  const hname = herdr(['agent', 'get', name])?.agent ? `${name}-${crypto.randomUUID().slice(0, 4)}` : name;
+  startIn(pane, hname, kind, args, root);
   herdr(['pane', 'rename', pane, name]);
   updateRegistry((reg) => {
-    reg[regKey(root, name)] = { name: hname, actor: name, role: 'coordinator', kind, root, plan: planId, pane, workspace: paneWorkspace(pane), socket: currentSocket(), launchedAt: Date.now() };
+    reg[regKey(root, name)] = { name: hname, actor: name, role: 'coordinator', kind, agent: agent || null, root, plan: null, pane, workspace: paneWorkspace(pane), socket: currentSocket(), launchedAt: Date.now() };
   });
-  herdr(['agent', 'prompt', pane, coordinatorPrompt(s, mode, name)]);
-  // the plan's session: what `s` on the board resumes next time
-  const ref = herdr(['agent', 'get', pane])?.agent?.agent_session?.value || (kindArgs.includes('{newsession}') ? newSession : null);
-  if (ref && ref !== s.session?.ref) transact(root, planId, { id: 'atf-herdr', role: 'launcher', harness: 'herdr' }, () => [{ type: 'plan.session', data: { ref, kind, actor: name } }]);
-  return { name, hname, pane, mode };
+  if (prompt) herdr(['agent', 'prompt', pane, prompt]);
+  return { name, hname, pane, kind };
+}
+
+/** Its environment: a coordinator of whatever plan it creates in `root`. */
+export const newCoordinatorEnv = (root, kind) => {
+  const kindCfg = agentKinds()[kind || process.env.ATF_AGENT_KIND || pluginConfig().agent_kind || 'pi'] || {};
+  return { ATF_DIR: root, ATF_ACTOR: resolveActor().id, ATF_ROLE: 'coordinator', ATF_HARNESS: 'herdr', PATH: `${ATF_BIN}:${process.env.PATH}`, ...kindEnv(kindCfg) };
+};
+
+/**
+ * A plan was created (from the hook): the coordinator ATF started for the project
+ * without a plan (launchNewCoordinator) is now this plan's: its record and the plan's
+ * session, so `s`, a sweep and a restore find it.
+ */
+export function linkNewPlan(root, planId, events) {
+  const created = events.find((e) => e.type === 'plan.created');
+  if (!created) return;
+  const key = regKey(root, created.actor?.id);
+  const rec = readRegistry()[key];
+  if (!rec || rec.role !== 'coordinator' || rec.plan) return;
+  updateRegistry((reg) => {
+    if (reg[key] && !reg[key].plan) reg[key].plan = planId;
+  });
+  const a = rec.pane && herdr(['agent', 'get', rec.pane])?.agent;
+  const ref = a && inProject(a, root) ? a.agent_session?.value : null;
+  if (ref) transact(root, planId, { id: 'atf-herdr', role: 'launcher', harness: 'herdr' }, () => [{ type: 'plan.session', data: { ref, kind: rec.kind, actor: rec.actor } }]);
 }
 
 /**

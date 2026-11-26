@@ -6,13 +6,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchPlan } from '../../src/core.mjs';
-import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig, skillInstalled, readEvents } from '../../src/store.mjs';
+import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig, skillInstalled, readEvents, initRoot } from '../../src/store.mjs';
 import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isBoardPane, isLiveBoard, focusPaneSync } from './lib/herdr.mjs';
 import { sync } from './lib/sync.mjs';
 import { notifyTick, notifyConfig, clientTtys, SEQ } from './lib/notify.mjs';
 import { chooseBoardSplit, tabLayout, planRebuild, withPlacementLock } from './lib/layout.mjs';
 import { discoverAgents, resolveAgentDef, piArgsForAgent } from './lib/agents.mjs';
-import { agentKinds, agentPlacement, launchAgent, launchCoordinator, lifecycle, lifecycleSweep, stateDir, recordSessionsForEvents } from './lib/launch.mjs';
+import { agentKinds, agentPlacement, launchAgent, launchCoordinator, lifecycle, lifecycleSweep, stateDir, recordSessionsForEvents, linkNewPlan, launchNewCoordinator, newCoordinatorEnv } from './lib/launch.mjs';
+import { restore, restoreOnStartup, restoreSummary } from './lib/restore.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SELF = path.join(HERE, 'atf-herdr.mjs');
@@ -34,6 +35,15 @@ const HELP = `atf-herdr — run and watch ATF agents inside herdr
       session (if any), or --fresh starts a new one. A coordinator that is still
       running is left alone, or with --fresh first asked for a plan checkpoint
       (atf plan checkpoint) and then replaced.
+  atf-herdr new <name> [--dir PATH] [--agent DEF] [--kind pi] [--prompt TEXT]
+      a new plan in its own folder (<plans_dir>/<name>, an ATF project) and workspace:
+      a coordinator (agent definition --agent, else new_plan_agent) that starts the
+      design discussion with you and creates the plan, and the board beside it
+  atf-herdr restore [--dry-run]
+      after herdr (or the machine) went down: restart each coordinator that was running,
+      in the spot of the pane herdr restored, resuming its session and told what to
+      reassess; close stale subagent panes; reopen boards. Runs by itself when herdr
+      starts (the plugin's startup hook; restore = "off" turns that off)
   atf-herdr sweep [--delay S]  one lifecycle pass: close agents ATF started once they
                                finished (idle, nothing in progress), nudge an idle
                                coordinator that has something to handle (incl. stalled
@@ -57,6 +67,10 @@ Plugin config ($(herdr plugin config-dir atf.herdr)/config.toml; atf config show
   lifecycle = "ephemeral" (default) | "persistent"
   agent_kind = "pi" (default) | "copilot" | "opencode" | "claude" | "codex"   (also --kind on spawn/coordinate)
   agent_placement = "tab" (default: agents in their own tab) | "split" (beside the coordinator)
+  plans_dir = "~/plans"            where atf-herdr new creates plan folders
+  new_plan_agent = "<definition>"  the coordinator of a new plan (atf-herdr agents lists them)
+  new_plan_prompt = "…"            its first message (default: none, you start)
+  restore = "auto" (default) | "off"  restore ATF when herdr starts
   [agents.<kind>]  start = [...], resume = [..."{session}"...], nativeSkill = true|false
 
 Notifications (~/.config/atf/config.toml, per user):
@@ -250,13 +264,14 @@ function openBoard(placement, { start } = {}) {
  *  - a board that is its own tab                  -> switch to that tab
  *  - a board as side panel in another tab         -> close it, open one here
  */
-function toggleBoard(placement, start) {
-  const root = resolveRoot({ optional: true }); // board offers `atf init` when missing
-  const dir = root ? path.dirname(root) : userDir();
+function toggleBoard(placement, start, at = null) {
+  // `at`: a board for that project beside that pane (a restore, a new plan), not where you are
+  const root = at ? at.root : resolveRoot({ optional: true }); // board offers `atf init` when missing
   const ctx = pluginContext();
-  const target = ctx.focused_pane_id || process.env.HERDR_PANE_ID;
-  const ws = ctx.workspace_id || process.env.HERDR_WORKSPACE_ID || null;
-  const here = ctx.tab_id || process.env.HERDR_TAB_ID || null;
+  const dir = root ? path.dirname(root) : at ? (herdr(['pane', 'get', at.target])?.pane?.cwd ?? userDir()) : userDir();
+  const target = at ? at.target : ctx.focused_pane_id || process.env.HERDR_PANE_ID;
+  const ws = at ? at.workspace : ctx.workspace_id || process.env.HERDR_WORKSPACE_ID || null;
+  const here = at ? at.tab : ctx.tab_id || process.env.HERDR_TAB_ID || null;
   if (placement !== 'popup') {
     const panes = herdr(['pane', 'list', ...(ws ? ['--workspace', ws] : [])])?.panes || [];
     const close = (p) => herdr(['plugin', 'pane', 'close', p.pane_id]) || herdr(['pane', 'close', p.pane_id]);
@@ -432,8 +447,7 @@ async function tui() {
 }
 
 // ---------- hook / sync / sweep ----------
-function enableSync(on) {
-  const root = resolveRoot();
+function enableSync(on, root = resolveRoot()) {
   const cfg = readConfig(root);
   const hooks = (cfg.hooks ??= {});
   const list = (hooks.post_write || []).filter((h) => !(Array.isArray(h) && h.join(' ').includes('atf-herdr')));
@@ -528,14 +542,47 @@ function hook() {
   sync(root);
   const { actions, soon } = lifecycleSweep(root);
   if (actions.length) sync(root);
-  if ((process.env.ATF_HOOK_TYPES || '').split(',').includes('task.status')) {
-    const from = Number(process.env.ATF_HOOK_FROM_SEQ);
-    const to = Number(process.env.ATF_HOOK_TO_SEQ);
-    recordSessionsForEvents(root, plan, readEvents(root, plan).filter((e) => e.seq >= from && e.seq <= to));
-  }
+  const types = (process.env.ATF_HOOK_TYPES || '').split(',');
+  const written = () => readEvents(root, plan).filter((e) => e.seq >= Number(process.env.ATF_HOOK_FROM_SEQ) && e.seq <= Number(process.env.ATF_HOOK_TO_SEQ));
+  if (types.includes('plan.created')) linkNewPlan(root, plan, written()); // a coordinator from `atf-herdr new`
+  if (types.includes('task.status')) recordSessionsForEvents(root, plan, written());
   // what now needs the human: notified once (SPEC §12.5, lib/notify.mjs)
   const n = notifyTick({ extraRoots: [root] });
   scheduleSweep(root, soon ? SOON_S : n.pending ? Math.max(1, Math.ceil(notifyConfig().settleMs / 1000)) : 20);
+}
+
+// ---------- a new plan: its own folder and workspace ----------
+/**
+ * atf-herdr new <name>: <plans_dir>/<name> (an ATF project), a workspace for it, a
+ * coordinator (agent definition: --agent or new_plan_agent) that starts the design
+ * discussion and creates the plan itself, and the board beside it.
+ */
+function newPlanCmd() {
+  const name = pos[1];
+  if (!name || flags.help) fail('usage: atf-herdr new <name> [--dir PATH] [--agent DEF] [--kind pi] [--prompt TEXT]');
+  if (!inHerdr()) fail('not running inside herdr (HERDR_ENV != 1)');
+  const cfg = pluginConfig();
+  const home = (p) => String(p).replace(/^~(?=\/|$)/, process.env.HOME || '');
+  const dir = flags.dir ? path.resolve(home(flags.dir)) : cfg.plans_dir ? path.join(path.resolve(home(cfg.plans_dir)), name) : fail('where should it go? set plans_dir in the plugin config (atf config shows it), or pass --dir');
+  fs.mkdirSync(dir, { recursive: true });
+  const root = fs.existsSync(path.join(dir, '.atf', 'plans')) ? path.join(dir, '.atf') : initRoot(dir);
+  enableSync(true, root);
+  const env = newCoordinatorEnv(root, flags.kind);
+  const ws = herdr(['workspace', 'create', '--cwd', dir, '--label', name, '--focus', ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`])]);
+  const pane = ws?.root_pane?.pane_id;
+  if (!pane) fail('could not create a workspace');
+  if (ws.tab?.tab_id) herdr(['tab', 'rename', ws.tab.tab_id, `plan: ${name}`.slice(0, 40)]);
+  const agent = flags.agent ?? cfg.new_plan_agent ?? null;
+  let r;
+  try {
+    r = launchNewCoordinator({ root, pane, kind: flags.kind, agent: agent || null, prompt: flags.prompt ?? cfg.new_plan_prompt ?? null });
+  } catch (e) {
+    fail(e.message);
+  }
+  const err = withBoardLock(() => toggleBoard('split', undefined, { root, target: pane, workspace: ws.workspace?.workspace_id, tab: ws.tab?.tab_id }));
+  if (err) process.stderr.write(`atf-herdr: ${err}\n`);
+  herdr(['agent', 'focus', r.pane]);
+  process.stdout.write(`new plan workspace "${name}" in ${dir}: ${r.name} is its coordinator${agent ? ` (agent ${agent})` : ''}\n`);
 }
 
 // ---------- dispatch ----------
@@ -571,6 +618,18 @@ switch (pos[0]) {
       );
     break;
   }
+  case 'restore':
+  case 'startup': {
+    // startup: herdr's plugin startup hook, after it restored the session
+    const openAt = (at) => withBoardLock(() => toggleBoard('split', undefined, { ...at, tab: herdr(['pane', 'get', at.target])?.pane?.tab_id ?? at.tab }));
+    const opts = { openBoard: openAt, dryRun: !!flags['dry-run'], say: (m) => process.stdout.write(m + '\n') };
+    const r = pos[0] === 'startup' ? await restoreOnStartup(opts) : await restore(opts);
+    if (r) process.stdout.write((flags['dry-run'] ? '(dry run, nothing changed) ' : '') + (restoreSummary(r) || 'nothing to restore') + (r.skipped.length ? `\nleft alone: ${r.skipped.join('; ')}` : '') + '\n');
+    break;
+  }
+  case 'new':
+    newPlanCmd();
+    break;
   case 'recover':
     process.stdout.write(recoverRebuild() ? 'recovered an interrupted board rearrangement\n' : 'nothing to recover\n');
     break;

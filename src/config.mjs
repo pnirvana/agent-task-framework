@@ -49,6 +49,10 @@ export const PLUGIN_TEMPLATE = `# ATF herdr plugin settings (atf config shows th
 # board_placement = "auto"   # auto: full-height right column | beside: split a pane | tab
 # board_start = "overview"   # overview: all projects | plan: this project's plan
 # vi_mode = false            # vi keys in the board's text fields
+# plans_dir = "~/plans"      # atf-herdr new <name>: the plan's folder is created here
+# new_plan_agent = ""        # agent definition for a new plan's coordinator (atf-herdr agents)
+# new_plan_prompt = ""       # its first message (empty: you start the discussion)
+# restore = "auto"           # auto: restore coordinators and boards when herdr starts | off
 
 # Agent kinds, to override or add. Arguments with {skill} are dropped once the skill is
 # installed (atf skill install); {session} is the session to resume.

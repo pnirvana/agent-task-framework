@@ -90,6 +90,22 @@ function promptBody({ s, t, name, mode, pkg, kindCfg, early }) {
   );
 }
 
+/**
+ * The first message of a coordinator restarted after herdr (or the machine) went down:
+ * its session is resumed, but every agent it had started is gone.
+ */
+export function revivedPrompt(s, name, { lastEvent = null, orphaned = [] } = {}) {
+  const plan = `--plan ${s.id}`;
+  const orph = orphaned.length
+    ? ` These tasks were in progress and their agents are gone: ${orphaned.map((t) => `${t.id} (${t.owner})`).join(', ')}. For each, read what it left (\`atf show <id> ${plan}\`: checkpoint, progress, notes) and start a new agent for it (\`atf-herdr spawn <id>\`; \`--resume\` when its earlier session is worth continuing), or decide otherwise.`
+    : ' No task was in progress.';
+  return (
+    `[ATF] You were restarted: herdr (or the machine) went down${lastEvent ? `; the plan's last event was at ${lastEvent}` : ''}. You are "${name}", the coordinator of plan "${s.title}" (${plan}), in your earlier session. ` +
+    `The agents you had started are gone. Reassess first: \`atf plan show ${plan}\` (the plan checkpoint), \`atf status ${plan}\`, \`atf wait ${plan}\` (what happened since your last wait).${orph} ` +
+    `Then continue as usual with \`atf wait ${plan}\` (if it says you will be woken, end your turn). Follow the atf skill (coordinator part).`
+  );
+}
+
 export function coordinatorPrompt(s, mode, name) {
   const plan = `--plan ${s.id}`;
   if (mode === 'resume')

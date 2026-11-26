@@ -13,6 +13,8 @@ actionable inside herdr. Optional: ATF itself does not depend on any of this.
 | **Overview** | tab `0`, where the board starts: what needs you (agents waiting for input, your reviews, finished plans; under a heading per plan when the scope holds several), then per plan only the tasks being worked on with their latest progress; `!` / `Y` / `F` go straight to NEEDS YOU / YOUR TASKS / IN FLIGHT, `{` / `}` step through the sections and `[` / `]` through the plans in them; a context panel for the selected row (a task: its steps first, then the latest progress, live runs, checkpoint, artifacts); approve, request changes, reply, open the review artifact or jump to the agent's terminal with one key |
 | **Spawn** | `atf-herdr spawn T3` (the coordinator's) places a pane in the workspace's `agents` tab (your tab with the coordinator and the board keeps its layout), starts the agent (pi by default; the atf skill is discovered once installed with `atf skill install`), assigns the task and sends the kickoff prompt |
 | **Reviews** | `a` / `x` / `n` on any task draft an approval, change request or note (`d` drops, `S` submits all at once: one write per plan, so the coordinator wakes once and each owner gets all its points). Tasks that ask you to test something show as `◎ for you` |
+| **New plans** | `atf-herdr new <name>`: a folder under `plans_dir`, its own workspace, a coordinator (from an agent definition) that starts the design discussion with you, and the board |
+| **Restore** | after herdr or the machine went down, coordinators come back linked to their plans (resumed, told to reassess), stale agent panes are closed and boards reopened, by herdr's startup hook |
 | **Agent lifecycle** | the coordinator starts every subagent (fresh by default); finished subagents are closed; an idle coordinator is nudged when something needs it; `atf-herdr coordinate` starts or resumes a plan's coordinator, or replaces it with a fresh session |
 
 ## Without herdr
@@ -88,6 +90,42 @@ Then `herdr server reload-config`.
    atf-herdr spawn T5 --dry-run                  # show placement mode, args, resume decision
    atf-herdr spawn T4 --resume                   # resume the session that worked on T4 (default: fresh)
    ```
+
+### A workspace per plan
+
+`atf-herdr new <name>` sets up a new plan the way to work with it: the folder
+`<plans_dir>/<name>` (`plans_dir` in the plugin config, or `--dir PATH`) as an ATF
+project with live sync, a herdr workspace `<name>` for it, the coordinator in its tab
+`plan: <name>`, and the board beside it. The coordinator runs as the agent definition
+`--agent DEF` (else `new_plan_agent`; `atf-herdr agents` lists them) and starts empty,
+so you begin the design discussion (`--prompt` or `new_plan_prompt` give it a first
+message). It creates the plan itself (`atf plan new`); the plan is then tied to it, so
+`s`, the lifecycle and a restore find it. Subagents go to that workspace's `agents` tab.
+A second plan in the same folder gets its own coordinator tab there (`s`).
+
+A coordinator keeps its agent definition: `s` and a restore start it with the same one.
+
+### After a restart
+
+herdr restores workspaces, tabs and panes with their names, and resumes pi in its last
+session. What it cannot restore is how ATF started them: a resumed coordinator lacks its
+plan, identity and wake extension, a subagent's pane holds a stray session, a board pane
+is a bare shell. When herdr starts, the plugin's startup hook runs `atf-herdr restore`:
+
+- **coordinators** that were running: relaunched in the spot of the pane herdr restored,
+  resuming their session, with a first message that they were restarted, when the plan
+  last moved, and which tasks lost their agent (to read their checkpoints and start new
+  agents for them, or decide otherwise);
+- **subagents**: their panes are closed (the coordinator decides about their tasks);
+- **boards**: the shell where a board was gets the board again;
+- one notification says what was restored. Everything else (other workspaces, your own
+  panes and agents) stays as herdr restored it, and a coordinator that is still running
+  (after a live `herdr update --handoff`) is left alone.
+
+`atf-herdr restore` runs it by hand (`--dry-run` shows what it would do);
+`restore = "off"` in the plugin config turns off the automatic run. After updating
+ATF, link the plugin again (`herdr plugin link …/adapters/herdr`) so herdr knows the
+startup hook.
 
 ### Several workspaces, sessions and projects
 
@@ -341,6 +379,9 @@ agent_kind = "pi"
 agent_placement = "tab"
 board_placement = "auto"
 board_start = "overview"
+plans_dir = "~/plans"        # atf-herdr new
+new_plan_agent = "planner"   # its coordinator's agent definition
+restore = "auto"             # "off": no restore when herdr starts
 ```
 
 `atf config` lists the config files in use (project, yours, the plugin's) and reports
@@ -494,6 +535,8 @@ another workspace.
 
 - herdr metadata tokens are not restored after a herdr server restart. Run the
   **atf: sync** action (or any `atf` write) to repopulate them.
+- A restore recognizes what ATF started; a coordinator you started by hand is
+  recognized by the plan's session only.
 - The plugin imports `../../src` from this repo, so install it with `plugin link` from a
   checkout. A GitHub `plugin install …/adapters/herdr` is untested.
 - Agent kinds other than pi get the skill path in their prompt, not natively.
