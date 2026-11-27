@@ -12,8 +12,9 @@ from a browser that reaches the machine only through SSH.
   the daemon (starts it when needed).
 - `public/`: the page: sessions in a sidebar, tabs, xterm.js terminals. The theme is
   `theme-macchiato.css` (Catppuccin Macchiato).
-- `public/vendor/`: third-party files with their licences: xterm.js 6.0.0 and
-  addon-fit 0.11.0 (MIT), JetBrains Mono latin 400/700 (SIL Open Font License 1.1).
+- `public/vendor/`: third-party files with their licences: xterm.js 6.0.0, addon-fit
+  0.11.0 and addon-webgl 0.19.0 (MIT); JetBrains Mono 2.304, regular/bold/italic, full
+  character set (SIL Open Font License 1.1, from JetBrains' release).
 
 ## Run
 

@@ -118,7 +118,7 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '
 const cookieOk = (req) => (req.headers.cookie || '').split(/;\s*/).includes(`atf_token=${TOKEN}`);
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://x');
+  const url = new URL('http://x' + (req.url.startsWith('/') ? req.url : '/' + req.url)); // never throws on '//…'
   if (url.searchParams.get('token') === TOKEN) {
     res.writeHead(302, { 'Set-Cookie': `atf_token=${TOKEN}; HttpOnly; SameSite=Strict; Path=/`, Location: '/' });
     return res.end();

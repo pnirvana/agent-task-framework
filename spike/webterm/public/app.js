@@ -2,6 +2,7 @@
 // daemon. Terminals are xterm.js; the agents keep running when the page closes.
 import { Terminal } from './vendor/xterm/xterm.mjs';
 import { FitAddon } from './vendor/xterm/addon-fit.mjs';
+import { WebglAddon } from './vendor/xterm/addon-webgl.mjs';
 
 const $ = (s) => document.querySelector(s);
 const css = getComputedStyle(document.documentElement);
@@ -61,6 +62,7 @@ function openTab(id) {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(el);
+    useWebgl(term);
     term.onData((data) => send({ op: 'input', id, data }));
     term.onBinary((data) => send({ op: 'input', id, data }));
     const t = { term, fit, el, attached: false, size: '' };
@@ -69,6 +71,21 @@ function openTab(id) {
     send({ op: 'attach', id });
   }
   activate(id);
+}
+
+/**
+ * The WebGL renderer draws box-drawing and block characters itself (customGlyphs), so
+ * lines join without gaps whatever the font; the DOM renderer (fallback) uses the font's
+ * glyphs. Falls back when the browser has no WebGL or loses the context.
+ */
+function useWebgl(term) {
+  try {
+    const gl = new WebglAddon();
+    gl.onContextLoss(() => gl.dispose());
+    term.loadAddon(gl);
+  } catch (e) {
+    console.warn('atf: WebGL renderer unavailable, using the DOM renderer', e);
+  }
 }
 
 function fitTab(id, force = false) {
@@ -145,4 +162,5 @@ $('#new').onsubmit = (e) => {
   f.name.value = '';
 };
 setInterval(render, 2000); // idle dots
-connect();
+// xterm measures the cell size when a terminal opens: load the font first
+Promise.all([document.fonts.load("13px 'JetBrains Mono'"), document.fonts.load("bold 13px 'JetBrains Mono'")]).finally(connect);

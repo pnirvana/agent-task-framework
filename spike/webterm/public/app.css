@@ -1,5 +1,8 @@
-@font-face { font-family: 'JetBrains Mono'; font-weight: 400; src: url('vendor/jetbrains-mono/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
-@font-face { font-family: 'JetBrains Mono'; font-weight: 700; src: url('vendor/jetbrains-mono/jetbrains-mono-latin-700-normal.woff2') format('woff2'); }
+/* JetBrains Mono, full character set (box drawing, blocks, braille spinners, arrows): SIL OFL 1.1 */
+@font-face { font-family: 'JetBrains Mono'; font-weight: 400; font-style: normal; src: url('vendor/jetbrains-mono/JetBrainsMono-Regular.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 700; font-style: normal; src: url('vendor/jetbrains-mono/JetBrainsMono-Bold.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 400; font-style: italic; src: url('vendor/jetbrains-mono/JetBrainsMono-Italic.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-weight: 700; font-style: italic; src: url('vendor/jetbrains-mono/JetBrainsMono-BoldItalic.woff2') format('woff2'); }
 
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
