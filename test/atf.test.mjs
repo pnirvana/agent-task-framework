@@ -2503,3 +2503,54 @@ test('board: / searches the view; n / N between matches, esc ends it', () => {
   f = render(['\r', '1', '/', 'G', 'a', 'm', '\r', '\x1b', '\r', '/', 'f', 'o', 'o', '\r', 'n', 'n', 'N']);
   assert.deepEqual(f.slice(-4).map((x) => x.match(/\/foo {2}(\d+\/\d+)/)?.[1]), ['1/2', '2/2', '1/2', '2/2']);
 });
+
+test('attention: what needs the human, from any liveness source (src/attention.mjs)', async () => {
+  const { attentionOf, NO_LIVENESS, WAITING_MS } = await import('../src/attention.mjs');
+  const e = (seq, type, task, data, actor = { id: 'lead', role: 'coordinator' }) => ({ v: 1, seq, ts: new Date(Date.now() - 60_000 + seq).toISOString(), plan: 'p', type, task, actor, data });
+  const sub = { id: 'backend', role: 'subagent' };
+  const st = fold([
+    e(1, 'plan.created', undefined, { title: 'P' }),
+    e(2, 'task.created', 'T1', { title: 'schema' }),
+    e(3, 'task.created', 'T2', { title: 'api' }),
+    e(4, 'task.created', 'T3', { title: 'ui' }),
+    e(5, 'task.assigned', 'T1', { assignee: 'backend' }),
+    e(6, 'task.status', 'T1', { status: 'in_progress' }, sub),
+    e(7, 'task.status', 'T1', { status: 'blocked', message: 'which db?' }, sub), // for the coordinator
+    e(8, 'task.status', 'T2', { status: 'in_progress' }),
+    e(9, 'task.status', 'T2', { status: 'blocked', for: 'human', message: 'SQLite ok?' }),
+  ]);
+  st.root = path.join(os.tmpdir(), 'atf-attention-nowhere', '.atf');
+  const p = { root: st.root, id: 'p', st, key: 'k' };
+  const kinds = (a) => a.mine.map((x) => `${x.kind}:${x.task ?? '-'}`).sort();
+
+  // no liveness (no herdr, no sessions): nothing is known to run, everything is the human's
+  let a = attentionOf(NO_LIVENESS, p);
+  assert.ok(a.mine.some((x) => x.task === 'T1') && a.mine.some((x) => x.task === 'T2'));
+  assert.ok(!a.mine.some((x) => x.kind === 'no-coordinator'), 'without liveness, a missing coordinator is unknown');
+
+  // liveness known, no agent runs: the plan needs a coordinator
+  const fake = (agents, local = () => true) => ({ known: true, local, agent: (_st, id) => agents[id] || null });
+  a = attentionOf(fake({}), p);
+  assert.ok(a.mine.some((x) => x.kind === 'no-coordinator'));
+
+  // a working coordinator handles the subagent's question; the human's stays the human's
+  const working = { status: 'working', since: Date.now(), handle: 's-lead' };
+  a = attentionOf(fake({ lead: working }), p);
+  assert.ok(a.queued.some((x) => x.task === 'T1'), 'T1 is queued for the coordinator');
+  assert.ok(a.mine.some((x) => x.task === 'T2') && !a.mine.some((x) => x.task === 'T1'));
+
+  // an agent waiting in its own terminal (a tool approval): a prompt item with its handle
+  a = attentionOf(fake({ lead: working, backend: { status: 'blocked', since: Date.now(), handle: 's-backend' } }), p);
+  const prompt = a.mine.find((x) => x.kind === 'prompt');
+  assert.equal(prompt.actor, 'backend');
+  assert.equal(prompt.pane, 's-backend');
+
+  // an idle coordinator (no harness waiter) waits for the human
+  a = attentionOf(fake({ lead: { status: 'idle', since: Date.now() - WAITING_MS - 1000, handle: 's-lead' } }), p);
+  assert.ok(a.mine.some((x) => x.kind === 'coordinator' && x.pane === 's-lead'));
+
+  // a coordinator seen elsewhere (not local) still handles its queue
+  a = attentionOf(fake({}, (actor) => actor.id !== 'lead'), p);
+  assert.ok(a.coord.away && a.queued.some((x) => x.task === 'T1'));
+  assert.deepEqual(kinds(a).filter((k) => k.startsWith('no-')), []);
+});
