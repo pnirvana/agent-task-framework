@@ -625,6 +625,31 @@ export default function (pi: any) {
 		const term = tui?.terminal;
 		if (!term?.write) return u?.notify?.("atf render: pi's terminal is not reachable from the extension", "warning");
 		recording = true;
+		// which pi this is, and in what terminal: a coordinator started by the board runs in the
+		// herdr server's environment (its PATH may find another pi or node than your shell)
+		const renderer = (() => {
+			try {
+				const n = Object.getPrototypeOf(tui)?.constructor?.name ?? "";
+				return n === "TuiAltScreen" ? "fullscreen" : n === "TuiMainScreen" ? "regular" : n || "?";
+			} catch {
+				return "?";
+			}
+		})();
+		const piInfo = (() => {
+			try {
+				let d = path.dirname(fs.realpathSync(process.argv[1]));
+				for (let i = 0; i < 6; i++, d = path.dirname(d)) {
+					const f = path.join(d, "package.json");
+					if (fs.existsSync(f)) {
+						const j = JSON.parse(fs.readFileSync(f, "utf8"));
+						if (j.version) return `pi ${j.version} (${d.replace(os.homedir(), "~")})`;
+					}
+				}
+			} catch {}
+			return `pi ? (${process.argv[1] ?? "?"})`;
+		})();
+		const env = process.env;
+		const ident = `${piInfo} · ${renderer} · node ${process.version} · TERM=${env.TERM ?? "-"} TERM_PROGRAM=${env.TERM_PROGRAM ?? "-"} COLORTERM=${env.COLORTERM ?? "-"}`;
 		const write = term.write;
 		const t0 = Date.now();
 		let frames = 0;
@@ -663,6 +688,7 @@ export default function (pi: any) {
 			const top = [...rows].sort((a, b) => b[1] - a[1]).slice(0, 5);
 			const lines = [
 				`atf render: ${secs} s, ${frames} frames, ${Math.round(bytes / 1024)} KB, ${full} full redraw${full === 1 ? "" : "s"}${full ? " (cleared screen)" : ""}`,
+				`  ${ident}`,
 				...[...sizes].map(([k, n]) => `  full redraw ${n}× at ${k}`),
 				...(top.length ? ["  rows rewritten most often:", ...top.map(([k, n]) => `    ${n}× ${k}`)] : ["  no row was rewritten"]),
 			];
