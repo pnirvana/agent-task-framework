@@ -1,6 +1,6 @@
 # ATF web UI: design
 
-**Status: agreed direction; spike done (`spike/webterm`); phases 1 (core in `src/`) and 2 (sessions backend) built.**
+**Status: agreed direction; spike done (`spike/webterm`); phases 1 (core in `src/`), 2 (sessions backend) and 3 (first usable web UI, `adapters/web/`) built.**
 Brief: `docs/webui-brief.md`. This document records what was settled and how it will be
 built; the build plan is at the end.
 
@@ -205,6 +205,27 @@ until atf-web does (phase 3).
 - **Terminals:** a WebSocket relaying to atf-sessiond (spike: `web.mjs`).
 - **Files (later, §9):** the same server, its own API.
 
+Built (phase 3): `adapters/web/server.mjs` (`atf-web`) and `ws.mjs`. As designed, with
+these choices:
+
+- **Liveness** comes from one connection to the daemon, its session list refreshed every
+  second (`sessionsLiveness` in `src/sessions.mjs`): "needs you" is computed per request
+  without calling the daemon. An actor whose writes came from herdr counts as running
+  elsewhere, so a plan driven from herdr does not show "no coordinator".
+- **Plans** are folded once per change of their log (size and mtime).
+- **Live updates** poll once a second (event logs, live files, the sessions and their
+  agents' states) instead of `fs.watch`: it works on every filesystem and costs little for
+  a few dozen plans. The stream says which plans changed; the page loads the Overview
+  again (it carries the folded state of every open plan).
+- **API additions:** `/api/log` (a plan's last events) and `/api/doc` (only documents the
+  plan lists, inside its project).
+- **Starting a coordinator** runs `atf-sessions coordinate` as a child process: a handoff
+  waits up to minutes for the checkpoint and must not block the server.
+- **The browser may only watch and type** (`list`, `attach`, `detach`, `input`, `resize`):
+  starting commands goes through the API (coordinators) or later shell tabs (phase 5).
+- **Writes** need the cookie, JSON and the same origin (with SameSite=Strict, no other
+  site can post as the human).
+
 ### 4.5 Front end
 
 Layout (herdr's workspaces plus the board):
@@ -237,6 +258,20 @@ Layout (herdr's workspaces plus the board):
 - **Code:** ES modules, no framework, no build. Small helpers for rendering lists and
   keyboard handling written here. xterm.js and its fit and WebGL addons are the only
   third-party code (§11).
+
+Built (phase 3): `adapters/web/public/` (`app.js`, `terms.js`, `app.css`,
+`themes/macchiato.css`); how to use it: `adapters/web/README.md`. Tried in headless
+Chrome against a project with a review, a question, a task of the human's and a
+coordinator in the daemon: approving, answering and finishing from the keyboard, the
+supervisor nudging the coordinator with the answer (seen live in its pane), and starting
+a coordinator from the page after its session ended. Choices on the way:
+
+- ⏎ on a waiting coordinator or agent opens its pane and gives it the keys; `ctrl+]`
+  gives them back to the board (as `atf-sessions attach` detaches), and the top bar says
+  which agent is typed into meanwhile.
+- When the selected row goes away (approved, answered), the row now at its place is
+  selected, so working down NEEDS YOU is `a`, `a`, `r`, …
+- The Log leaves out change snapshots and session ids.
 
 ## 5. Several plans, projects and worktrees
 
@@ -327,7 +362,7 @@ its own. Core changes land in `src/` in a form the CLI and the board use too.
    sessions backend; agent status in the extensions' live state (Copilot first, then pi,
    opencode); the supervisor (sweep). Tests run the daemon (Linux `script`, macOS
    python).
-3. **First usable web UI.** `bin/atf-web`: read API, SSE, actions, terminal relay,
+3. **First usable web UI** (built; still to try on the devpod with Copilot on a real plan). `bin/atf-web`: read API, SSE, actions, terminal relay,
    token. Front end: sidebar, Overview with NEEDS YOU / YOUR TASKS / IN FLIGHT, Tasks,
    Plan, Log, task details and actions, agent panes, starting / resuming / replacing a
    coordinator. Tried on the devpod with Copilot on a real plan.

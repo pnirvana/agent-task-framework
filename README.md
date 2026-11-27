@@ -273,6 +273,12 @@ board. In herdr, use the agent kind `copilot` (`atf-herdr coordinate
 --kind copilot`, or `"agent_kind": "copilot"` in the plugin config). Details:
 [adapters/copilot/README.md](adapters/copilot/README.md).
 
+## In the browser
+
+`atf-web` serves ATF as a web page (Overview, Tasks, Plan, Log, the actions, and every
+agent's terminal), without herdr; agents run in ATF's session daemon. Over SSH, tunnel
+one port. See [adapters/web/README.md](adapters/web/README.md).
+
 ## Building a frontend
 
 See [SPEC.md §7](SPEC.md#7-consuming-the-protocol-frontends). Minimal browser example:

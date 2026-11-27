@@ -1,0 +1,3 @@
+#!/bin/sh
+# PATH shim for the web UI server.
+exec node "$(dirname "$0")/../adapters/web/server.mjs" "$@"

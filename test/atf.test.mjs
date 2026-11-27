@@ -2731,3 +2731,94 @@ process.stdin.on('data', (d) => process.stdout.write('got ' + JSON.stringify(Str
     process.env = saved;
   }
 });
+
+test('atf-web: sign-in, overview with what needs you, actions as the human, live updates, terminal relay', async () => {
+  const { dir, env, run } = sandbox(); // coordinator "lead"
+  const sub = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
+  run(['add', 'api', '--assign', 'be', '--reviewer', 'human']); // T1: the human reviews it
+  run(['add', 'schema', '--assign', 'be']); // T2: a question for the human
+  run(['start', 'T1'], sub);
+  run(['review', 'T1', '-m', 'ready'], sub);
+  run(['start', 'T2'], sub);
+  run(['block', 'T2', '-m', 'SQLite?'], sub);
+  run(['block', 'T2', '--for', 'human', '-m', 'SQLite or Postgres?']);
+  const sock = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'atfw-')), 'sd.sock');
+  const saved = { ...process.env };
+  Object.assign(process.env, env, { ATF_SESSIOND_SOCKET: sock, ATF_SESSIONS_STATE_DIR: path.join(dir, 'sessions-state'), ATF_ACTOR: '', ATF_ROLE: '' });
+  delete process.env.HERDR_ENV;
+  const { startWebServer } = await import('../adapters/web/server.mjs');
+  const { call } = await import('../src/sessions.mjs');
+  const w = await startWebServer({ port: 0, token: 'tok', supervise: false, pollMs: 150 });
+  const base = `http://127.0.0.1:${w.port}`;
+  const H = { cookie: 'atf_token=tok' };
+  const get = async (p) => (await fetch(base + p, { headers: H })).json();
+  const post = (p, body, extra = {}) => fetch(base + p, { method: 'POST', headers: { ...H, 'content-type': 'application/json', ...extra }, body: JSON.stringify(body) });
+  try {
+    assert.equal((await fetch(`${base}/api/overview`)).status, 401, 'no cookie, no data');
+    const login = await fetch(`${base}/?token=tok`, { redirect: 'manual' });
+    assert.equal(login.status, 302);
+    assert.match(login.headers.get('set-cookie'), /atf_token=tok; HttpOnly; SameSite=Strict/);
+    assert.equal((await fetch(`${base}/`, { headers: H })).status, 200, 'the page');
+
+    const ov = await get('/api/overview');
+    const pr = ov.projects.find((p) => p.dir === fs.realpathSync(dir));
+    const plan = pr.plans[0];
+    assert.equal(plan.open, true);
+    const kinds = plan.attention.mine.map((i) => `${i.kind}:${i.task ?? ''}`);
+    for (const k of ['your-review:T1', 'question:T2', 'no-coordinator:']) assert.ok(kinds.includes(k), `${k} in ${kinds}`);
+    assert.equal(plan.st.tasks.T1.status, 'review', 'open plans come with their state');
+    assert.equal((await get(`/api/brief?root=${encodeURIComponent(plan.root)}&plan=${plan.id}&task=T2`)).question.message, 'SQLite or Postgres?');
+    assert.equal((await fetch(`${base}/api/plan?root=/etc&plan=x`, { headers: H })).status, 404, 'only known projects');
+
+    // writes: JSON from this origin only
+    assert.equal((await fetch(`${base}/api/action`, { method: 'POST', headers: { ...H, 'content-type': 'text/plain' }, body: '{}' })).status, 415);
+    assert.equal((await post('/api/action', {}, { origin: 'http://evil.example' })).status, 403);
+
+    // live updates: an approval is announced on the stream
+    const ac = new AbortController();
+    const stream = await fetch(`${base}/api/stream`, { headers: H, signal: ac.signal });
+    const reader = stream.body.getReader();
+    const announced = (async () => {
+      let text = '';
+      for (const t0 = Date.now(); Date.now() - t0 < 5000; ) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += new TextDecoder().decode(value);
+        const m = text.match(/data: (.*)\n\n/);
+        if (m) return JSON.parse(m[1]);
+      }
+      return null;
+    })();
+    await new Promise((r) => setTimeout(r, 400)); // the first poll takes the current state as seen
+    const r = await post('/api/action', { root: plan.root, plan: plan.id, action: 'approve', task: 'T1' });
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).message, 'approved T1: done');
+    assert.deepEqual((await announced).plans, [plan.key]);
+    ac.abort();
+    assert.equal(run(['show', 'T1']).status, 'done');
+    const evs = fs.readFileSync(path.join(dir, '.atf', 'plans', plan.id, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(evs.at(-1).actor.id, 'human', 'written as the human');
+    assert.equal((await post('/api/action', { root: plan.root, plan: plan.id, action: 'changes', task: 'T2' })).status, 409, 'a change request needs words');
+    assert.equal((await get(`/api/log?root=${encodeURIComponent(plan.root)}&plan=${plan.id}`)).events.at(-1).type, 'plan.review');
+
+    // the terminal relay: watch and type, never start commands
+    const { id } = call({ op: 'create', name: 'sh', argv: ['/bin/sh', '-c', 'echo ready; read x; echo "got $x"'], cwd: dir, env: process.env });
+    const ws = new WebSocket(`ws://127.0.0.1:${w.port}/ws`, { headers: { ...H, origin: base } });
+    const msgs = [];
+    await new Promise((resolve, reject) => ((ws.onopen = resolve), (ws.onerror = reject)));
+    ws.onmessage = (e) => msgs.push(JSON.parse(e.data));
+    ws.send(JSON.stringify({ op: 'create', rid: 9, argv: ['/bin/echo', 'no'] }));
+    ws.send(JSON.stringify({ op: 'attach', id }));
+    ws.send(JSON.stringify({ op: 'input', id, data: 'hi\r' }));
+    for (const t0 = Date.now(); Date.now() - t0 < 5000 && !msgs.some((m) => m.ev === 'exit'); ) await new Promise((res) => setTimeout(res, 50));
+    assert.match(msgs.find((m) => m.ev === 'error' && m.rid === 9)?.message ?? '', /not allowed from the browser: create/);
+    assert.match(msgs.filter((m) => m.id === id && (m.ev === 'replay' || m.ev === 'out')).map((m) => m.data).join(''), /got hi/);
+    ws.close();
+  } finally {
+    await w.close();
+    try {
+      call({ op: 'shutdown' });
+    } catch {}
+    process.env = saved;
+  }
+});

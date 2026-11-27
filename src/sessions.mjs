@@ -152,6 +152,42 @@ const sameRoot = (a, b) => !!a && !!b && (a === b || real(a) === real(b));
 const inherited = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(ATF_(?!SESSIOND_SOCKET|NODE)|HERDR_|TMUX)/.test(k)));
 
 /**
+ * What the agent in session `x` (a daemon list entry) is doing: the latest of its
+ * extension's report and the state the program writes to its terminal (OSC 7501,
+ * Copilot), else the terminal's activity. -> {status, since}
+ */
+export function sessionStatus(x) {
+  if (x.exited) return { status: 'done', since: x.lastOutput };
+  const m = x.meta || {};
+  const reported = m.root && m.plan && m.actor ? readAgentStatus(m.root, m.plan, m.actor) : null;
+  const said = [reported && { status: reported.status, since: Date.parse(reported.since) }, x.appState && STATES[x.appState.state] && { status: STATES[x.appState.state], since: x.appState.at }].filter(Boolean);
+  if (said.length) return said.sort((a, b) => b.since - a.since)[0];
+  const quiet = Date.now() - x.lastOutput;
+  return quiet < QUIET_MS ? { status: 'working', since: x.lastOutput } : { status: 'idle', since: x.lastOutput };
+}
+
+/** A session as the launcher's agent: {name, actor, handle, role, task, plan, kind, status, since}. */
+export const sessionAgent = (x) => ({ name: x.meta?.name || x.name, actor: x.meta?.actor || x.meta?.name || x.name, handle: x.id, workspace: null, role: x.meta?.role || null, task: x.meta?.task || null, plan: x.meta?.plan || null, kind: x.meta?.kind || null, exited: !!x.exited, code: x.code ?? null, ...sessionStatus(x) });
+
+/**
+ * The daemon's sessions as a liveness source of src/attention.mjs, from a session list
+ * (the web server keeps one current). An actor whose writes came from herdr or another
+ * daemon runs elsewhere. `st.root` must be set (the plan's project).
+ */
+export function sessionsLiveness(list, socket = socketPath()) {
+  const agents = list.filter((x) => !x.exited).map((x) => ({ x, a: sessionAgent(x) }));
+  return {
+    known: true,
+    local: (actor) => (actor?.ctx?.sessiond ? actor.ctx.sessiond === socket : !actor?.ctx?.herdr_pane),
+    agent(st, actorId) {
+      const here = agents.filter(({ x }) => sameRoot(x.meta?.root, st.root));
+      const hit = here.find(({ x, a }) => a.actor === actorId && x.meta?.plan === st.id) || here.find(({ a }) => a.actor === actorId) || here.find(({ a }) => a.name === actorId);
+      return hit ? hit.a : null;
+    },
+  };
+}
+
+/**
  * The backend (see the interface in src/launch.mjs). Sessions carry the launcher's meta
  * {root, plan, name, actor, role, kind, task}; agents are found by it.
  */
@@ -161,19 +197,7 @@ export function sessionsBackend({ socket = socketPath() } = {}) {
   const live = () => sessions().filter((x) => !x.exited);
   const byHandle = (h) => sessions().find((x) => x.id === h || (x.meta?.name === h && !x.exited)) || null;
 
-  /**
-   * What the agent is doing: the latest of its extension's report and the state the
-   * program writes to its terminal (OSC 7501, Copilot), else the terminal's activity.
-   */
-  function status(x) {
-    const m = x.meta || {};
-    const reported = m.root && m.plan && m.actor ? readAgentStatus(m.root, m.plan, m.actor) : null;
-    const said = [reported && { status: reported.status, since: Date.parse(reported.since) }, x.appState && STATES[x.appState.state] && { status: STATES[x.appState.state], since: x.appState.at }].filter(Boolean);
-    if (said.length) return said.sort((a, b) => b.since - a.since)[0];
-    const quiet = Date.now() - x.lastOutput;
-    return quiet < QUIET_MS ? { status: 'working', since: x.lastOutput } : { status: 'idle', since: x.lastOutput };
-  }
-  const asAgent = (x) => ({ name: x.meta?.name || x.name, actor: x.meta?.actor || x.meta?.name || x.name, handle: x.id, workspace: null, role: x.meta?.role || null, task: x.meta?.task || null, plan: x.meta?.plan || null, kind: x.meta?.kind || null, ...status(x) });
+  const asAgent = sessionAgent;
 
   function paste(handle, text, x = byHandle(handle)) {
     // bracketed paste (when the program takes it): a multi-line prompt arrives as one

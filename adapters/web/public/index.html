@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATF</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="vendor/xterm/xterm.css">
+<link rel="stylesheet" href="themes/macchiato.css" id="theme">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<aside id="side">
+  <header><button class="brand" data-scope="all" title="all projects (0)">atf</button><span id="conn" class="conn" title="connection to the server">●</span></header>
+  <nav id="tree" aria-label="projects and plans"></nav>
+</aside>
+<main id="main">
+  <header id="bar">
+    <nav id="crumbs" aria-label="scope"></nav>
+    <nav id="tabs" role="tablist"></nav>
+    <span id="hint" class="dim"></span>
+  </header>
+  <section id="board">
+    <div id="list" tabindex="0" aria-label="board"></div>
+    <aside id="detail" aria-live="polite"></aside>
+  </section>
+  <div id="split" title="drag to resize; double-click: full screen terminals"></div>
+  <section id="panes">
+    <nav id="ptabs"></nav>
+    <div id="terms"></div>
+  </section>
+</main>
+<div id="toast" role="status"></div>
+<dialog id="help"></dialog>
+<script type="module" src="app.js"></script>
+</body>
+</html>
