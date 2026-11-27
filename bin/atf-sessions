@@ -1,0 +1,3 @@
+#!/bin/sh
+# PATH shim for the session daemon backend.
+exec node "$(dirname "$0")/atf-sessions.mjs" "$@"

@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { driverInbox } from '../../src/core.mjs';
 import { loadPlan } from '../../src/store.mjs';
-import { attachLive } from './live.mjs';
+import { attachLive, attachStatus } from './live.mjs';
 
 const ATF_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../bin/atf.mjs');
 const NODE = process.env.ATF_NODE || 'node';
@@ -37,7 +37,10 @@ export default async function run({ joinSession }) {
     // not an ATF coordinator session: join (an extension must); an agent of a plan (started
     // by atf-herdr with ATF_DIR/ATF_PLAN/ATF_ACTOR) gets the live view of its commands
     const s = await joinSession({});
-    if (process.env.ATF_DIR && process.env.ATF_PLAN && process.env.ATF_ACTOR) attachLive(s, { log });
+    if (process.env.ATF_DIR && process.env.ATF_PLAN && process.env.ATF_ACTOR) {
+      attachLive(s, { log });
+      attachStatus(s, () => ({ root: process.env.ATF_DIR, plan: process.env.ATF_PLAN, actor: process.env.ATF_ACTOR }));
+    }
     return;
   }
   const envArm =
@@ -118,6 +121,7 @@ export default async function run({ joinSession }) {
   ];
 
   session = await joinSession({ commands });
+  attachStatus(session, readArm);
   log('joined', session.sessionId, 'arm', armFile);
   // the live view of what its background subagents run (SPEC §14): the plan from the env,
   // else the one `atf wait` armed (a coordinator may create its plan after it started)

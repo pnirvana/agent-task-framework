@@ -19,6 +19,8 @@
 //   nameTaken(name)         an agent name is unique per backend instance
 //   open(spec)              starts the agent; -> {handle, workspace, created?}
 //                           spec: {role, name, label, kind, args, env, cwd, root, place}
+//   begin?(handle, text)    starts an opened agent with its first prompt (text may be
+//                           null); without it the launcher calls prompt()
 //   prompt(handle, text)    gives a running agent a prompt (first one, nudges, handoff)
 //   interrupt(handle)       stops what it does (esc)
 //   close(handle)           ends it
@@ -63,6 +65,8 @@ export const kindEnv = (kindCfg) => Object.fromEntries(Object.entries(kindCfg.en
  * Kinds without `resume` always start fresh (from checkpoint + task history).
  * `prompt`: how the kind takes its first prompt on the command line (`{prompt}`), for
  * backends that start the agent with it (sessions); herdr types it in once it is ready.
+ * `bin`: the command that starts it (default: the kind's name), for backends that start
+ * it themselves (sessions; herdr knows its kinds).
  */
 export const AGENT_KINDS = {
   // coordinator: extra args for the plan's coordinator only (the wake extension: it waits
@@ -90,12 +94,13 @@ const GRACE_MS = 15_000; // idle this long (with nothing in progress) before an 
 
 /**
  * Which backend starts agents here: $ATF_BACKEND (set by the launcher for the agents it
- * starts), else herdr when inside herdr, else none (the harness's own subagents through
- * `atf dispatch`).
+ * starts), else herdr when inside herdr, else ATF's session daemon when it runs
+ * (`sessionsUp`), else none (the harness's own subagents through `atf dispatch`).
  */
-export function backendName(env = process.env) {
+export function backendName(env = process.env, sessionsUp = () => false) {
   if (env.ATF_BACKEND) return env.ATF_BACKEND;
   if (env.HERDR_ENV === '1') return 'herdr';
+  if (sessionsUp()) return 'sessions';
   return null;
 }
 
@@ -169,6 +174,29 @@ const fill = (list, vals) => list.map((a) => a.replace(/\{(skill|session|newsess
 const agentEnv = (backend, root, extra) => ({ ATF_DIR: root, ATF_HARNESS: backend.name, ATF_BACKEND: backend.name, PATH: `${ATF_BIN}:${process.env.PATH}`, ...extra });
 
 // ---------- launching ----------
+/** An opened agent's first prompt: the backend starts it with it (sessions), or it is typed in (herdr). */
+const firstPrompt = (backend, handle, text) => (backend.begin ? backend.begin(handle, text) : text ? backend.prompt(handle, text) : true);
+
+/**
+ * What `spawn <task>` starts, checked: the task, its agent definition and the agent's
+ * name (--name, else the assignee, else <agent>-T3 / w-T3). Throws when it cannot start.
+ */
+export function spawnTarget(s, taskArg, { name, agent, early = false } = {}) {
+  const t = s.tasks[taskArg];
+  if (!t) throw new Error(`unknown task ${taskArg}`);
+  const eff = t.rollup_status ?? t.status;
+  if (['done', 'cancelled'].includes(eff)) throw new Error(`${t.id} is already ${eff}`);
+  // a parent task is a work package: the agent owns the whole subtree and works through it
+  if (!t.children.length && t.status === 'todo' && !t.ready && !early) throw new Error(`${t.id} is not ready (waits on ${t.waiting_on.join(', ')}); --early starts it anyway for work that does not need them yet`);
+  const agentName = agent || t.agent || [...t.path].reverse().map((id) => s.tasks[id].agent).find(Boolean) || null;
+  const n = (name || t.assignee || (agentName ? `${agentName}-${t.id}` : `w-${t.id}`))
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '-')
+    .replace(/^[^a-z]+/, 'w-')
+    .slice(0, 32);
+  return { t, name: n, agent: agentName };
+}
+
 export function recordSession(backend, root, planId, taskIds, name, kind, handle = null, known = null) {
   // the harness's session reference (by handle when known: names repeat across projects),
   // else the one ATF chose at launch ({newsession})
@@ -216,7 +244,7 @@ export function launchAgent({ backend, root, planId, taskId, name, kind, agent, 
   const kindArgs = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []), ...(kindCfg.agent || [])];
   const known = mode === 'resume' ? session : kindArgs.includes('{newsession}') ? newSession : null;
   const args = [...fill(kindArgs, { skill: SKILL_DIR, session, newsession: newSession, live: LIVE_EXT }), ...agentArgs, ...extraArgs];
-  const opened = backend.open({ role: 'subagent', name, label: name, kind, kindCfg, args, env, cwd: path.dirname(root), root, place });
+  const opened = backend.open({ role: 'subagent', name, label: name, kind, kindCfg, args, env, cwd: path.dirname(root), root, task: target.id, place });
   // register before anything writes to the plan: hooks fired by the assignment below
   // must already know this agent was just launched (no duplicate kickoff nudge)
   updateRegistry(backend, (reg) => {
@@ -228,7 +256,7 @@ export function launchAgent({ backend, root, planId, taskId, name, kind, agent, 
     transact(root, planId, { ...resolveActor(), role: 'coordinator' }, () => [{ type: 'task.assigned', task: target.id, data: { assignee: name } }]);
   }
   const fresh = loadPlan(root, planId);
-  backend.prompt(opened.handle, buildPrompt({ s: fresh, t: fresh.tasks[leaf.id], name, mode, pkg: isPackage ? fresh.tasks[target.id] : null, kindCfg, early }));
+  firstPrompt(backend, opened.handle, buildPrompt({ s: fresh, t: fresh.tasks[leaf.id], name, mode, pkg: isPackage ? fresh.tasks[target.id] : null, kindCfg, early }));
   // file the session on what was spawned (the package or the task), not on a guess of
   // which leaf the agent will pick: leaves get it when the agent works on them (hook)
   recordSession(backend, root, planId, [target.id], name, kind, opened.handle, known);
@@ -296,7 +324,7 @@ export function launchCoordinator({ backend, root, planId, fresh = false, kind, 
   updateRegistry(backend, (reg) => {
     reg[regKey(root, name)] = { name: hname, actor: name, role: 'coordinator', kind, agent: agent || null, root, plan: planId, pane: opened.handle, workspace: opened.workspace ?? null, socket: backend.socket(), launchedAt: Date.now() };
   });
-  backend.prompt(opened.handle, prompt ?? coordinatorPrompt(s, mode, name));
+  firstPrompt(backend, opened.handle, prompt ?? coordinatorPrompt(s, mode, name));
   // the plan's session: what resuming the plan starts next time
   const ref = backend.sessionRef(opened.handle, root) || (kindArgs.includes('{newsession}') ? newSession : null);
   if (ref && ref !== s.session?.ref) transact(root, planId, launcherActor(backend), () => [{ type: 'plan.session', data: { ref, kind, actor: name } }]);
@@ -321,7 +349,7 @@ export function launchNewCoordinator({ backend, root, place = {}, kind, agent, p
   updateRegistry(backend, (reg) => {
     reg[regKey(root, name)] = { name: hname, actor: name, role: 'coordinator', kind, agent: agent || null, root, plan: null, pane: opened.handle, workspace: opened.workspace ?? null, socket: backend.socket(), launchedAt: Date.now(), session: kindArgs.includes('{newsession}') ? newSession : null };
   });
-  if (prompt) backend.prompt(opened.handle, prompt);
+  firstPrompt(backend, opened.handle, prompt);
   return { name, hname, pane: opened.handle, kind };
 }
 

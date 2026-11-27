@@ -1,6 +1,6 @@
 # ATF web UI: design
 
-**Status: agreed direction, spike done (`spike/webterm`), not built yet.**
+**Status: agreed direction; spike done (`spike/webterm`); phases 1 (core in `src/`) and 2 (sessions backend) built.**
 Brief: `docs/webui-brief.md`. This document records what was settled and how it will be
 built; the build plan is at the end.
 
@@ -78,6 +78,26 @@ Protocol (newline-delimited JSON over `$XDG_RUNTIME_DIR/atf-<uid>/sessiond.sock`
 carry `meta` (root, plan, actor, task, role, kind, harness session id) so the launcher
 and the UI find the agent of a task without a separate registry.
 
+Built (phase 2): `src/sessiond.mjs` (the daemon; requests carry a `rid` and get an `ok` or
+`error` reply; `shutdown`; `argv` as well as `cmd`; it tracks whether the program in a
+session has bracketed paste on), `src/sessions.mjs` (a synchronous client for the
+launcher, an asynchronous `connect()` for terminals, and the backend), and
+`bin/atf-sessions` (`start`, `stop`, `list`, `attach`, `spawn`, `coordinate`, `supervise`,
+`shell`, `kill`, `rm`). Its settings are `[sessions]` in `~/.config/atf/config.toml`
+(`agent_kind`, `lifecycle`, `agents`).
+
+- **First prompt:** the backend opens an agent without starting it and starts it in
+  `begin(handle, prompt)` with the prompt on its command line (the kind's `prompt`
+  arguments; `bin` names the command, default the kind's name). A kind without
+  `prompt` gets it typed in once its screen has been quiet. Later prompts (nudges,
+  handoffs) are pasted: bracketed when the program takes it, else on one line, then Enter.
+- **Agents' context:** `ATF_CTX_SESSIOND` and `ATF_CTX_ATF_SESSION` put the daemon and
+  the session in the actor's `ctx`, so a coordinator started by hand is found by the
+  session its writes came from.
+- **Paths:** project roots are compared by their real path (macOS `/var` is
+  `/private/var`). Unix socket paths are limited to about 104 bytes; the daemon says so
+  instead of failing silently (`ATF_SESSIOND_SOCKET` sets another).
+
 To do beyond the spike:
 
 - **Replay after a size change:** a client reattaching at another size than the output
@@ -89,6 +109,7 @@ To do beyond the spike:
   resume the coordinator; subagents start fresh from their checkpoint, the default anyway.
   The daemon is small and changes rarely, so it should almost never need a restart.
 - **Agent state** (working, idle, waiting for approval): see §4.3.
+- opencode `--prompt` not tried yet through the backend (pi and Copilot were, §4.3).
 - Scrollback search and copy are xterm.js features in the browser.
 
 ### 4.2 Launcher in `src/` (`src/launch.mjs`)
@@ -134,10 +155,36 @@ Agent state without herdr's screen heuristics, best source first:
 2. **The session itself:** exited (with exit code), and no output for a while, as a
    fallback for kinds without an extension.
 
+Built (phase 2): the extensions write `<plan>/live/status/<actor>.json` ({status, pid,
+since}; `writeAgentStatus` / `readAgentStatus` in `src/live.mjs`): Copilot from
+`assistant.turn_start`, `session.idle` and permission requests; pi from `agent_start` /
+`agent_settled` (the coordinator through `atf.ts`, subagents through `atf-live.ts`);
+opencode from `session.status`, `session.idle` and permissions. Copilot also writes its
+state to the terminal itself (`OSC 7501;state=idle|blocked[:app=copilot][:kind=permission]`,
+seen in a real run): the daemon keeps the last one per session (`appState`), so "waits
+for your approval" is known even before the ATF extension is loaded (Copilot asks
+whether to launch it, once per repository). The backend takes the latest of the
+extension's report and the terminal's state; a status whose writer has ended is
+ignored, and without either the session's output decides (output in the last 8 s:
+working).
+
+Tried with real agents through the backend (macOS): pi took its prompt as the
+message argument, did its task and reported idle; Copilot took `-i`, after its folder
+trust and extension questions (answered in the session), then asked to run its first
+command, as it does in herdr. A daemon keeps running the code it started with: after
+an update its sessions must end (`atf-sessions stop`) before new code applies.
+
 **Supervisor** (in atf-web, running whether or not a browser is open): the lifecycle
 sweep (close sessions of subagents that finished, report a missing coordinator, nudge
 an idle coordinator), and notifications (§7). It is the sessions-backend counterpart of
 what `atf-herdr` runs inside herdr.
+
+Built (phase 2): `src/supervisor.mjs`, `startSupervisor(backend)` / `superviseOnce`. Every
+5 s, for each project with sessions or registry entries: new events file the agents'
+harness sessions on their tasks and tie a new plan to the coordinator that created it
+(what herdr's post-write hook does), then the lifecycle sweep. Subagent sessions that
+exited by themselves are dropped after 5 minutes. `atf-sessions supervise` runs it
+until atf-web does (phase 3).
 
 ### 4.4 Web server (`atf-web`)
 
@@ -276,7 +323,7 @@ its own. Core changes land in `src/` in a form the CLI and the board use too.
    interface, the herdr backend (the board behaves as before), `atf spawn` / `atf
    coordinate`, kind `prompt` arguments; `src/attention.mjs` with liveness as a
    parameter; `src/actions.mjs` for the human's actions. Tests for each.
-2. **Sessions backend.** `bin/atf-sessiond` from the spike, with session `meta`; the
+2. **Sessions backend** (built; the CLI is `bin/atf-sessions`). `bin/atf-sessiond` from the spike, with session `meta`; the
    sessions backend; agent status in the extensions' live state (Copilot first, then pi,
    opencode); the supervisor (sweep). Tests run the daemon (Linux `script`, macOS
    python).

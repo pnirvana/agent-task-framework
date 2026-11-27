@@ -18,6 +18,7 @@
 // Works in any ATF session: a coordinator (its subagents' commands; its own have no task)
 // and an agent started by atf-herdr with ATF_ACTOR (its own commands).
 import { createObserver } from '../../src/live-observer.mjs';
+import { writeAgentStatus } from '../../src/live.mjs';
 
 const SHELL_TOOLS = new Set(['bash', 'shell', 'powershell']);
 const DONE_RE = /<shellId: (\S+) completed with exit code (-?\d+)>/;
@@ -93,4 +94,43 @@ export function attachLive(session, { log = () => {}, root, plan } = {}) {
 
   on('session.shutdown', () => obs.shutdown());
   return obs;
+}
+
+/**
+ * Report what the agent does (working, idle, blocked on an approval) for backends that
+ * cannot see its screen (docs/webui-design.md §4.3). `where()` gives {root, plan, actor}
+ * now (a coordinator's plan can change: what `atf wait` armed), or null outside a plan.
+ */
+export function attachStatus(session, where) {
+  let last = null,
+    idleTimer = null,
+    approvals = 0;
+  const report = (status) => {
+    const w = where();
+    if (!w?.root || !w?.plan || !w?.actor) return;
+    const key = `${w.root}#${w.plan}#${w.actor}`;
+    if (last && last.key !== key) writeAgentStatus(last.root, last.plan, last.actor, null); // moved on to another plan
+    last = { key, ...w };
+    writeAgentStatus(w.root, w.plan, w.actor, status);
+  };
+  const on = (type, f) => {
+    try {
+      session.on(type, () => {
+        try {
+          f();
+        } catch {}
+      });
+    } catch {}
+  };
+  const working = () => (clearTimeout(idleTimer), report(approvals > 0 ? 'blocked' : 'working'));
+  on('assistant.turn_start', working);
+  on('user.message', working);
+  // session.idle fires more than once per idle: settle first
+  on('session.idle', () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => ((approvals = 0), report('idle')), 300);
+  });
+  on('permission.requested', () => (approvals++, report('blocked')));
+  on('permission.completed', () => ((approvals = Math.max(0, approvals - 1)), report(approvals ? 'blocked' : 'working')));
+  on('session.shutdown', () => last && writeAgentStatus(last.root, last.plan, last.actor, null));
 }

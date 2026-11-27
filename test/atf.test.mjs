@@ -2567,6 +2567,15 @@ test('atf spawn / coordinate: started by the backend that runs agents here, argu
   assert.throws(() => atf(['spawn', 'T1'], { ATF_BACKEND: 'nope' }), (e) => /unknown backend "nope"/.test(e.stderr.toString()));
 });
 
+test('backendName: $ATF_BACKEND, then herdr, then a running session daemon', async () => {
+  const { backendName } = await import('../src/launch.mjs');
+  const up = () => true;
+  assert.equal(backendName({ ATF_BACKEND: 'herdr' }, up), 'herdr');
+  assert.equal(backendName({ HERDR_ENV: '1' }, up), 'herdr');
+  assert.equal(backendName({}, up), 'sessions');
+  assert.equal(backendName({}), null);
+});
+
 test('human actions (src/actions.mjs): what the board and the web UI write', async () => {
   const { dir, run } = sandbox(); // coordinator "lead"
   const sub = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
@@ -2603,6 +2612,122 @@ test('human actions (src/actions.mjs): what the board and the web UI write', asy
     const evs = fs.readFileSync(path.join(root, 'plans', planId, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.ok(evs.slice(-7).every((e) => e.actor.id === 'human' && e.actor.role === 'human'), 'all written as the human');
   } finally {
+    process.env = saved;
+  }
+});
+
+test('sessions backend: agents in ATF\'s session daemon; spawn, coordinate, prompts, status, supervisor', async () => {
+  const { dir, env, run } = sandbox(); // coordinator "lead"
+  run(['add', 'api']); // T1
+  run(['add', 'docs', '--dep', 'T1']); // T2
+  // a stand-in agent kind: does the task named in its prompt, then echoes what it is sent
+  const fake = path.join(dir, 'fake-agent.cjs');
+  fs.writeFileSync(
+    fake,
+    `#!/usr/bin/env node
+const { execFileSync } = require('node:child_process');
+const prompt = process.argv.slice(2).join(' ');
+console.log('fake ' + process.env.ATF_ACTOR + ' ' + process.env.ATF_ROLE + ' in ' + process.env.ATF_BACKEND);
+const m = process.env.ATF_ROLE === 'subagent' && prompt.match(/\\b(T\\d+)\\b/);
+if (m) { execFileSync('atf', ['start', m[1]]); execFileSync('atf', ['done', m[1], '-m', 'fake done']); console.log('did ' + m[1]); }
+process.stdin.setRawMode(true); // a TUI: raw input, bracketed paste
+process.stdout.write('\\x1b[?2004h');
+process.stdin.on('data', (d) => process.stdout.write('got ' + JSON.stringify(String(d)) + '\\r\\n'));
+`,
+  );
+  fs.chmodSync(fake, 0o755);
+  fs.mkdirSync(path.join(env.XDG_CONFIG_HOME, 'atf'), { recursive: true });
+  fs.writeFileSync(path.join(env.XDG_CONFIG_HOME, 'atf', 'config.toml'), `[sessions]\nagent_kind = "fake"\n[sessions.agents.fake]\nbin = ${JSON.stringify(fake)}\nstart = []\nprompt = ["{prompt}"]\n`);
+  const sock = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'atfs-')), 'sd.sock');
+  const extra = { ATF_SESSIOND_SOCKET: sock, ATF_SESSIONS_STATE_DIR: path.join(dir, 'sessions-state'), HERDR_ENV: '', ATF_BACKEND: '' };
+  const saved = { ...process.env };
+  Object.assign(process.env, env, extra);
+  delete process.env.HERDR_ENV;
+  delete process.env.ATF_BACKEND;
+  const { call, connect, ensureDaemon, daemonUp, sessionsBackend } = await import('../src/sessions.mjs');
+  const { superviseOnce } = await import('../src/supervisor.mjs');
+  const { writeAgentStatus } = await import('../src/live.mjs');
+  const { updateRegistry, regKey } = await import('../src/launch.mjs');
+  const { loadPlan } = await import('../src/store.mjs');
+  const root = fs.realpathSync(path.join(dir, '.atf')); // as the launcher finds it (macOS: /private/var)
+  const planId = fs.readFileSync(path.join(root, 'current'), 'utf8').trim();
+  const until = async (f, ms = 8000) => {
+    for (const t0 = Date.now(); Date.now() - t0 < ms; await new Promise((r) => setTimeout(r, 100))) if (f()) return true;
+    return false;
+  };
+  const atf = (args) => execFileSync('node', [ATF, ...args], { cwd: dir, env: { ...env, ...extra }, stdio: 'pipe' }).toString();
+  try {
+    assert.equal(daemonUp(), false);
+    assert.equal(ensureDaemon(), true, 'started');
+    assert.equal(ensureDaemon(), false, 'already running');
+
+    // the daemon: a session, replayed to a client attaching later, input, size, end
+    const { id } = call({ op: 'create', name: 'sh', argv: ['/bin/sh', '-c', 'echo "hello there"; stty size; printf "\\033]7501;state=blocked:app=x:kind=permission\\007"; read x; echo "read $x"'], cwd: dir, env: process.env, cols: 90, rows: 20, meta: { note: 'x' } });
+    assert.ok(await until(() => call({ op: 'list' }).list.find((x) => x.id === id)?.pid));
+    let screen = '';
+    const ended = new Promise((resolve) => {
+      const conn = connect((m) => {
+        if ((m.ev === 'replay' || m.ev === 'out') && m.id === id) screen += m.data;
+        if (m.ev === 'exit' && m.id === id) conn.close(), resolve(m.code);
+      });
+      conn.request({ op: 'attach', id }).then(() => conn.send({ op: 'input', id, data: 'abc\r' }));
+    });
+    assert.equal(await ended, 0);
+    assert.match(screen, /hello there/);
+    assert.match(screen, /20 90/, 'the terminal has the size asked for');
+    assert.match(screen, /read abc/);
+    assert.deepEqual((({ at, ...st }) => st)(call({ op: 'list' }).list.find((x) => x.id === id).appState), { state: 'blocked', app: 'x', kind: 'permission' }, 'the state the program reports (OSC 7501)');
+    const gone = call({ op: 'list' }).list.find((x) => x.id === id);
+    assert.ok(gone.exited && gone.meta.note === 'x');
+    call({ op: 'remove', id });
+    assert.throws(() => call({ op: 'input', id, data: 'x' }), /no session/);
+
+    // atf spawn: with the daemon running and no herdr, the sessions backend starts the agent
+    assert.match(atf(['spawn', 'T1', '--dry-run']), /T1 → w-t1 \(fake\): fresh/);
+    assert.match(atf(['spawn', 'T1']), /T1 → w-t1 \(fake, fresh\) in session/);
+    assert.ok(await until(() => run(['show', 'T1']).status === 'done'), 'the agent did its task');
+    const B = sessionsBackend();
+    const agent = B.agents(root).get('w-t1');
+    assert.equal(agent.role, 'subagent');
+    assert.equal(agent.task, 'T1');
+    assert.ok(B.find(loadPlan(root, planId), { id: 'w-t1' }, B.agents(root)));
+    assert.equal(B.nameTaken('w-t1'), true);
+    assert.equal(run(['show', 'T1']).assignee, 'w-t1');
+
+    // status: what the harness reports wins over the terminal's activity
+    writeAgentStatus(root, planId, 'w-t1', 'blocked');
+    assert.equal(B.agents(root).get('w-t1').status, 'blocked');
+    writeAgentStatus(root, planId, 'w-t1', 'idle');
+    assert.equal(B.agents(root).get('w-t1').status, 'idle');
+
+    // the coordinator: its first prompt on the command line, later prompts pasted in
+    assert.match(atf(['coordinate']), /coordinator lead \(fresh\) in session/);
+    const coord = [...B.agents(root).values()].find((a) => a.role === 'coordinator');
+    assert.equal(coord.name, 'lead');
+    assert.ok(B.prompt(coord.handle, 'line one\nline two'));
+    let replay = '';
+    await new Promise((resolve) => {
+      const conn = connect((m) => {
+        if (m.ev === 'replay') (replay = m.data), conn.close(), resolve();
+      });
+      setTimeout(() => conn.send({ op: 'attach', id: coord.handle }), 500);
+    });
+    assert.match(replay, /fake lead coordinator in sessions/);
+    assert.match(replay, /got "\\u001b\[200~line one\\nline two\\u001b\[201~"\s+got "\\r"/, 'one bracketed paste, then Enter');
+    assert.match(atf(['coordinate']), /is running/);
+
+    // the supervisor: a finished subagent is closed after its grace period
+    const seen = new Map();
+    superviseOnce(B, seen);
+    updateRegistry(B, (reg) => (reg[regKey(root, 'w-t1')].idleSince = Date.now() - 60_000));
+    const { actions } = superviseOnce(B, seen);
+    assert.ok(actions.includes('closed w-t1 (finished its assignment)'), actions.join('; '));
+    assert.ok(await until(() => !B.agents(root).has('w-t1')));
+    assert.ok(B.agents(root).has('lead'), 'the coordinator stays');
+  } finally {
+    try {
+      call({ op: 'shutdown' });
+    } catch {}
     process.env = saved;
   }
 });

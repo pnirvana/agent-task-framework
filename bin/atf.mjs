@@ -25,6 +25,7 @@ import {
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { backendName } from '../src/launch.mjs';
+import { daemonUp as sessionsDaemonUp } from '../src/sessions.mjs';
 import { buildPrompt } from '../src/prompts.mjs';
 import { planChanges, levelSets, totals, onlyFile, projectPath, viewerCommand, patchText, changeMode, diffTool, fileOrigin } from '../src/changes.mjs';
 import { activeRuns, taskLive, elapsed, readTail, earlierText, liveView, liveItem, loadLiveKinds, liveKinds, liveKind, refreshLive, refreshError, enableAutoRefresh, summarizeText, classify, registerLiveKind, STYLES } from '../src/live.mjs';
@@ -1758,9 +1759,10 @@ const commands = {
  * backendName). herdr: its adapter's command, with every argument as given.
  */
 function viaBackend(cmd) {
-  const backend = backendName();
-  if (backend === 'herdr') {
-    const bin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../adapters/herdr/atf-herdr.mjs');
+  const backend = backendName(process.env, sessionsDaemonUp);
+  const bins = { herdr: '../adapters/herdr/atf-herdr.mjs', sessions: './atf-sessions.mjs' };
+  if (bins[backend]) {
+    const bin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), bins[backend]);
     try {
       execFileSync(process.execPath, [bin, cmd, ...process.argv.slice(3)], { stdio: 'inherit' });
       process.exit(0);
@@ -1769,7 +1771,7 @@ function viaBackend(cmd) {
     }
   }
   if (backend) die(`atf ${cmd}: unknown backend "${backend}" ($ATF_BACKEND)`);
-  die(`atf ${cmd} needs a place to run agents in: herdr (run inside herdr) or ATF's session daemon. Without either, delegate to your harness's own subagents: atf dispatch <task> --name <agent>`);
+  die(`atf ${cmd} needs a place to run agents in: herdr (run inside herdr) or ATF's session daemon (atf-sessions start). Without either, delegate to your harness's own subagents: atf dispatch <task> --name <agent>`);
 }
 
 // ---------- main ----------

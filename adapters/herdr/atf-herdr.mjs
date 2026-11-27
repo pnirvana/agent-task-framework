@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchPlan } from '../../src/core.mjs';
+import { spawnTarget } from '../../src/launch.mjs';
 import { findRoot, getCurrentPlan, loadPlan, readConfig, writeConfig, skillInstalled, readEvents, initRoot } from '../../src/store.mjs';
 import { herdr, inHerdr, notify, pluginContext, pluginConfig, discoverRoots, isBoardPane, isLiveBoard, focusPaneSync } from './lib/herdr.mjs';
 import { sync } from './lib/sync.mjs';
@@ -145,19 +146,13 @@ function spawnAgent() {
   const planId = flags.plan || getCurrentPlan(root);
   if (!planId) fail('no plan selected (--plan or $ATF_PLAN)');
   const s = loadPlan(root, planId);
-  const t = s.tasks[taskArg];
-  if (!t) fail(`unknown task ${taskArg}`);
-  const eff = t.rollup_status ?? t.status;
-  if (['done', 'cancelled'].includes(eff)) fail(`${t.id} is already ${eff}`);
-  // A parent task is a work package: the agent owns the whole subtree and works through it.
-  if (!t.children.length && t.status === 'todo' && !t.ready && !flags.early)
-    fail(`${t.id} is not ready (waits on ${t.waiting_on.join(', ')}); --early starts it anyway for work that does not need them yet`);
-  const agentName = flags.agent || t.agent || [...t.path].reverse().map((id) => s.tasks[id].agent).find(Boolean) || null;
-  const name = (flags.name || t.assignee || (agentName ? `${agentName}-${t.id}` : `w-${t.id}`))
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, '-')
-    .replace(/^[^a-z]+/, 'w-')
-    .slice(0, 32);
+  let target;
+  try {
+    target = spawnTarget(s, taskArg, { name: flags.name, agent: flags.agent, early: !!flags.early });
+  } catch (e) {
+    fail(e.message);
+  }
+  const { t, name, agent: agentName } = target;
   const force = flags.fresh ? 'fresh' : flags.resume ? 'resume' : undefined;
 
   if (flags['dry-run']) {

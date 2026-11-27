@@ -12,6 +12,7 @@
 // with the ATF extension.
 import path from "node:path";
 import { createObserver } from "../../src/live-observer.mjs";
+import { writeAgentStatus } from "../../src/live.mjs";
 
 export default function (pi: any) {
 	const g = globalThis as any;
@@ -41,7 +42,17 @@ export default function (pi: any) {
 		obs.end({ id: e.toolCallId, exit, durationMs: e.durationMs ?? null, text });
 	});
 
+	// what the agent does, for backends that cannot see its screen (sessions); a coordinator
+	// reports through the ATF extension (its plan can change)
+	const env = process.env;
+	const status = (st: string | null) => {
+		if (env.ATF_DIR && env.ATF_PLAN && env.ATF_ACTOR && env.ATF_ROLE !== "coordinator") writeAgentStatus(env.ATF_DIR, env.ATF_PLAN, env.ATF_ACTOR, st);
+	};
+	pi.on("agent_start", async () => status("working"));
+	pi.on("agent_settled", async () => status("idle"));
+
 	pi.on("session_shutdown", async () => {
+		status(null);
 		obs?.shutdown();
 		if (g.__atfLiveLoaded === me) g.__atfLiveLoaded = undefined;
 	});

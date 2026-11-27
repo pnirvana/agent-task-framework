@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { Text, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { driverInbox, humanTasks, brief } from "../../src/core.mjs";
 import { loadPlan, eventsPath } from "../../src/store.mjs";
+import { writeAgentStatus } from "../../src/live.mjs";
 
 const ATF_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../bin/atf.mjs");
 const NODE = "node"; // inside some harnesses process.execPath is the harness binary, not node
@@ -768,9 +769,20 @@ export default function (pi: any) {
 		tick.unref?.();
 		setTimeout(startWait, 500);
 	});
+	// what the coordinator does, for backends that cannot see its screen (sessions)
+	let statusAt: Arm | null = null;
+	const reportStatus = (status: string | null) =>
+		safe(() => {
+			const arm = status ? readArm() : statusAt;
+			if (statusAt && arm && (statusAt.root !== arm.root || statusAt.plan !== arm.plan || statusAt.actor !== arm.actor)) writeAgentStatus(statusAt.root, statusAt.plan, statusAt.actor, null);
+			if (!arm) return;
+			statusAt = arm;
+			writeAgentStatus(arm.root, arm.plan, arm.actor, status);
+		});
 	pi.on("agent_start", async (_e: any, ctx: any) => {
 		ctxRef = ctx;
 		idle = false;
+		reportStatus("working");
 		stopWait(); // the agent works (the human prompted it, or it was woken): it reads the plan itself
 		if (expanded) {
 			expanded = null; // the message was sent
@@ -780,11 +792,13 @@ export default function (pi: any) {
 	pi.on("agent_settled", async (_e: any, ctx: any) => {
 		ctxRef = ctx;
 		idle = true;
+		reportStatus("idle");
 		refresh();
 		startWait();
 	});
 	pi.on("session_shutdown", async (e: any) => {
 		stopWait();
+		if (e?.reason !== "reload") reportStatus(null);
 		unInput?.();
 		clearInterval(tick);
 		if (watched) fs.unwatchFile(watched);

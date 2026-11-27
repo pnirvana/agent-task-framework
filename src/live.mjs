@@ -670,6 +670,32 @@ export function writeLiveState(root, planId, actor, state) {
   } catch {}
 }
 
+/**
+ * What an agent's harness says it is doing (docs/webui-design.md §4.3): `working`, `idle`
+ * (its turn ended) or `blocked` (waiting for the human's approval of a tool). Written by
+ * the harness extensions, read by backends that cannot see the agent's screen (sessions).
+ * `pid`: the process that writes it; a status whose writer is gone is not believed.
+ */
+export const agentStatusPath = (root, planId, actor) => path.join(liveDir(root, planId), 'status', `${safeName(actor)}.json`);
+export function writeAgentStatus(root, planId, actor, status, pid = process.pid) {
+  const p = agentStatusPath(root, planId, actor);
+  try {
+    if (!status) return void fs.rmSync(p, { force: true });
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p + `.${pid}.tmp`, JSON.stringify({ actor, status, pid, since: new Date().toISOString() }));
+    fs.renameSync(p + `.${pid}.tmp`, p);
+  } catch {}
+}
+/** {status, since, pid} of an agent, or null (none written, or its writer has ended). */
+export function readAgentStatus(root, planId, actor) {
+  try {
+    const s = JSON.parse(fs.readFileSync(agentStatusPath(root, planId, actor), 'utf8'));
+    return s.pid && alive(s.pid) ? s : null;
+  } catch {
+    return null;
+  }
+}
+
 const alive = (pid) => {
   try {
     process.kill(pid, 0);

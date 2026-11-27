@@ -6,7 +6,8 @@
   "bin": {
     "atf": "bin/atf.mjs",
     "atf-herdr": "adapters/herdr/atf-herdr.mjs",
-    "atf-copilot": "adapters/copilot/atf-copilot.mjs"
+    "atf-copilot": "adapters/copilot/atf-copilot.mjs",
+    "atf-sessions": "bin/atf-sessions.mjs"
   },
   "exports": {
     ".": "./src/core.mjs",
