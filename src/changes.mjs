@@ -211,8 +211,11 @@ function liveSnapshot(repo) {
 }
 
 /** Files of a diff with their status and line counts: [{path, status, added, removed}]. */
+// ATF's own files (the event log, state, locks, captured run output) are bookkeeping, not
+// a task's changes, in a project that keeps .atf/ in git
+const NOT_CHANGES = [':(exclude,glob)**/.atf/**'];
 async function diffFiles(repo, base, target, files = null) {
-  const spec = files ? ['--', ...files.map((f) => `:(literal)${f}`)] : [];
+  const spec = ['--', ...(files ? files.map((f) => `:(literal)${f}`) : []), ...NOT_CHANGES];
   if (files && !files.length) return [];
   const [names, nums] = await Promise.all([
     gitAsync(repo, ['diff', '--no-ext-diff', '--no-renames', '--name-status', '-z', base, target, ...spec]),

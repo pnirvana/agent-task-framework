@@ -72,9 +72,10 @@ a:hover { color: var(--sky); }
 .sec .n { margin-left: 6px; }
 .sec .dim { font-weight: 400; margin-left: 8px; }
 .grp { margin: 8px 12px 2px 14px; color: var(--pink); font-weight: 700; }
-.row { display: grid; grid-template-columns: 11ch minmax(0, 1fr) auto; gap: 10px; padding: 2px 12px 2px 14px; cursor: pointer; border-left: 2px solid transparent; }
+.row { display: grid; grid-template-columns: 14ch minmax(0, 1fr) auto; gap: 10px; padding: 2px 12px 2px 14px; cursor: pointer; border-left: 2px solid transparent; }
 .row:hover { background: var(--hover); }
 .row.sel { background: var(--sel); border-left-color: var(--accent); }
+.row > span:first-child { white-space: nowrap; overflow: hidden; }
 .row .main { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .side { color: var(--fg-dim); white-space: nowrap; }
 .row.sub { color: var(--fg-dim); cursor: default; }
@@ -142,3 +143,83 @@ dialog#help { background: var(--bg-side); color: var(--fg); border: 1px solid va
 dialog#help::backdrop { background: #0008; }
 dialog#help table { border-collapse: collapse; }
 dialog#help td { padding: 1px 10px 1px 0; vertical-align: top; }
+
+/* ---------- colours by name (the live view's styles, badges) ---------- */
+.c-red, .st-red { color: var(--red); } .c-green, .st-green { color: var(--green); } .c-yellow, .st-yellow { color: var(--yellow); }
+.c-cyan, .st-cyan { color: var(--teal); } .st-magenta { color: var(--pink); } .st-gray, .st-dim { color: var(--fg-dim); } .st-bold { font-weight: 700; }
+.hdr-r { display: flex; align-items: center; gap: 8px; }
+.bell { background: none; border: 0; padding: 0; font-size: 12px; opacity: .8; }
+.bell:hover { opacity: 1; }
+#detail ul.runs { list-style: none; padding-left: 0; }
+#detail ul.runs li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- the viewer (in place of the board) ---------- */
+#board { position: relative; }
+#viewer { display: none; }
+#board.viewing > #list, #board.viewing > #detail { visibility: hidden; }
+#board.viewing #viewer { display: grid; grid-template-rows: auto minmax(0, 1fr); position: absolute; inset: 0; background: var(--bg); }
+.vhead { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--bg-side); }
+.vtitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; align-self: center; }
+.vtools { display: flex; gap: 6px; }
+.vtools .btn kbd { color: var(--accent); }
+.vrun, .vcmd { grid-column: 1 / -1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vbody { overflow: auto; padding: 10px 14px 40px; outline: none; }
+.btn { font-size: 12px; }
+
+/* code with line numbers */
+.code { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 12px; }
+.code pre { margin: 0; font: inherit; line-height: 1.45; }
+.code .gutter { color: var(--surface2); text-align: right; user-select: none; }
+.code .src { overflow-x: auto; }
+
+/* Markdown */
+.md { max-width: 100ch; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 14px; line-height: 1.6; }
+#detail .md { font-size: 13px; }
+.md h1, .md h2, .md h3, .md h4 { font-family: inherit; line-height: 1.3; margin: 1.2em 0 .5em; color: var(--fg); text-transform: none; letter-spacing: 0; }
+.md h1 { font-size: 1.6em; border-bottom: 1px solid var(--line); padding-bottom: .2em; }
+.md h2 { font-size: 1.3em; border-bottom: 1px solid var(--line); padding-bottom: .2em; }
+.md h3 { font-size: 1.1em; } .md h4 { font-size: 1em; }
+.md p, .md ul, .md ol, .md blockquote, .md table, .md pre { margin: .6em 0; }
+.md ul, .md ol { padding-left: 1.6em; }
+.md code { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: .9em; background: var(--surface0); padding: .1em .35em; border-radius: 4px; }
+.md pre { background: var(--mantle); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; overflow-x: auto; white-space: pre; }
+.md pre code { background: none; padding: 0; font-size: 12.5px; }
+.md blockquote { border-left: 3px solid var(--surface2); margin-left: 0; padding-left: 12px; color: var(--subtext0); }
+.md table { border-collapse: collapse; }
+.md th, .md td { border: 1px solid var(--surface1); padding: 4px 10px; }
+.md th { background: var(--surface0); }
+.md hr { border: 0; border-top: 1px solid var(--line); }
+.md input[type=checkbox] { margin-right: .4em; }
+
+/* highlight.js tokens, in the theme's colours */
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-type { color: var(--mauve); }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute .hljs-string { color: var(--green); }
+.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet { color: var(--peach); }
+.hljs-comment, .hljs-quote, .hljs-meta .hljs-comment { color: var(--overlay1); font-style: italic; }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--blue); }
+.hljs-title.class_, .hljs-class .hljs-title { color: var(--yellow); }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable, .hljs-property { color: var(--teal); }
+.hljs-params { color: var(--maroon); }
+.hljs-meta, .hljs-meta .hljs-keyword, .hljs-doctag { color: var(--pink); }
+.hljs-tag, .hljs-name { color: var(--blue); }
+.hljs-deletion { color: var(--red); }
+.hljs-emphasis { font-style: italic; } .hljs-strong { font-weight: 700; }
+.hljs-link { color: var(--blue); text-decoration: underline; }
+
+/* diffs */
+.diff .dfile { margin: 0 0 18px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.diff .dhead { background: var(--surface0); padding: 4px 10px; font-weight: 700; }
+.diff .dl { white-space: pre; padding: 0 10px; min-height: 1.45em; }
+.diff .dadd { background: color-mix(in srgb, var(--green) 14%, transparent); color: var(--green); }
+.diff .ddel { background: color-mix(in srgb, var(--red) 14%, transparent); color: var(--red); }
+.diff .dhunk { color: var(--sapphire); background: var(--mantle); }
+.diff .dmeta { color: var(--fg-dim); }
+.diff { overflow-x: auto; }
+
+/* the live view */
+.lines .ln { white-space: pre; min-height: 1.45em; }
+.lines .sechead { cursor: pointer; margin-top: 6px; }
+.lines .sechead:hover, .lines .item:hover { background: var(--hover); }
+.lines .item { cursor: pointer; }
+pre.raw { margin: 0; font: inherit; }
+pre.raw > div { white-space: pre-wrap; word-break: break-all; }

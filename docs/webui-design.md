@@ -1,6 +1,6 @@
 # ATF web UI: design
 
-**Status: agreed direction; spike done (`spike/webterm`); phases 1 (core in `src/`), 2 (sessions backend) and 3 (first usable web UI, `adapters/web/`) built.**
+**Status: agreed direction; spike done (`spike/webterm`); phases 1 (core in `src/`), 2 (sessions backend), 3 (first usable web UI, `adapters/web/`) and 4 (live view, changes, file viewer, notifications) built.**
 Brief: `docs/webui-brief.md`. This document records what was settled and how it will be
 built; the build plan is at the end.
 
@@ -342,6 +342,8 @@ Third-party files in the browser, each copied into `vendor/` with its licence fi
 | @xterm/addon-fit | 0.11.0 | MIT | fit the terminal to its pane |
 | @xterm/addon-webgl | 0.19.0 | MIT | renderer; draws box-drawing characters itself (lines without gaps), faster |
 | JetBrains Mono | 2.304 | SIL OFL 1.1 | font, full character set (from JetBrains' release; a Latin-only subset lacks box drawing) |
+| marked | 18.3.0 | MIT | Markdown to HTML (plan documents, the file viewer); its output goes through our allowlist sanitizer |
+| highlight.js | 11.12.0 | BSD-3-Clause | syntax highlighting: the ES "common" bundle plus Dockerfile, Gradle, Groovy, Scala, protobuf, PowerShell, nginx grammars |
 | Catppuccin palette | — | MIT | colours (values only) |
 
 Possibly later: `@xterm/headless` (MIT) for the replay fallback (§4.1). Before adding
@@ -373,6 +375,41 @@ its own. Core changes land in `src/` in a form the CLI and the board use too.
    checks), settings and themes, shell tabs.
 6. **Later, each with its own design:** file browser (§9), diffs and reviews (§8),
    identities (§6), stage two (§10).
+
+## 12a. Phase 4 as built
+
+- **Live view** (`L` on a task, ⏎ in Tasks, the Live list in a task's details): the
+  task's runs in the board's order (waiting, running, recorded), `[` `]` between them; a
+  kind with a view (Maven, plugins) shows it with foldable sections and items (a failed
+  test: its stack trace), `o` switches to the raw output; a kind without one shows its
+  output, following the end while it runs. The page asks again every 1.5 s while a run is
+  active. Server: `/api/live`, `/api/live/run`, the same `taskLive` / `liveView` /
+  `liveItem` as the board (live plugins load at start). Only files of the task's runs are
+  read. Task rows carry the board's live badge (`liveBadge`).
+- **Changes** (tab `4`, plan scope): per task its files with line counts, files another
+  task also changed marked; ⏎ / `d` a file's or a task's diff, `o` the file. Server:
+  `planChanges`, cached per plan for 10 s (the working tree changes without events).
+  Core change: ATF's own files (`.atf/`) are never a task's changes (`diffFiles` excludes
+  them), for projects that keep `.atf/` in git; the board and `atf diff` profit too.
+- **File viewer** (in place of the board): Markdown rendered (marked) or as source (`m`),
+  code highlighted with line numbers (highlight.js, by extension or file name), diffs
+  coloured per file. `/api/file` reads files inside the project only (real paths, so no
+  symlink leads out), at most 2 MB, binaries are not shown. Plan documents open in it,
+  and their relative links open the linked file; file and log artifacts too.
+  **Rendered Markdown is sanitized:** raw HTML in a document is shown as text, the
+  rendered HTML is parsed inert and only an allowlist of elements and attributes is
+  kept; links only to http(s), mailto, anchors and relative paths; images are not loaded
+  (their text instead). A repository's document must not run script in a page that can
+  act as the human.
+- **Notifications:** the texts and identities moved from the herdr adapter to
+  `src/notify.mjs` (`describe`, `keyOf`), so herdr and the web say the same. The page
+  notifies each new item once (live items after 5 s), through the browser's
+  notifications when the page is in the background (the bell in the sidebar asks for
+  permission), else as a toast; the tab title counts what needs you. What was there
+  when the page first opened counts as seen.
+- **Approvals:** an agent waiting for a tool approval (Copilot's terminal state or an
+  extension's report) is `! prompt` under NEEDS YOU, ⏎ opens its pane; a command waiting
+  for approval shows on its task's live badge.
 
 ## 13. Open
 

@@ -3,6 +3,7 @@
 // Data: /api/overview (projects, open plans with their folded state, what needs you),
 // refreshed when /api/stream says something changed. Writes: /api/action as the human.
 import { createTerms } from './terms.js';
+import { renderMarkdown, codeBlock, diffBlock, langOf } from './viewer.js';
 
 // ---------------------------------------------------------------- small helpers
 const $ = (s) => document.querySelector(s);
@@ -77,6 +78,7 @@ const TABS = [
   ['tasks', 'Tasks'],
   ['plan', 'Plan'],
   ['log', 'Log'],
+  ['changes', 'Changes'],
 ];
 
 // ---------------------------------------------------------------- state
@@ -92,6 +94,9 @@ const S = {
   docs: new Map(), // `${key}#${doc}` -> text
   compose: null, // {action, p, task, label, status}
   pane: store.get('pane', null), // the session shown in the panes
+  viewer: null, // {type: file|diff|live, …}: shown in place of the board
+  changes: new Map(), // `${key}#${seq}` -> /api/changes | 'loading'
+  liveLists: new Map(), // `${key}#${task}` -> {at, runs, earlier}
   showClosed: new Set(), // project roots whose closed plans are listed
   busy: false,
 };
@@ -254,7 +259,8 @@ function overviewRows() {
 function taskRow(p, t, k, brief = false, depth = 0) {
   const st = p.st;
   const side = [t.owner ? (t.owner === S.ov.human ? 'you' : t.owner) : t.ready ? 'ready' : t.waiting_on?.length ? `waits on ${t.waiting_on.join(', ')}` : '', t.status === 'in_progress' && t.percent != null ? `${t.percent}%` : ''].filter(Boolean).join(' · ');
-  const main = h('span', {}, depth ? h('span', { class: 'tree-i' }, '  '.repeat(depth) + '└ ') : '', h('b', {}, t.id), ' ', t.title, brief && t.last_message ? h('span', { class: 'dim' }, `  ${first(t.last_message, 140)}`) : '');
+  const badge = p.live?.[t.id];
+  const main = h('span', {}, depth ? h('span', { class: 'tree-i' }, '  '.repeat(depth) + '└ ') : '', h('b', {}, t.id), ' ', t.title, badge ? h('span', { class: `c-${badge.color}` }, `  ${badge.glyph} ${first(badge.text, 70)}`) : brief && t.last_message ? h('span', { class: 'dim' }, `  ${first(t.last_message, 140)}`) : '');
   return { k, type: 'task', p, task: t.id, cells: [h('span', { class: `s-${t.rollup_status ?? t.status}` }, `${STATUS_ICON[t.rollup_status ?? t.status] ?? ''} ${(t.rollup_status ?? t.status).replace('_', ' ')}`), main, side] };
 }
 
@@ -316,7 +322,44 @@ function logRows() {
   return out;
 }
 
-const ROWS = { overview: overviewRows, tasks: tasksRows, plan: planRows, log: logRows };
+function changesOf(p) {
+  const key = `${p.key}#${p.st.last_seq}`;
+  const c = S.changes.get(key);
+  if (c === undefined) {
+    S.changes.set(key, 'loading');
+    api(`changes?${q({ root: p.root, plan: p.id })}`)
+      .then((r) => {
+        S.changes.set(key, r);
+        if (S.tab === 'changes') render();
+      })
+      .catch((e) => (S.changes.delete(key), toast(e.message, true)));
+    return null;
+  }
+  return c === 'loading' ? null : c;
+}
+const plusMinus = (tt) => h('span', {}, h('span', { class: 'c-green' }, `+${tt.added}`), ' ', h('span', { class: 'c-red' }, `−${tt.removed}`));
+function changesRows() {
+  const p = scopePlan();
+  if (!p) return [{ empty: 'Changes are per plan: pick a plan (sidebar, or ⏎ on a plan).' }];
+  const c = changesOf(p);
+  if (!c) return [{ empty: 'reading the changes (git)…' }];
+  const out = [{ sec: 'flight', title: 'CHANGES', n: c.plan.totals.files, hint: `${c.plan.totals.files ? `+${c.plan.totals.added} −${c.plan.totals.removed} · ` : ''}${c.mode === 'artifacts' ? 'files the agents reported' : 'per task, from snapshots when it started and ended'}` }];
+  if (!c.plan.totals.files) out.push({ empty: 'No changes recorded yet.' });
+  for (const id of p.st.order) {
+    const ch = c.tasks[id];
+    if (!ch) continue;
+    const t = p.st.tasks[id];
+    out.push({ k: `chg#${p.key}#${id}`, type: 'chg-task', p, task: id, cells: [h('span', { class: `s-${t.status}` }, `${STATUS_ICON[t.status] ?? ''} ${t.status.replace('_', ' ')}`), h('span', {}, h('b', {}, id), ' ', t.title), h('span', {}, `${ch.totals.files} file${ch.totals.files === 1 ? '' : 's'}  `, plusMinus(ch.totals))] });
+    for (const set of ch.sets)
+      for (const f of set.files) {
+        const overlap = (f.tasks || []).filter((x) => x !== id);
+        out.push({ k: `chgf#${p.key}#${id}#${f.project}`, type: 'chg-file', p, task: id, file: f.project, f, cells: [h('span', { class: 'dim' }, f.status ?? ''), h('span', {}, '   ', f.project, overlap.length ? h('span', { class: 'c-yellow' }, `  also ${overlap.join(', ')}`) : ''), plusMinus(f)] });
+      }
+  }
+  return out;
+}
+
+const ROWS = { overview: overviewRows, tasks: tasksRows, plan: planRows, log: logRows, changes: changesRows };
 
 // ---------------------------------------------------------------- rendering
 function render() {
@@ -326,6 +369,8 @@ function render() {
   renderBar();
   renderDetail();
   renderPanes();
+  renderViewer();
+  notifyCheck();
   const n = allPlans().reduce((a, p) => a + (p.attention?.mine.length ?? 0), 0);
   document.title = n ? `(${n}) ATF` : 'ATF';
 }
@@ -447,6 +492,10 @@ function enter() {
     return render();
   }
   if (r.type === 'need' && ['coordinator', 'prompt'].includes(r.it.kind)) return goAgent();
+  if (r.type === 'chg-file') return openDiff(r.p, r.task, r.file);
+  if (r.type === 'chg-task') return openDiff(r.p, r.task);
+  if (r.type === 'doc') return openFile(r.p, r.doc);
+  if (r.type === 'task' && S.tab === 'tasks') return openLive(r.p, r.task);
 }
 
 // ---------------------------------------------------------------- the detail panel
@@ -534,8 +583,17 @@ function taskDetail(r) {
   if (b?.checkpoint) out.push(...section('Checkpoint', h('pre', {}, b.checkpoint.message)));
   if (t.steps?.length) out.push(...section('Steps', h('ul', {}, t.steps.map((s) => h('li', { class: `s-${s.status}` }, `${STATUS_ICON[s.status] ?? ''} ${s.title}`)))));
   if (t.waiting_on?.length) out.push(...section('Waits on', h('p', {}, t.waiting_on.map((id) => `${id} ${p.st.tasks[id]?.title ?? ''}`).join(' · '))));
-  const arts = t.artifacts.filter((a) => !a.live);
-  if (arts.length) out.push(...section('Artifacts', h('ul', {}, [...arts].reverse().slice(0, 10).map((a) => h('li', {}, h('span', { class: 'dim' }, `${a.kind} `), a.kind === 'url' || a.kind === 'pr' ? h('a', { href: a.ref, target: '_blank', rel: 'noopener' }, a.ref) : a.cmd ? `${first(a.cmd, 80)} → exit ${a.exit}` : a.ref, a.description ? h('span', { class: 'dim' }, ` — ${first(a.description, 100)}`) : '')))));
+  const lv = liveListOf(p, t.id);
+  if (lv?.runs.length) out.push(...section('Live', h('ul', { class: 'runs' }, lv.runs.slice(0, 8).map((x) => h('li', {}, h('a', { href: '#', onclick: (e) => (e.preventDefault(), openLive(p, t.id, x.ref)) }, runGlyph(x), ' ', x.kind), ' ', h('span', { class: stateClass(x) }, first(x.summary.line || x.cmd || '', 90))))), lv.earlierText ? h('p', { class: 'meta' }, lv.earlierText) : ''));
+  // what is under Live (runs, live files, the live kinds' reports) is not listed again
+  // (as src/live.mjs taskLive picks them: a plain log stays an artifact)
+  const arts = t.artifacts.filter((a) => !a.live && !a.cmd && !['maven', 'tests', 'pipeline', 'build', 'deploy', 'wait'].includes(a.kind));
+  const projDir = p.project?.dir;
+  const inProject = (ref) => (ref.startsWith('/') ? (projDir && ref.startsWith(projDir + '/') ? ref.slice(projDir.length + 1) : null) : ref);
+  if (arts.length) out.push(...section('Artifacts', h('ul', {}, [...arts].reverse().slice(0, 10).map((a) => {
+    const rel = a.kind === 'file' || a.kind === 'log' ? inProject(a.git?.path ?? a.ref) : null;
+    return h('li', {}, h('span', { class: 'dim' }, `${a.kind} `), a.kind === 'url' || a.kind === 'pr' ? h('a', { href: a.ref, target: '_blank', rel: 'noopener' }, a.ref) : rel ? h('a', { href: '#', onclick: (e) => (e.preventDefault(), openFile(p, rel)) }, a.ref) : a.ref, a.description ? h('span', { class: 'dim' }, ` — ${first(a.description, 100)}`) : '');
+  }))));
   if (t.notes.length) out.push(...section('Notes', ...notesList(t.notes)));
   out.push(actionsBar(r));
   return out;
@@ -552,7 +610,212 @@ function docDetail(p, doc) {
       })
       .catch((e) => S.docs.set(key, `could not read it: ${e.message}`));
   }
-  return [h('h2', {}, doc), h('pre', { class: 'doc' }, S.docs.get(key) ?? 'loading…')];
+  const text = S.docs.get(key);
+  const body = text == null ? h('p', { class: 'meta' }, 'loading…') : /\.(md|markdown)$/i.test(doc) ? renderMarkdown(text, { onLink: (href) => openFile(p, joinPath(doc, href)) }) : codeBlock(text, langOf(doc), h);
+  return [h('h2', {}, doc), h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: () => openFile(p, doc) }, h('kbd', {}, '⏎'), 'Open')), body];
+}
+/** A link in document `from` (project-relative) to `href`: the project-relative path. */
+function joinPath(from, href) {
+  const parts = from.split('/').slice(0, -1);
+  for (const seg of href.split('/')) {
+    if (seg === '..') parts.pop();
+    else if (seg && seg !== '.') parts.push(seg);
+  }
+  return parts.join('/');
+}
+
+// ---------------------------------------------------------------- live runs of a task
+const RUN_STATE = { ok: ['✓', 'c-green'], failed: ['✗', 'c-red'], waiting: ['⧖', 'c-yellow'], running: ['⚙', 'c-cyan'], gone: ['–', 'dim'], unknown: ['·', ''] };
+const runGlyph = (x) => (x.active ? (x.waiting || x.approval ? RUN_STATE.waiting : RUN_STATE.running) : RUN_STATE[x.summary.state] || RUN_STATE.unknown)[0];
+const stateClass = (x) => (x.active ? (x.waiting || x.approval ? RUN_STATE.waiting : RUN_STATE.running) : RUN_STATE[x.summary.state] || RUN_STATE.unknown)[1];
+function liveListOf(p, task) {
+  const key = `${p.key}#${task}`;
+  const c = S.liveLists.get(key);
+  const t = p.st.tasks[task];
+  const worth = t && !t.children.length && (t.status !== 'todo' || t.artifacts.length);
+  if (worth && (!c || (Date.now() - c.at > 4000 && !c.loading))) {
+    S.liveLists.set(key, { ...(c || { runs: [] }), loading: true, at: c?.at ?? 0 });
+    api(`live?${q({ root: p.root, plan: p.id, task })}`)
+      .then((r) => {
+        S.liveLists.set(key, { ...r, at: Date.now() });
+        if (selRow()?.task === task) renderDetail();
+      })
+      .catch(() => S.liveLists.set(key, { runs: [], at: Date.now() }));
+  }
+  return c;
+}
+
+// ---------------------------------------------------------------- the viewer
+async function openFile(p, rel) {
+  openViewer({ type: 'file', p, path: rel, loading: true });
+  try {
+    const f = await api(`file?${q({ root: p.root, path: rel })}`);
+    if (S.viewer?.path !== rel) return;
+    Object.assign(S.viewer, { loading: false, data: f, mode: /\.(md|markdown|mdx)$/i.test(f.path) ? 'rendered' : 'source' });
+  } catch (e) {
+    if (S.viewer?.path === rel) Object.assign(S.viewer, { loading: false, error: e.message });
+  }
+  renderViewer();
+}
+async function openDiff(p, task, file) {
+  const label = file ? `${file}` : task ? `${task} ${p.st.tasks[task]?.title ?? ''}` : title(p);
+  const v = { type: 'diff', p, task, file, title: label, loading: true };
+  openViewer(v);
+  try {
+    const r = await api(`diff?${q({ root: p.root, plan: p.id, task, file })}`);
+    if (S.viewer === v) Object.assign(v, { loading: false, text: r.text });
+  } catch (e) {
+    if (S.viewer === v) Object.assign(v, { loading: false, error: e.message });
+  }
+  renderViewer();
+}
+function openLive(p, task, ref = null) {
+  openViewer({ type: 'live', p, task, ref, raw: false, item: null, folded: new Map(), runs: null, data: null, follow: true });
+  liveTick();
+}
+async function liveTick() {
+  const v = S.viewer;
+  if (v?.type !== 'live') return;
+  clearTimeout(S.liveTimer);
+  try {
+    const list = await api(`live?${q({ root: v.p.root, plan: v.p.id, task: v.task })}`);
+    if (S.viewer !== v) return;
+    v.runs = list.runs;
+    v.earlierText = list.earlierText;
+    const x = v.runs.find((r) => r.ref === v.ref) || v.runs[0];
+    if (x) {
+      v.ref = x.ref;
+      const raw = v.raw || !x.view;
+      const r = await api(`live/run?${q({ root: v.p.root, plan: v.p.id, task: v.task, ref: x.ref, ...(raw ? { raw: 1 } : {}), ...(v.item != null ? { item: v.item } : {}) })}`);
+      if (S.viewer !== v) return;
+      v.data = r;
+      v.error = null;
+    } else v.data = null;
+  } catch (e) {
+    if (S.viewer === v) v.error = e.message;
+  }
+  renderViewer();
+  // while it runs: again soon; a finished run rarely changes
+  const active = v.runs?.some((r) => r.active);
+  if (S.viewer === v) S.liveTimer = setTimeout(liveTick, active ? 1500 : 5000);
+}
+function openViewer(v) {
+  S.viewer = v;
+  renderViewer();
+}
+function closeViewer() {
+  clearTimeout(S.liveTimer);
+  S.viewer = null;
+  renderViewer();
+  $('#list').focus();
+}
+const segView = (segs) => segs.map(([text, style]) => h('span', { class: style ? style.split(' ').map((x) => `st-${x}`).join(' ') : '' }, text));
+
+function renderViewer() {
+  const board = $('#board');
+  let el = $('#viewer');
+  const v = S.viewer;
+  board.classList.toggle('viewing', !!v);
+  if (!v) return el && el.replaceChildren();
+  if (!el) board.append((el = h('div', { id: 'viewer' })));
+  const keepScroll = el.querySelector('.vbody')?.scrollTop ?? 0;
+  const body = h('div', { class: 'vbody', tabindex: '0' });
+  let head;
+  const close = h('button', { class: 'btn', onclick: closeViewer, title: 'back to the board (esc)' }, h('kbd', {}, 'esc'), ' close');
+  if (v.type === 'file') {
+    const f = v.data;
+    const md = f && /\.(md|markdown|mdx)$/i.test(f.path);
+    head = h('div', { class: 'vhead' }, h('div', { class: 'vtitle' }, h('b', {}, v.path), f ? h('span', { class: 'dim' }, `  ${(f.size / 1024).toFixed(f.size < 10240 ? 1 : 0)} KB${f.truncated ? ' · first 2 MB' : ''}`) : ''), h('div', { class: 'vtools' }, md ? h('button', { class: 'btn', onclick: () => ((v.mode = v.mode === 'rendered' ? 'source' : 'rendered'), renderViewer()) }, h('kbd', {}, 'm'), v.mode === 'rendered' ? ' source' : ' rendered') : '', close));
+    if (v.loading) body.append(h('p', { class: 'meta' }, 'loading…'));
+    else if (v.error) body.append(h('p', { class: 'c-red' }, v.error));
+    else if (f.binary) body.append(h('p', { class: 'meta' }, 'A binary file: not shown.'));
+    else if (md && v.mode === 'rendered') body.append(renderMarkdown(f.text, { onLink: (href) => openFile(v.p, joinPath(v.path, href)) }));
+    else body.append(codeBlock(f.text, langOf(f.path), h));
+  } else if (v.type === 'diff') {
+    head = h('div', { class: 'vhead' }, h('div', { class: 'vtitle' }, h('span', { class: 'dim' }, 'changes  '), h('b', {}, v.title)), h('div', { class: 'vtools' }, v.file ? h('button', { class: 'btn', onclick: () => openFile(v.p, v.file) }, h('kbd', {}, 'o'), ' open file') : '', close));
+    if (v.loading) body.append(h('p', { class: 'meta' }, 'loading…'));
+    else if (v.error) body.append(h('p', { class: 'c-red' }, v.error));
+    else body.append(diffBlock(v.text, h));
+  } else {
+    const t = v.p.st.tasks[v.task];
+    const runs = v.runs || [];
+    const x = runs.find((r) => r.ref === v.ref);
+    const i = runs.indexOf(x);
+    const when = !x ? '' : x.active ? `${x.approval ? 'waiting for your approval' : x.waiting ? 'waiting' : 'running'} ${ago(x.since)}` : x.exit != null ? `exit ${x.exit}${x.duration_ms ? ` · took ${Math.round(x.duration_ms / 1000)}s` : ''} · ${ago(x.ts)} ago` : x.live ? 'live file' : '';
+    const raw = v.raw || (x && !x.view);
+    head = h(
+      'div',
+      { class: 'vhead' },
+      h('div', { class: 'vtitle' }, h('span', { class: 'dim' }, 'live  '), h('b', {}, `${v.task} `), t?.title ?? '', runs.length > 1 ? h('span', { class: 'dim' }, `   run ${i + 1}/${runs.length}`) : ''),
+      h(
+        'div',
+        { class: 'vtools' },
+        runs.length > 1 ? h('button', { class: 'btn', onclick: () => stepRun(-1) }, h('kbd', {}, '['), ' prev') : '',
+        runs.length > 1 ? h('button', { class: 'btn', onclick: () => stepRun(1) }, h('kbd', {}, ']'), ' next') : '',
+        x?.view ? h('button', { class: 'btn', onclick: () => ((v.raw = !v.raw), (v.item = null), liveTick()) }, h('kbd', {}, 'o'), v.raw ? ' view' : ' output') : '',
+        v.item != null ? h('button', { class: 'btn', onclick: () => ((v.item = null), liveTick()) }, h('kbd', {}, '⌫'), ' back') : '',
+        close,
+      ),
+      x ? h('div', { class: 'vrun' }, h('span', { class: stateClass(x) }, `${runGlyph(x)} ${x.kind}`), h('span', { class: 'dim' }, `  ${when}  `), h('span', { class: stateClass(x) }, x.summary.line || '')) : '',
+      x ? h('div', { class: 'vcmd dim' }, x.cmd ? `$ ${String(x.cmd).split('\n')[0]}` : x.ref) : '',
+    );
+    if (!v.runs) body.append(h('p', { class: 'meta' }, 'loading…'));
+    else if (!runs.length) body.append(h('p', { class: 'meta' }, `Nothing live on ${v.task}: builds, tests and pipelines its agent runs show here.`));
+    else if (v.error) body.append(h('p', { class: 'c-red' }, v.error));
+    else if (v.data?.item) body.append(h('div', { class: 'lines' }, v.data.item.map((l) => h('div', { class: 'ln' }, segView(l)))));
+    else if (raw) {
+      const text = v.data?.raw;
+      if (text == null) body.append(h('p', { class: 'meta' }, 'no output (yet)'));
+      else body.append(h('pre', { class: 'raw' }, text.split('\n').slice(-4000).map((l) => h('div', { class: /\b(ERROR|FAIL(ED|URE)?)\b/.test(l) ? 'c-red' : /\bWARN(ING)?\b/.test(l) ? 'c-yellow' : '' }, l || ' '))));
+    } else if (v.data?.lines) {
+      const box = h('div', { class: 'lines' });
+      let folded = false;
+      for (const l of v.data.lines) {
+        if (l.section) {
+          const sec = l.section;
+          folded = v.folded.has(sec) ? v.folded.get(sec) : l.folded;
+          box.append(h('div', { class: 'ln sechead', onclick: () => (v.folded.set(sec, !folded), renderViewer()) }, h('span', { class: 'c-cyan' }, folded ? '▸ ' : '▾ '), segView(l.segs)));
+          continue;
+        }
+        if (folded) continue;
+        box.append(h('div', { class: `ln${l.item != null ? ' item' : ''}`, onclick: l.item != null ? () => ((v.item = l.item), liveTick()) : null, title: l.item != null ? 'details' : null }, segView(l.segs)));
+      }
+      body.append(box);
+    }
+  }
+  const atEnd = el.querySelector('.vbody') ? el.querySelector('.vbody').scrollHeight - keepScroll - el.querySelector('.vbody').clientHeight < 30 : false;
+  el.replaceChildren(head, body);
+  // the output of a running command: follow its end while you are at the end
+  if (v.type === 'live' && (v.raw || !v.data?.lines) && (atEnd || v.follow)) (body.scrollTop = body.scrollHeight), (v.follow = false);
+  else body.scrollTop = keepScroll;
+}
+function stepRun(d) {
+  const v = S.viewer;
+  if (!v?.runs?.length) return;
+  const i = v.runs.findIndex((r) => r.ref === v.ref);
+  v.ref = v.runs[(i + d + v.runs.length) % v.runs.length].ref;
+  v.item = null;
+  v.follow = true;
+  liveTick();
+}
+function viewerKey(e) {
+  const v = S.viewer;
+  const k = e.key;
+  const b = $('#viewer .vbody');
+  if (k === 'Escape' || k === 'q') return v.item != null ? ((v.item = null), liveTick()) : closeViewer();
+  if (k === 'Backspace' && v.item != null) return (v.item = null), liveTick();
+  if (k === 'j' || k === 'ArrowDown') return e.preventDefault(), b?.scrollBy(0, 40);
+  if (k === 'k' || k === 'ArrowUp') return e.preventDefault(), b?.scrollBy(0, -40);
+  if (k === ' ' || k === 'PageDown') return e.preventDefault(), b?.scrollBy(0, b.clientHeight * 0.9);
+  if (k === 'PageUp') return e.preventDefault(), b?.scrollBy(0, -b.clientHeight * 0.9);
+  if (k === 'g') return b && (b.scrollTop = 0);
+  if (k === 'G') return b && (b.scrollTop = b.scrollHeight);
+  if (k === 'm' && v.type === 'file') return (v.mode = v.mode === 'rendered' ? 'source' : 'rendered'), renderViewer();
+  if (k === 'o' && v.type === 'live') return (v.raw = !v.raw), (v.item = null), (v.follow = true), liveTick();
+  if (k === 'o' && v.type === 'diff' && v.file) return openFile(v.p, v.file);
+  if (k === '[') return stepRun(-1);
+  if (k === ']') return stepRun(1);
+  if (/^[0-4]$/.test(k)) return closeViewer(), setTab(TABS[Number(k)][0]);
 }
 
 // ---------------------------------------------------------------- actions
@@ -574,7 +837,11 @@ function actionsFor(r) {
     out.push({ key: question ? 'r' : 'n', label: question ? 'Answer' : 'Message', primary: question, run: () => compose('note', p, t.id, question ? `Your answer on ${t.id}` : `A message on ${t.id}, for the coordinator`) });
     const agent = agentOf(p, t.owner);
     if (agent) out.push({ key: 'g', label: `Go to ${agent.name}`, run: () => showPane(agent.handle, true, p) });
+    if (!t.children.length) out.push({ key: 'L', label: 'Live', run: () => openLive(p, t.id) });
+    if (r.type === 'chg-file') out.push({ key: 'd', label: 'Diff', primary: true, run: () => openDiff(p, t.id, r.file) }, { key: 'o', label: 'Open file', run: () => openFile(p, r.file) });
+    else out.push({ key: 'd', label: 'Changes', run: () => openDiff(p, t.id) });
   }
+  if (r.type === 'doc') out.push({ key: 'o', label: 'Open', primary: true, run: () => openFile(p, r.doc) });
   if (r.type === 'need' && (r.it.kind === 'coordinator' || r.it.kind === 'prompt')) out.push({ key: 'g', label: `Go to ${r.it.actor}`, primary: true, run: goAgent });
   if (r.type === 'need' && r.it.kind === 'plan-question') out.push({ key: 'r', label: 'Answer', primary: true, run: () => compose('plan-note', p, null, 'Your answer, for the coordinator') });
   if (p.open) {
@@ -652,6 +919,69 @@ async function coordinator(p, fresh) {
     toast(e.message, true);
   }
 }
+
+// ---------------------------------------------------------------- notifications
+// The browser's own (after you allow them once), for what needs you: the same items and
+// texts as herdr's notifications (src/notify.mjs). Each is notified once, when it appears;
+// again only after it went away and came back. What comes from agents' live state must
+// hold a few seconds first. While this page has the focus, a toast instead.
+const LIVE_N = new Set(['prompt', 'no-coordinator', 'coordinator', 'stale']);
+const SETTLE_MS = 5000;
+const firstSeen = new Map();
+let notifyTimer = null;
+function notifyCheck() {
+  const fresh = store.get('notified', null) === null; // the first time: what is there now counts as seen
+  const notified = new Set(store.get('notified', []));
+  const now = Date.now();
+  const present = new Set();
+  const due = [];
+  let later = false;
+  for (const p of allPlans().filter((x) => x.open))
+    for (const it of [...p.attention.mine, ...p.attention.todos]) {
+      present.add(it.nkey);
+      if (!firstSeen.has(it.nkey)) firstSeen.set(it.nkey, now);
+      if (notified.has(it.nkey)) continue;
+      if (!fresh && LIVE_N.has(it.kind) && now - firstSeen.get(it.nkey) < SETTLE_MS) {
+        later = true;
+        continue;
+      }
+      notified.add(it.nkey);
+      if (!fresh) due.push({ it, p });
+    }
+  for (const k of notified) if (!present.has(k)) notified.delete(k);
+  for (const k of firstSeen.keys()) if (!present.has(k)) firstSeen.delete(k);
+  store.set('notified', [...notified]);
+  clearTimeout(notifyTimer);
+  if (later) notifyTimer = setTimeout(notifyCheck, SETTLE_MS);
+  if (!due.length) return;
+  const one = due.length === 1;
+  const plans = new Set(due.map((d) => title(d.p)));
+  const head = one ? `ATF · ${title(due[0].p)}` : `ATF · ${due.length} things need you${plans.size === 1 ? ` · ${[...plans][0]}` : ''}`;
+  const body = due.map((d) => (plans.size > 1 ? `${title(d.p)}: ` : '') + d.it.text).join(' · ');
+  if (window.Notification?.permission === 'granted' && (document.hidden || !document.hasFocus())) {
+    const n = new Notification(head, { body, tag: one ? due[0].it.nkey : 'atf' });
+    n.onclick = () => {
+      window.focus();
+      const d = due[0];
+      setScope({ level: 'plan', root: d.p.root, plan: d.p.id }, 'overview');
+      n.close();
+    };
+  } else toast(body);
+}
+function bell() {
+  const b = $('#bell');
+  const perm = window.Notification?.permission;
+  b.textContent = perm === 'granted' ? '🔔' : '🔕';
+  b.title = !window.Notification ? 'this browser has no notifications' : perm === 'granted' ? 'notifications on (what needs you, while this page is in the background)' : perm === 'denied' ? 'notifications are blocked: allow them in the browser’s site settings' : 'turn on notifications';
+}
+$('#bell').onclick = async () => {
+  if (!window.Notification) return toast('this browser has no notifications', true);
+  if (Notification.permission === 'default') await Notification.requestPermission();
+  if (Notification.permission === 'granted') toast('notifications on: you hear when something needs you');
+  else if (Notification.permission === 'denied') toast('notifications are blocked: allow them in the browser’s site settings', true);
+  bell();
+};
+bell();
 
 // ---------------------------------------------------------------- agent panes
 const terms = createTerms({ host: $('#terms'), onLeave: () => $('#list').focus(), onState: () => {} });
@@ -758,7 +1088,7 @@ function togglePanes(mode) {
 
 // ---------------------------------------------------------------- keys
 const HELP = [
-  ['0 1 2 3', 'Overview · Tasks · Plan · Log'],
+  ['0 1 2 3 4', 'Overview · Tasks · Plan · Log · Changes'],
   ['j k ↑ ↓', 'move'],
   ['⏎', 'open: a plan, a task in its plan'],
   ['esc', 'up a level (plan › project › all), or cancel'],
@@ -771,6 +1101,11 @@ const HELP = [
   ['S', 'replace the coordinator (after a checkpoint)'],
   ['c', 'close the plan'],
   ['g', 'go to the agent'],
+  ['L', "a task's live view: its builds, tests, pipelines (⏎ in Tasks)"],
+  ['d', "a task's changes (diff); in Changes: the file's"],
+  ['o', 'open the file · in the live view: output / view'],
+  ['m', 'Markdown: rendered / source'],
+  ['[ ]', 'the live view: other runs'],
   ['t · f', 'hide the terminals · terminals full screen'],
   ['ctrl+]', 'leave a terminal (back to the board)'],
   ['ctrl+⏎', 'send what you wrote'],
@@ -786,7 +1121,8 @@ document.addEventListener('keydown', (e) => {
   const k = e.key;
   const r = selRow();
   const byKey = actionsFor(r).find((a) => a.key === k);
-  if (/^[0-3]$/.test(k)) return setTab(TABS[Number(k)][0]);
+  if (S.viewer) return viewerKey(e);
+  if (/^[0-4]$/.test(k)) return setTab(TABS[Number(k)][0]);
   if (k === 'j' || k === 'ArrowDown') return e.preventDefault(), move(1);
   if (k === 'k' || k === 'ArrowUp') return e.preventDefault(), move(-1);
   if (k === 'Enter') return enter();

@@ -11,7 +11,9 @@ const ATF = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin',
 
 function sandbox({ outline = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-test-'));
-  const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', NO_COLOR: '1', ATF_REGISTRY: path.join(dir, 'registry.json'), HERDR_PLUGIN_CONFIG_DIR: path.join(dir, 'herdr-config'), XDG_CONFIG_HOME: path.join(dir, 'xdg-config') };
+  // ATF_SESSIOND_SOCKET: never the user's own session daemon (a running one would make
+  // `atf spawn` start real agents); the tests that need one start their own
+  const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', NO_COLOR: '1', ATF_REGISTRY: path.join(dir, 'registry.json'), HERDR_PLUGIN_CONFIG_DIR: path.join(dir, 'herdr-config'), XDG_CONFIG_HOME: path.join(dir, 'xdg-config'), ATF_SESSIOND_SOCKET: path.join(dir, 'no-sessiond.sock'), ATF_SESSIONS_STATE_DIR: path.join(dir, 'sessions-state') };
   delete env.ATF_VI_MODE; // the user's own board settings stay out of the tests
   delete env.ATF_DIFF_TOOL; // and their diff viewer (~/.config/atf/config.json, via XDG_CONFIG_HOME above)
   delete env.HERDR_PANE_ID;
@@ -2814,6 +2816,80 @@ test('atf-web: sign-in, overview with what needs you, actions as the human, live
     assert.match(msgs.find((m) => m.ev === 'error' && m.rid === 9)?.message ?? '', /not allowed from the browser: create/);
     assert.match(msgs.filter((m) => m.id === id && (m.ev === 'replay' || m.ev === 'out')).map((m) => m.data).join(''), /got hi/);
     ws.close();
+  } finally {
+    await w.close();
+    try {
+      call({ op: 'shutdown' });
+    } catch {}
+    process.env = saved;
+  }
+});
+
+test('atf-web: live runs, changes without .atf, the file viewer stays in the project, notification texts', async () => {
+  const { dir, env, run } = sandbox(); // coordinator "lead"
+  const git = (...a) => execFileSync('git', a, { cwd: dir, stdio: 'pipe' }).toString();
+  git('init', '-q');
+  git('config', 'user.email', 't@example.com');
+  git('config', 'user.name', 't');
+  fs.writeFileSync(path.join(dir, 'app.js'), 'one\n');
+  git('add', '-A'); // .atf/ included: a project that keeps it in git
+  git('commit', '-qm', 'base');
+  const sub = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
+  run(['add', 'api', '--assign', 'be', '--reviewer', 'human']);
+  run(['start', 'T1'], sub);
+  fs.writeFileSync(path.join(dir, 'app.js'), 'one\ntwo\n');
+  const root = path.join(dir, '.atf');
+  const planId = fs.readFileSync(path.join(root, 'current'), 'utf8').trim();
+  const log = path.join(root, 'plans', planId, 'live', 'runs', 'T1-tests.log');
+  fs.mkdirSync(path.dirname(log), { recursive: true });
+  fs.writeFileSync(log, '[INFO] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0\nERROR boom\n');
+  run(['artifact', 'T1', log, '--kind', 'tests'], sub);
+  run(['review', 'T1', '-m', 'ready'], sub);
+  fs.writeFileSync(path.join(dir, 'secret.txt'), 'outside\n');
+  fs.symlinkSync('/etc/hosts', path.join(dir, 'hosts-link'));
+
+  const sock = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'atfw-')), 'sd.sock');
+  const saved = { ...process.env };
+  Object.assign(process.env, env, { ATF_SESSIOND_SOCKET: sock, ATF_SESSIONS_STATE_DIR: path.join(dir, 'sessions-state'), ATF_ACTOR: '', ATF_ROLE: '' });
+  delete process.env.HERDR_ENV;
+  const { startWebServer } = await import('../adapters/web/server.mjs');
+  const { call } = await import('../src/sessions.mjs');
+  const w = await startWebServer({ port: 0, token: 'tok', supervise: false, pollMs: 150 });
+  const base = `http://127.0.0.1:${w.port}`;
+  const get = async (p) => {
+    const r = await fetch(base + p, { headers: { cookie: 'atf_token=tok' } });
+    return { status: r.status, body: await r.json() };
+  };
+  try {
+    const plan = (await get('/api/overview')).body.projects.find((p) => p.dir === fs.realpathSync(dir)).plans[0];
+    const R = `root=${encodeURIComponent(plan.root)}&plan=${plan.id}`;
+    // what a notification says, and its identity (src/notify.mjs, as herdr's)
+    const review = plan.attention.mine.find((i) => i.kind === 'your-review');
+    assert.equal(review.text, 'T1 waits for your review (api)');
+    assert.match(review.nkey, /\|your-review\|T1\|/);
+
+    // live: the task's recorded runs; a run's output; only the task's own files
+    const live = (await get(`/api/live?${R}&task=T1`)).body;
+    assert.equal(live.runs.length, 1);
+    assert.equal(live.runs[0].kind, 'tests');
+    const out = (await get(`/api/live/run?${R}&task=T1&ref=${encodeURIComponent(live.runs[0].ref)}`)).body;
+    assert.match(out.raw, /ERROR boom/);
+    assert.equal((await get(`/api/live/run?${R}&task=T1&ref=${encodeURIComponent('/etc/hosts')}`)).status, 404, 'not a run of the task');
+
+    // changes: the task's files, ATF's own bookkeeping left out
+    const ch = (await get(`/api/changes?${R}`)).body;
+    const files = ch.tasks.T1.sets.flatMap((s) => s.files.map((f) => f.project));
+    assert.deepEqual(files, ['app.js'], `only the task's files: ${files}`);
+    assert.match((await get(`/api/diff?${R}&task=T1&file=app.js`)).body.text, /\+two/);
+
+    // the file viewer: inside the project only (.. and symlinks out are refused)
+    const f = (await get(`/api/file?root=${encodeURIComponent(plan.root)}&path=app.js`)).body;
+    assert.deepEqual([f.path, f.text, f.binary], ['app.js', 'one\ntwo\n', false]);
+    assert.equal((await get(`/api/file?root=${encodeURIComponent(plan.root)}&path=hosts-link`)).status, 403, 'a symlink out of the project');
+    assert.equal((await get(`/api/file?root=${encodeURIComponent(plan.root)}&path=${encodeURIComponent('../' + path.basename(dir) + '/../')}`)).status, 403);
+    assert.equal((await get(`/api/file?root=${encodeURIComponent('/etc')}&path=hosts`)).status, 404, 'only known projects');
+    // vendored viewer libraries are served
+    for (const v of ['vendor/marked/marked.esm.js', 'vendor/highlight/highlight.min.js', 'viewer.js']) assert.equal((await fetch(`${base}/${v}`, { headers: { cookie: 'atf_token=tok' } })).status, 200, v);
   } finally {
     await w.close();
     try {

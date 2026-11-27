@@ -8,6 +8,11 @@
 //   GET  /api/brief         ?root&plan[&task]   what to know to act on a task / the plan
 //   GET  /api/doc           ?root&plan&doc      a plan document
 //   GET  /api/log           ?root&plan[&n]      the plan's last events
+//   GET  /api/live          ?root&plan&task     a task's runs (builds, tests, pipelines)
+//   GET  /api/live/run      ?root&plan&task&ref[&raw][&item]  one run: its view, output, an item
+//   GET  /api/changes       ?root&plan          files each task changed, with line counts
+//   GET  /api/diff          ?root&plan[&task][&file]  the patch of a task / the plan / a file
+//   GET  /api/file          ?root&path          a file of the project (the file viewer)
 //   POST /api/action        {root, plan, action, task?, message?, status?}  as the human
 //   POST /api/coordinator   {root, plan, fresh?, kind?}  start / resume / replace it
 //   GET  /api/stream        server-sent events: {plans: [key], sessions: bool} on changes
@@ -21,11 +26,13 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { knownRoots, listPlanIds, readEvents, eventsPath } from '../../src/store.mjs';
+import { knownRoots, listPlanIds, readEvents, eventsPath, readConfig } from '../../src/store.mjs';
 import { fold, brief, HUMAN } from '../../src/core.mjs';
 import { attentionOf } from '../../src/attention.mjs';
 import { humanAction, ACTIONS } from '../../src/actions.mjs';
-import { liveDir } from '../../src/live.mjs';
+import { liveDir, activeRuns, taskLive, liveBadge, liveView, liveItem, hasView, hasItem, readTail, earlierText, loadLiveKinds, enableAutoRefresh } from '../../src/live.mjs';
+import { planChanges, changeMode, levelSets, totals, onlyFile, patchText, projectPath } from '../../src/changes.mjs';
+import { keyOf, describe } from '../../src/notify.mjs';
 import { userConfigDir } from '../../src/config.mjs';
 import { sessionsBackend, sessionsLiveness, sessionAgent, socketPath, ensureDaemon, connect } from '../../src/sessions.mjs';
 import { startSupervisor } from '../../src/supervisor.mjs';
@@ -58,6 +65,52 @@ const real = (p) => {
   }
 };
 const strip = ({ st, ...rest }) => rest; // attention items carry their plan; the client has it
+/** An item that needs the human, with what a notification says and its identity. */
+const said = (it) => ({ ...strip(it), text: describe(it), nkey: keyOf(it) });
+
+/** Per task with something live: what runs or waits now, else a failed run ({glyph, text, color}). */
+function liveBadges(root, id, st) {
+  const runs = activeRuns(root, id);
+  const out = {};
+  for (const tid of st.order) {
+    const t = st.tasks[tid];
+    if (t.children.length || ['todo', 'cancelled'].includes(t.status)) continue;
+    const b = liveBadge(taskLive(t, runs));
+    if (b) out[tid] = b;
+  }
+  return out;
+}
+
+/** A run or artifact for the client: what the list and the view's head show. */
+const runOut = (x) => ({
+  ref: x.out || x.ref,
+  kind: x.kind,
+  cmd: x.cmd ?? null,
+  cwd: x.cwd ?? null,
+  since: x.since ?? null,
+  ts: x.ts ?? null,
+  exit: x.exit ?? null,
+  duration_ms: x.duration_ms ?? null,
+  active: !!x.active,
+  waiting: !!x.waiting,
+  approval: !!x.approval,
+  live: !!x.live,
+  superseded: !!x.superseded,
+  actor: x.actor ?? null,
+  description: x.description ?? null,
+  summary: { state: x.summary.state, line: x.summary.line, counts: x.summary.counts, mtime: x.summary.mtime ?? null },
+  view: hasView(x.kind),
+  items: hasItem(x.kind),
+});
+/** The runs of a task, in the order the board's live view goes through them. */
+function liveRunsOf(root, id, st, task) {
+  const t = st.tasks[task];
+  if (!t) throw Object.assign(new Error(`unknown task ${task}`), { status: 404 });
+  const live = taskLive(t, activeRuns(root, id));
+  return { live, runs: [...live.now.filter((n) => n.waiting), ...live.now.filter((n) => !n.waiting), ...live.recorded] };
+}
+const ANSI = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+const MAX_FILE = 2 << 20; // the file viewer shows at most this much of a file
 
 /**
  * Start the server. Returns {server, url, port, close()}. Options: port (0: any free),
@@ -66,6 +119,10 @@ const strip = ({ st, ...rest }) => rest; // attention items carry their plan; th
 export async function startWebServer({ port = 7420, host = '127.0.0.1', token = webToken(), supervise = true, pollMs = 1000, log = () => {} } = {}) {
   const socket = socketPath();
   ensureDaemon(socket);
+  // live kinds from plugins (docs/live-plugins.md); their refresh (e.g. a CI API) runs in
+  // the background for what is looked at
+  enableAutoRefresh();
+  await loadLiveKinds().catch((e) => log(`live plugins: ${e.message}`));
   const backend = sessionsBackend({ socket });
 
   // ---------- sessions: one connection, a current list ----------
@@ -144,7 +201,8 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
       id,
       st,
       open,
-      attention: { mine: att.mine.map(strip), queued: att.queued.map(strip), todos: att.todos.map(strip) },
+      attention: { mine: att.mine.map(said), queued: att.queued.map(strip), todos: att.todos.map(said) },
+      live: open ? liveBadges(root, id, st) : {},
       coordinator: { id: att.coord.id, live: att.coord.live, away: att.coord.away },
       agents: agentsOf(root, id),
     };
@@ -172,6 +230,45 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
     return r;
   };
 
+  // ---------- changes (git): per plan, again when it changed or after a while ----------
+  const changesCache = new Map(); // key -> {seq, at, promise}
+  function changesOf(root, id) {
+    const key = `${root}#${id}`;
+    const st = plan(root, id);
+    const hit = changesCache.get(key);
+    // the working tree changes without events (an agent edits): at most 10 s old
+    if (hit && hit.seq === st.last_seq && Date.now() - hit.at < 10_000) return hit.promise;
+    const promise = planChanges(path.dirname(root), st, { mode: changeMode(readConfig(root)) });
+    changesCache.set(key, { seq: st.last_seq, at: Date.now(), promise });
+    promise.catch(() => changesCache.delete(key));
+    return promise;
+  }
+
+  /** A file inside the project, for the file viewer: never outside it (symlinks resolved). */
+  function readProjectFile(root, rel) {
+    if (!rel) throw Object.assign(new Error('which file?'), { status: 400 });
+    const dir = real(path.dirname(root));
+    let file;
+    try {
+      file = fs.realpathSync(path.resolve(dir, rel));
+    } catch {
+      throw Object.assign(new Error(`no file ${rel}`), { status: 404 });
+    }
+    if (file !== dir && !file.startsWith(dir + path.sep)) throw Object.assign(new Error('outside the project'), { status: 403 });
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) throw Object.assign(new Error(`${rel} is not a file`), { status: 400 });
+    const out = { path: path.relative(dir, file), size: stat.size, mtime: stat.mtimeMs, truncated: stat.size > MAX_FILE };
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(Math.min(stat.size, MAX_FILE));
+      fs.readSync(fd, buf, 0, buf.length, 0);
+      if (buf.subarray(0, 8192).includes(0)) return { ...out, binary: true, text: null };
+      return { ...out, binary: false, text: buf.toString('utf8') };
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
   // ---------- change detection, server-sent events ----------
   const streams = new Set();
   let lastSigs = new Map();
@@ -179,6 +276,12 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
   const liveSig = (root, id) => {
     const d = liveDir(root, id);
     const parts = [];
+    // what running commands write (a build's progress changes the task's badge)
+    for (const r of activeRuns(root, id)) {
+      try {
+        parts.push(`${r.out}:${fs.statSync(r.out).size}`);
+      } catch {}
+    }
     for (const sub of ['', 'status']) {
       try {
         for (const f of fs.readdirSync(path.join(d, sub))) if (f.endsWith('.json')) parts.push(`${sub}/${f}:${fs.statSync(path.join(d, sub, f)).mtimeMs}`);
@@ -283,6 +386,45 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
         const evs = readEvents(root, q.plan);
         const n = Math.min(Number(q.n) || 400, 5000);
         return json(res, 200, { total: evs.length, events: evs.slice(-n) });
+      }
+      case 'GET /api/live': {
+        const root = known(q.root, q.plan);
+        const { live, runs } = liveRunsOf(root, q.plan, plan(root, q.plan), q.task);
+        return json(res, 200, { runs: runs.map(runOut), earlier: live.earlier.map(runOut), earlierText: earlierText(live) });
+      }
+      case 'GET /api/live/run': {
+        // only runs ATF recorded for the task: the view reads their files, nothing else
+        const root = known(q.root, q.plan);
+        const st = plan(root, q.plan);
+        const { live, runs } = liveRunsOf(root, q.plan, st, q.task);
+        const x = [...runs, ...live.earlier].find((y) => (y.out || y.ref) === q.ref);
+        if (!x) return json(res, 404, { error: 'no such run on this task (it may have ended: reload the list)' });
+        const out = { run: runOut(x) };
+        if (q.item != null) out.item = liveItem(x, x.summary, q.item, { width: 140 }) || [[['(no details for this item)', 'dim']]];
+        else if (q.raw != null || !hasView(x.kind)) {
+          const file = x.out || x.ref;
+          const text = readTail(file, 512 << 10);
+          out.raw = text == null ? null : text.replace(ANSI, '').replace(/\r(?!\n)/g, '\n');
+        } else out.lines = liveView(x, x.summary, { width: 140, full: true, active: !!x.active }).map((l) => ({ segs: [...l], section: l.section ?? null, folded: !!l.folded, item: l.item ?? null }));
+        return json(res, 200, out);
+      }
+      case 'GET /api/changes': {
+        const root = known(q.root, q.plan);
+        const c = await changesOf(root, q.plan);
+        const sets = (list) => list.map((x) => ({ repo: x.repo, rel: x.rel, branch: x.branch ?? null, live: !!x.live && !x.target, files: x.files.map((f) => ({ ...f, project: projectPath(x, f) })) }));
+        const per = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { sets: sets(v), totals: totals(v) }]));
+        return json(res, 200, { mode: c.mode, tasks: per(c.tasks), groups: per(c.groups), plan: { sets: sets(c.plan), totals: totals(c.plan) } });
+      }
+      case 'GET /api/diff': {
+        const root = known(q.root, q.plan);
+        const c = await changesOf(root, q.plan);
+        let sets = levelSets(c, q.task || null);
+        if (q.file) sets = onlyFile(sets, path.dirname(root), q.file);
+        return json(res, 200, { text: sets.length ? await patchText(sets) : '' });
+      }
+      case 'GET /api/file': {
+        const root = known(q.root);
+        return json(res, 200, readProjectFile(root, q.path));
       }
       case 'GET /api/doc': {
         const root = known(q.root, q.plan);
