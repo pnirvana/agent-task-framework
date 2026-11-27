@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATF · sessions (spike)</title>
+<link rel="stylesheet" href="vendor/xterm/xterm.css">
+<link rel="stylesheet" href="theme-macchiato.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<aside id="side">
+  <header>
+    <span class="brand">atf</span>
+    <span id="conn" class="conn" title="connection to the devpod">●</span>
+  </header>
+  <div class="section">Sessions</div>
+  <ul id="sessions"></ul>
+  <form id="new">
+    <div class="section">New session</div>
+    <label>Name <input name="name" placeholder="coordinator" autocomplete="off"></label>
+    <label>Folder <input name="cwd" placeholder="~/project" autocomplete="off"></label>
+    <label>Command <input name="cmd" placeholder="copilot" autocomplete="off"></label>
+    <div class="presets">
+      <button type="button" data-cmd="copilot">copilot</button>
+      <button type="button" data-cmd="pi">pi</button>
+      <button type="button" data-cmd="opencode">opencode</button>
+      <button type="button" data-cmd="$SHELL -l">shell</button>
+    </div>
+    <button type="submit" class="primary">Start</button>
+  </form>
+</aside>
+<main>
+  <nav id="tabs"></nav>
+  <div id="terms"><div id="empty">Start a session or pick one on the left.</div></div>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
