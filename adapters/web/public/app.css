@@ -19,7 +19,7 @@ a:hover { color: var(--sky); }
 /* ---------- sidebar ---------- */
 #side { background: var(--bg-side); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
 #side > header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--line); }
-.brand { background: none; border: 0; padding: 0; font-weight: 700; color: var(--accent); letter-spacing: .04em; }
+.brand { background: none; border: 0; padding: 0; font-weight: 700; color: var(--accent); white-space: nowrap; }
 .conn { color: var(--err); font-size: 11px; }
 .conn.up { color: var(--ok); }
 #tree { overflow: auto; padding: 6px 0 12px; flex: 1; }
