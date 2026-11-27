@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
 import { TERMINAL, driverInbox, planSummary, HUMAN, keepsCriteria } from '../../../src/core.mjs';
-import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, transact, resolveActor, readConfig, findRoot, initRoot, knownRoots, projectName, reviewEvents, hasLiveWaiter } from '../../../src/store.mjs';
+import { listPlanIds, loadPlan, readEvents, getCurrentPlan, eventsPath, readConfig, findRoot, initRoot, knownRoots, projectName, hasLiveWaiter } from '../../../src/store.mjs';
 import { herdrAsync, herdrText, agentIndex, inHerdr, sameServer, discoverRoots, registerBoardProcess, claimNavKeys, inProject, pluginConfig, focusPane, pluginStateDir } from './herdr.mjs';
 import { progressText } from './sync.mjs';
 import { textField, keyField, fieldText, fieldRows, fieldMode } from './textfield.mjs';
@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { planChanges, levelSets, totals, projectPath, changeMode, diffTool } from '../../../src/changes.mjs';
 import { notifyTick } from './notify.mjs';
 import { leftoverPane } from './launch.mjs';
+import { humanAction, humanActor } from '../../../src/actions.mjs';
 import { liveAgent as liveAgentOf, agentFor as agentForOf, coordinatorOf as coordinatorOfPlan, inboxOf as inboxOfPlan, attentionOf as attentionOfPlan, elsewhere } from './attention.mjs';
 const ATF_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../bin/atf.mjs');
 
@@ -103,7 +104,7 @@ export function runBoard(opts) {
 
 // The board is the human's: it writes as the actor "human", never under the user's name,
 // which a coordinator started by hand uses too (its waits would skip "its own" writes).
-const humanActor = () => resolveActor({ id: HUMAN, role: 'human' });
+// (src/actions.mjs humanActor; its actions are the web UI's too)
 
 const TABS = [
   ['overview', 'Overview'],
@@ -1592,12 +1593,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       return flash(`close plan "${r.st.title}"${open ? ` (${open} task${open === 1 ? '' : 's'} still open!)` : ''}? press c again`, open ? 'red' : 'yellow');
     }
     ui.confirm = null;
-    try {
-      transact(r.root, r.plan, humanActor(), () => [{ type: 'plan.status', data: { status: 'completed', message: 'closed via board' } }]);
-      flash(`closed "${r.st.title}"${ui.showClosed ? '' : ' (f shows closed plans)'}`, 'green');
-    } catch (e) {
-      flash(e.message, 'red');
-    }
+    act(r, 'close-plan', { message: 'closed via board' }, ui.showClosed ? '' : ' (f shows closed plans)');
   }
 
   function helpLines() {
@@ -2129,10 +2125,11 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   }
 
   // ---------- acting: sent at once; the human's words go to the coordinator ----------
-  function writeAsHuman(r, events, ok) {
+  /** One of the human's actions (src/actions.mjs, the same as the web UI's), with its outcome flashed. */
+  function act(r, action, opts = {}, more = '') {
     try {
-      transact(r.root, r.plan, me, () => events);
-      flash(ok, 'green');
+      const res = humanAction(r.root, r.plan, action, opts, me);
+      flash(res.message + (res.ok ? more : ''), res.ok ? 'green' : 'red');
     } catch (e) {
       flash(e.message, 'red');
     }
@@ -2142,19 +2139,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   function reviewNow(action, message = '') {
     const r = selectedTask();
     if (!r) return flash('select a task');
-    const t = r.st.tasks[r.task];
-    if (action === 'approve' && t.status !== 'review') return flash(`${t.id} is not in review`);
-    try {
-      let res;
-      transact(r.root, r.plan, me, (st) => {
-        res = reviewEvents(st, [{ task: r.task, action, message }], me);
-        return res.events;
-      });
-      if (res.refused.length) return flash(`not sent: ${res.refused[0].why}`, 'red');
-      flash(action === 'approve' ? `approved ${t.id}: done` : `change request for ${t.id} sent to the coordinator (it decides what happens)`, 'green');
-    } catch (e) {
-      flash(e.message, 'red');
-    }
+    act(r, action === 'approve' ? 'approve' : 'changes', { task: r.task, message });
   }
 
   /** a on a task of the human's own: done, with an optional note (what they did, a ticket). */
@@ -2165,12 +2150,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       value: '',
       hint: '⏎ done',
       multiline: true,
-      onSubmit: (text) => {
-        const evs = [];
-        if (t.status === 'todo' || t.status === 'blocked') evs.push({ type: 'task.status', task: t.id, data: { status: 'in_progress' } });
-        evs.push({ type: 'task.status', task: t.id, data: { status: 'done', message: text.trim() || 'done' } });
-        writeAsHuman({ root: r.root, plan: r.plan, st: r.st }, evs, `${t.id} done${t.id && r.st.order.some((x) => r.st.tasks[x].waiting_on?.includes(t.id)) ? ': what waited on it can start' : ''}`);
-      },
+      onSubmit: (text) => act(r, 'finish', { task: t.id, message: text }),
     };
   }
 
@@ -2205,7 +2185,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       value: '',
       hint: '⏎ send',
       multiline: true,
-      onSubmit: (text) => text.trim() && writeAsHuman(pr, [{ type: 'plan.note', data: { message: text.trim(), kind: 'info' } }], `sent to the coordinator of "${pr.st.title}"`),
+      onSubmit: (text) => text.trim() && act(pr, 'plan-note', { message: text }),
     };
   }
 
@@ -2250,7 +2230,7 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
       value: '',
       hint: '⏎ send', multiline: true,
       // v2: the coordinator reads it and decides (starts an agent with its instructions, …)
-      onSubmit: (text) => text.trim() && writeAsHuman(tr, [{ type: 'task.note', task: t.id, data: { message: text.trim(), kind: 'info' } }], `${question ? 'answer' : 'message'} on ${t.id} sent to the coordinator`),
+      onSubmit: (text) => text.trim() && act(tr, 'note', { task: t.id, message: text }),
     };
   }
 

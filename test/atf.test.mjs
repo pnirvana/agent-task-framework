@@ -2566,3 +2566,43 @@ test('atf spawn / coordinate: started by the backend that runs agents here, argu
   assert.match(atf(['coordinate', '--dry-run'], { HERDR_ENV: '1' }), /coordinator lead: would start fresh/);
   assert.throws(() => atf(['spawn', 'T1'], { ATF_BACKEND: 'nope' }), (e) => /unknown backend "nope"/.test(e.stderr.toString()));
 });
+
+test('human actions (src/actions.mjs): what the board and the web UI write', async () => {
+  const { dir, run } = sandbox(); // coordinator "lead"
+  const sub = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };
+  run(['add', 'api', '--assign', 'be', '--reviewer', 'human']); // T1: the human reviews it
+  run(['add', 'schema', '--assign', 'be']); // T2: a question for the human
+  run(['add', 'request access', '--assign', 'human']); // T3: the human's own task
+  run(['add', 'deploy', '--dep', 'T3']); // T4 waits on it
+  run(['start', 'T1'], sub);
+  run(['review', 'T1', '-m', 'ready'], sub);
+  run(['start', 'T2'], sub);
+  run(['block', 'T2', '-m', 'SQLite?'], sub);
+  run(['block', 'T2', '--for', 'human', '-m', 'SQLite or Postgres?']);
+  const { humanAction } = await import('../src/actions.mjs');
+  const root = path.join(dir, '.atf');
+  const planId = fs.readFileSync(path.join(root, 'current'), 'utf8').trim();
+  const show = (id) => run(['show', id]);
+  const saved = { ...process.env };
+  Object.assign(process.env, { ATF_ACTOR: '', ATF_ROLE: '', ATF_REGISTRY: path.join(dir, 'registry.json') });
+  try {
+    assert.equal(humanAction(root, planId, 'approve', { task: 'T2' }).ok, false, 'only a task in review is approved');
+    assert.equal(humanAction(root, planId, 'approve', { task: 'T1', message: 'nice' }).message, 'approved T1: done');
+    assert.equal(show('T1').status, 'done');
+    // an answer is a note by the human for the coordinator; the task stays blocked
+    assert.match(humanAction(root, planId, 'note', { task: 'T2', message: 'SQLite' }).message, /answer on T2 sent to the coordinator/);
+    assert.equal(show('T2').status, 'blocked');
+    assert.ok(show('T2').notes.some((n) => n.actor === 'human' && n.message === 'SQLite'));
+    // the human's own task: done, and what waited on it can start
+    assert.match(humanAction(root, planId, 'finish', { task: 'T3', message: 'ticket 42' }).message, /T3 done: what waited on it can start/);
+    assert.equal(show('T4').ready, true);
+    assert.equal(humanAction(root, planId, 'changes', { task: 'T1' }).ok, false, 'a change request needs words');
+    assert.ok(humanAction(root, planId, 'plan-note', { message: 'demo only' }).ok);
+    assert.ok(humanAction(root, planId, 'close-plan', {}).ok);
+    assert.equal(humanAction(root, planId, 'close-plan', {}).ok, false, 'already closed');
+    const evs = fs.readFileSync(path.join(root, 'plans', planId, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(evs.slice(-7).every((e) => e.actor.id === 'human' && e.actor.role === 'human'), 'all written as the human');
+  } finally {
+    process.env = saved;
+  }
+});
