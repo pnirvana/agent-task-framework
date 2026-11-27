@@ -12,6 +12,7 @@ import { activeRuns, taskLive, liveBadge, elapsed, readTail, earlierText, liveVi
 import { fileURLToPath } from 'node:url';
 import { planChanges, levelSets, totals, projectPath, changeMode, diffTool } from '../../../src/changes.mjs';
 import { notifyTick } from './notify.mjs';
+import { leftoverPane } from './launch.mjs';
 import { liveAgent as liveAgentOf, agentFor as agentForOf, coordinatorOf as coordinatorOfPlan, inboxOf as inboxOfPlan, attentionOf as attentionOfPlan, elsewhere } from './attention.mjs';
 const ATF_CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../bin/atf.mjs');
 
@@ -161,8 +162,8 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
   const view = () => ui.overlay || ui.tab;
   const multi = () => ui.scope.level !== 'plan';
 
-  function flash(msg, style = 'yellow') {
-    ui.flash = { msg, style, until: Date.now() + 4000 };
+  function flash(msg, style = 'yellow', ms = 4000) {
+    ui.flash = { msg, style, until: Date.now() + ms };
     draw();
   }
 
@@ -2747,13 +2748,29 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     if (!spawnCmd || !inHerdr()) return flash('starting a coordinator needs herdr');
     const key = keyOf(target.root, target.plan);
     const running = !!coordinatorOf(target.st).live;
-    if (fresh && !(ui.confirm?.action === 'fresh' && ui.confirm.key === key && ui.confirm.until > Date.now())) {
+    const asked = (a) => ui.confirm?.action === a && ui.confirm.key === key && ui.confirm.until > Date.now();
+    if (asked('reuse')) fresh = ui.confirm.fresh; // the answer to the question below (s / S / n)
+    if (fresh && !asked('fresh') && !asked('reuse')) {
       ui.confirm = { action: 'fresh', key, until: Date.now() + 3000 };
       return flash(running ? `replace the running coordinator of "${target.st.title}" with a fresh session (it writes a checkpoint first)? press S again` : `start a fresh coordinator session for "${target.st.title}"? press S again`, 'yellow');
     }
+    // its old shell is still open (the human quit the agent): close it only when they say so
+    let reuse = false;
+    if (!running && asked('reuse')) reuse = ui.confirm.answer;
+    else if (!running) {
+      let shell = null;
+      try {
+        shell = leftoverPane(target.root, target.plan);
+      } catch {}
+      if (shell) {
+        // a question that stays until it is answered (onKey)
+        ui.confirm = { action: 'reuse', key, until: Infinity, fresh, target, answer: true };
+        return flash(`the coordinator's old shell (pane ${shell}) is still open. Close it and start the coordinator there? y / ⏎ yes · n no, keep it (new tab) · esc cancel`, 'yellow', Infinity);
+      }
+    }
     ui.confirm = null;
     flash(fresh ? (running ? 'asking the coordinator for a checkpoint, then starting a fresh one…' : 'starting a fresh coordinator…') : 'starting the coordinator…', 'blue');
-    const args = [...spawnCmd, 'coordinate', '--plan', target.plan, '--root', target.root, ...(fresh ? ['--fresh'] : [])];
+    const args = [...spawnCmd, 'coordinate', '--plan', target.plan, '--root', target.root, ...(fresh ? ['--fresh'] : []), ...(reuse ? ['--reuse-pane'] : [])];
     const p = spawn(args[0], args.slice(1), { env: { ...process.env, ATF_DIR: target.root }, stdio: ['ignore', 'pipe', 'pipe'] });
     let buf = '';
     p.stdout.on('data', (d) => (buf += d));
@@ -2880,6 +2897,17 @@ function runMain({ root: initialRoot, popup = false, targetPane = null, spawnCmd
     const v = view();
     if (k === '\x03') return quit();
     if (ui.picker) return pickerKey(k);
+    // the answer to "close the coordinator's old shell?": y / ⏎ / s yes, n no (a new tab), else cancel
+    if (!ui.input && ui.confirm?.action === 'reuse') {
+      const c = ui.confirm;
+      ui.flash = null;
+      if (['y', 'n', 's', 'S', '\r'].includes(k)) {
+        c.answer = k !== 'n';
+        return startCoordinator(c.fresh, c.target);
+      }
+      ui.confirm = null;
+      return flash('cancelled');
+    }
     // bracketed paste: a pasted text arrives between these, its line breaks are text
     if (k === '\x1b[200~') return void (ui.pasting = true);
     if (k === '\x1b[201~') return ((ui.pasting = false), ui.input && draw());

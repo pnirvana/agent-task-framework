@@ -105,6 +105,14 @@ A second plan in the same folder gets its own coordinator tab there (`s`).
 
 A coordinator keeps its agent definition: `s` and a restore start it with the same one.
 
+`s` (or `atf-herdr coordinate`) starts a coordinator in its plan's workspace: where it
+ran last, else a workspace named after the project's folder. When that workspace is
+gone (you closed it), it creates it again, with the coordinator's tab and the board, so
+a plan you closed comes back with one key. A restore never reopens what you closed.
+If you quit the coordinator and its shell is still open, the board asks first, until
+you answer: `y` (or ⏎) closes that shell and starts the coordinator in its place, `n`
+keeps it and starts the coordinator in a new tab, esc cancels (`atf-herdr coordinate --reuse-pane` does the first).
+
 ### After a restart
 
 herdr restores workspaces, tabs and panes with their names, and resumes pi in its last

@@ -903,6 +903,55 @@ test('herdr restore: after a restart the coordinator is relaunched in place, sta
     process.env = saved;
   }
 });
+test('herdr coordinate: in the plan workspace while it exists, else a new one for the project', async () => {
+  const { dir } = sandbox(); // coordinator "lead"
+  const root = path.join(dir, '.atf');
+  const { getCurrentPlan } = await import('../src/store.mjs');
+  const planId = getCurrentPlan(root);
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-state-'));
+  const calls = path.join(state, 'calls.log');
+  const fake = path.join(state, 'herdr');
+  const j = (x) => JSON.stringify({ result: x });
+  const script = (panes) =>
+    `#!/bin/sh\necho "$@" >> '${calls}'\ncase "$1 $2" in\n  "pane list") echo '${j({ panes })}';;\n  "workspace list") echo '${j({ workspaces: [{ workspace_id: 'w3', label: path.basename(dir) }] })}';;\n  "workspace create") echo '${j({ workspace: { workspace_id: 'w8' }, tab: { tab_id: 'w8:t1' }, root_pane: { pane_id: 'w8:p1' } })}';;\n  "tab create") echo '${j({ tab: { tab_id: 'w3:t2' }, root_pane: { pane_id: 'w3:p5' } })}';;\n  "pane split") echo '${j({ pane: { pane_id: 'w8:p2' } })}';;\n  "agent get") echo '{"result":{}}';;\n  *) echo '{"result":{}}';;\nesac\n`;
+  const saved = { ...process.env };
+  Object.assign(process.env, { HERDR_BIN_PATH: fake, HERDR_PLUGIN_STATE_DIR: state, ATF_REGISTRY: path.join(dir, 'registry.json'), HERDR_PLUGIN_CONFIG_DIR: path.join(state, 'cfg') });
+  delete process.env.HERDR_SOCKET_PATH;
+  delete process.env.HERDR_WORKSPACE_ID;
+  try {
+    const { launchCoordinator } = await import('../adapters/herdr/lib/launch.mjs');
+    // the project's workspace (named after its folder, a pane working in it): a tab there
+    fs.writeFileSync(fake, script([{ pane_id: 'w3:p1', workspace_id: 'w3', cwd: dir }]), { mode: 0o755 });
+    assert.equal(launchCoordinator({ root, planId }).created, null);
+    assert.match(fs.readFileSync(calls, 'utf8'), /tab create --workspace w3 /);
+    // closed: a workspace of its own again, named after the folder
+    fs.writeFileSync(calls, '');
+    fs.writeFileSync(fake, script([{ pane_id: 'w1:p1', workspace_id: 'w1', cwd: os.tmpdir() }]), { mode: 0o755 });
+    const r = launchCoordinator({ root, planId });
+    const log = fs.readFileSync(calls, 'utf8');
+    assert.match(log, new RegExp(`workspace create --cwd ${dir} --label ${path.basename(dir)} --focus`));
+    assert.match(log, /tab rename w8:t1 plan: Test plan/);
+    assert.deepEqual([r.pane, r.created?.tab], ['w8:p1', 'w8:t1']);
+    // the human quit it, its shell stayed: closed only when asked to (the board asks first)
+    fs.writeFileSync(fake, script([{ pane_id: 'w8:p1', workspace_id: 'w8', cwd: dir, label: 'lead' }]), { mode: 0o755 });
+    fs.writeFileSync(calls, '');
+    const kept = launchCoordinator({ root, planId });
+    assert.equal(kept.leftover, 'w8:p1');
+    assert.doesNotMatch(fs.readFileSync(calls, 'utf8'), /pane close w8:p1/);
+    fs.writeFileSync(fake, script([{ pane_id: 'w8:p1', workspace_id: 'w8', cwd: dir, label: 'lead' }]), { mode: 0o755 });
+    const reg = JSON.parse(fs.readFileSync(path.join(state, 'agents.json'), 'utf8'));
+    for (const v of Object.values(reg)) if (v.actor === 'lead') v.pane = 'w8:p1'; // as before the second start
+    fs.writeFileSync(path.join(state, 'agents.json'), JSON.stringify(reg));
+    fs.writeFileSync(calls, '');
+    const reused = launchCoordinator({ root, planId, reusePane: true });
+    const log2 = fs.readFileSync(calls, 'utf8');
+    assert.match(log2, /pane split --pane w8:p1 /);
+    assert.match(log2, /pane close w8:p1/);
+    assert.deepEqual([reused.pane, reused.leftover], ['w8:p2', null]);
+  } finally {
+    process.env = saved;
+  }
+});
 test('herdr notifications: once per item that needs the human; terminal toast, bell and progress mark', async () => {
   const { dir, run } = sandbox(); // coordinator "lead"
   const sub = { ATF_ACTOR: 'be', ATF_ROLE: 'subagent' };

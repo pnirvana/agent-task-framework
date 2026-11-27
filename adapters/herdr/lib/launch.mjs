@@ -263,7 +263,7 @@ const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0
  * coordinator that is still running is first asked for a plan checkpoint, then replaced.
  * Returns {name, pane, mode}; mode 'running' if one runs already (nothing started).
  */
-export function launchCoordinator({ root, planId, fresh = false, kind, agent, handoffMs = 180_000, say = () => {}, dryRun = false, workspace: inWorkspace = null, inPlaceOf = null, prompt = null }) {
+export function launchCoordinator({ root, planId, fresh = false, kind, agent, handoffMs = 180_000, say = () => {}, dryRun = false, workspace: inWorkspace = null, inPlaceOf = null, prompt = null, reusePane = false }) {
   const s = loadPlan(root, planId);
   const name = s.coordinator || resolveActor().id;
   const prev = readRegistry()[regKey(root, name)];
@@ -277,9 +277,15 @@ export function launchCoordinator({ root, planId, fresh = false, kind, agent, ha
   let running = actor && sameServer(actor) ? liveAgentOf(s, actor, live, livePane) : live.get(name) || null;
   // the pane it replaces: herdr restored a bare agent there, under the coordinator's name
   if (inPlaceOf && running?.pane_id === inPlaceOf) running = null;
+  // the shell left where it ran before (the human quit the agent): it starts there, when
+  // asked to (the human confirmed closing that pane)
+  const leftover = running || inPlaceOf ? null : leftoverPane(root, planId);
+  if (leftover && reusePane) inPlaceOf = leftover;
   const mode = !fresh && s.session?.ref && kindCfg.resume ? 'resume' : 'fresh';
-  if (dryRun) return { name, pane: running?.pane_id ?? null, mode: running && !fresh ? 'running' : mode, session: mode === 'resume' ? s.session.ref : null };
-  let workspace = inWorkspace || (actor && sameServer(actor) && actor.ctx?.herdr_workspace) || process.env.HERDR_WORKSPACE_ID || null;
+  if (dryRun) return { name, pane: running?.pane_id ?? null, mode: running && !fresh ? 'running' : mode, session: mode === 'resume' ? s.session.ref : null, leftover };
+  // the plan's workspace: where it was given, else where its coordinator last ran, else a
+  // new one for the project (its workspace was closed, or it never had one)
+  let workspace = inWorkspace || (inPlaceOf ? null : planWorkspace(root, [prev?.plan === planId && prev.workspace, actor && sameServer(actor) && actor.ctx?.herdr_workspace]));
   if (running) {
     if (!fresh) return { name, pane: running.pane_id, mode: 'running' };
     workspace = running.workspace_id || workspace;
@@ -301,7 +307,8 @@ export function launchCoordinator({ root, planId, fresh = false, kind, agent, ha
   const env = { ATF_DIR: root, ATF_PLAN: planId, ATF_ACTOR: name, ATF_ROLE: 'coordinator', ATF_HARNESS: 'herdr', PATH: `${ATF_BIN}:${process.env.PATH}`, ...kindEnv(kindCfg) };
   // a harness whose wake extension cannot set the agent's env (Copilot): the arm file is set here
   if (kindCfg.wakeEnv) env.ATF_WAKE = path.join(stateDir(), `wake-${planId}.json`);
-  const pane = coordinatorPane({ env, cwd: path.dirname(root), workspace, inPlaceOf, label: `plan: ${s.title}` });
+  const created = !workspace && !inPlaceOf;
+  const { pane, tab } = coordinatorPane({ env, cwd: path.dirname(root), workspace, inPlaceOf, label: `plan: ${s.title}`, newWorkspace: created ? path.basename(path.dirname(root)) : null });
   // herdr agent names are unique per server: another project may have a "coordinator"
   const hname = herdr(['agent', 'get', name])?.agent ? `${name}-${s.id.slice(-4)}` : name;
   const session = mode === 'resume' ? s.session.ref : '';
@@ -317,7 +324,34 @@ export function launchCoordinator({ root, planId, fresh = false, kind, agent, ha
   // the plan's session: what `s` on the board resumes next time
   const ref = herdr(['agent', 'get', pane])?.agent?.agent_session?.value || (kindArgs.includes('{newsession}') ? newSession : null);
   if (ref && ref !== s.session?.ref) transact(root, planId, { id: 'atf-herdr', role: 'launcher', harness: 'herdr' }, () => [{ type: 'plan.session', data: { ref, kind, actor: name } }]);
-  return { name, hname, pane, mode };
+  return { name, hname, pane, mode, created: created ? { workspace: paneWorkspace(pane), tab } : null, leftover: inPlaceOf === leftover ? null : leftover };
+}
+
+/**
+ * The pane a plan's coordinator last ran in, when it is now a bare shell (the human quit
+ * the agent, the pane stayed): still named after it, nothing running. Null otherwise.
+ */
+export function leftoverPane(root, planId) {
+  const s = loadPlan(root, planId);
+  const name = s.coordinator || resolveActor().id;
+  const prev = readRegistry()[regKey(root, name)];
+  if (prev?.plan !== planId || !prev.pane || (prev.socket && prev.socket !== currentSocket())) return null;
+  const p = (herdr(['pane', 'list'])?.panes || []).find((x) => x.pane_id === prev.pane);
+  return p && !p.agent && p.label === name ? p.pane_id : null;
+}
+
+/**
+ * The first of `candidates` (workspace ids) that still exists and still works in the
+ * project (herdr may give a closed workspace's id to a new one), else a workspace named
+ * after the project's folder; null when there is none.
+ */
+function planWorkspace(root, candidates) {
+  const dir = path.dirname(root);
+  const inDir = (p) => [p.foreground_cwd, p.cwd].some((c) => c && (c === dir || c.startsWith(dir + path.sep)));
+  const panes = herdr(['pane', 'list'])?.panes || [];
+  for (const ws of candidates.filter(Boolean)) if (panes.some((p) => p.workspace_id === ws && inDir(p))) return ws;
+  const named = (herdr(['workspace', 'list'])?.workspaces || []).find((w) => w.label === path.basename(dir) && panes.some((p) => p.workspace_id === w.workspace_id && inDir(p)));
+  return named?.workspace_id ?? null;
 }
 
 const withoutSkill = (list) => (skillInstalled() ? list.filter((a, i) => a !== '{skill}' && list[i + 1] !== '{skill}') : list);
@@ -338,19 +372,27 @@ function agentDefArgs(agent, kind, cwd) {
  * pane, e.g. one herdr restored with a bare agent in it: split off it with the
  * coordinator's environment, then that pane is closed, so the layout stays as it was.
  */
-function coordinatorPane({ env, cwd, workspace, inPlaceOf, label }) {
+function coordinatorPane({ env, cwd, workspace, inPlaceOf, label, newWorkspace = null }) {
   const envArgs = Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]);
   if (inPlaceOf) {
     const pane = herdr(['pane', 'split', '--pane', inPlaceOf, '--direction', 'right', '--cwd', cwd, '--no-focus', ...envArgs])?.pane?.pane_id;
     if (pane) {
       herdr(['pane', 'close', inPlaceOf]);
-      return pane;
+      return { pane, tab: null };
     }
+  }
+  if (newWorkspace) {
+    // a workspace of its own (as atf-herdr new makes): named after the project's folder
+    const ws = herdr(['workspace', 'create', '--cwd', cwd, '--label', newWorkspace, '--focus', ...envArgs]);
+    const pane = ws?.root_pane?.pane_id;
+    if (!pane) throw new Error('could not create a workspace for the coordinator');
+    if (ws.tab?.tab_id) herdr(['tab', 'rename', ws.tab.tab_id, label.slice(0, 40)]);
+    return { pane, tab: ws.tab?.tab_id ?? null };
   }
   const tab = herdr(['tab', 'create', ...(workspace ? ['--workspace', workspace] : []), '--cwd', cwd, '--label', label.slice(0, 40), '--focus', ...envArgs]);
   const pane = tab?.root_pane?.pane_id;
   if (!pane) throw new Error('could not open a tab for the coordinator');
-  return pane;
+  return { pane, tab: tab?.tab?.tab_id ?? null };
 }
 
 function startIn(pane, hname, kind, args, root) {

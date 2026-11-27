@@ -30,11 +30,12 @@ const HELP = `atf-herdr — run and watch ATF agents inside herdr
       assign it and send the kickoff prompt. A new agent starts fresh with the task,
       its checkpoint and the coordinator's instructions; --resume resumes the session
       that worked on the task before. Refused while an agent of that name still runs.
-  atf-herdr coordinate [--plan ID] [--fresh] [--kind pi] [--dry-run]
+  atf-herdr coordinate [--plan ID] [--fresh] [--kind pi] [--reuse-pane] [--dry-run]
       start the plan's coordinator in its own tab: resumes the plan's coordinator
       session (if any), or --fresh starts a new one. A coordinator that is still
       running is left alone, or with --fresh first asked for a plan checkpoint
-      (atf plan checkpoint) and then replaced.
+      (atf plan checkpoint) and then replaced. --reuse-pane: when the shell it last
+      ran in is still open (you quit the agent), close it and start there.
   atf-herdr new <name> [--dir PATH] [--agent DEF] [--kind pi] [--prompt TEXT]
       a new plan in its own folder (<plans_dir>/<name>, an ATF project) and workspace:
       a coordinator (agent definition --agent, else new_plan_agent) that starts the
@@ -235,14 +236,21 @@ function coordinateCmd() {
   if (!planId) fail('no plan selected (--plan or $ATF_PLAN)');
   try {
     const say = (m) => process.stdout.write(m + '\n');
-    const r = launchCoordinator({ root, planId, fresh: !!flags.fresh, kind: flags.kind, dryRun: !!flags['dry-run'], say, handoffMs: flags.timeout ? Number(flags.timeout) * 1000 : undefined });
+    const r = launchCoordinator({ root, planId, fresh: !!flags.fresh, kind: flags.kind, dryRun: !!flags['dry-run'], say, handoffMs: flags.timeout ? Number(flags.timeout) * 1000 : undefined, reusePane: !!flags['reuse-pane'] });
     if (r.mode === 'running') {
       if (!flags['dry-run']) focusPaneSync(r.pane);
       return say(`coordinator ${r.name} is already running in pane ${r.pane} (--fresh replaces it with a new session)`);
     }
     if (flags['dry-run']) return say(`coordinator ${r.name}: would start ${r.mode}${r.session ? ` (session ${r.session})` : ''}${r.pane ? `, replacing the one in pane ${r.pane}` : ''}`);
     sync(root);
-    say(`coordinator ${r.name} started (${r.mode === 'resume' ? 'resumed its session' : 'new session'}) in pane ${r.pane}`);
+    // a new workspace for the plan: the board goes beside its coordinator, as with `new`
+    if (r.created) {
+      const err = withBoardLock(() => toggleBoard('split', undefined, { root, target: r.pane, workspace: r.created.workspace, tab: r.created.tab }));
+      if (err) process.stderr.write(`atf-herdr: ${err}\n`);
+      herdr(['agent', 'focus', r.pane]);
+    }
+    say(`coordinator ${r.name} started (${r.mode === 'resume' ? 'resumed its session' : 'new session'}) in pane ${r.pane}${r.created ? `, in a new workspace "${path.basename(path.dirname(root))}"` : ''}`);
+    if (r.leftover) say(`its old shell (pane ${r.leftover}) is still open; --reuse-pane closes it and starts the coordinator there`);
   } catch (e) {
     fail(e.message);
   }
