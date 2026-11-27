@@ -102,27 +102,49 @@ function list() {
   for (const r of rows) say(r.map((c, i) => String(c).padEnd(w[i])).join('  ').trimEnd());
 }
 
+// What a program in a session may have turned on in the terminal, turned off again when
+// this terminal stops showing it: kitty keyboard protocol (pop, then flags 0),
+// modifyOtherKeys, win32-input-mode, mouse reporting, focus events, bracketed paste,
+// application cursor keys and keypad, the alternate screen; cursor shown, colours reset.
+const RESET_TERMINAL = '\x1b[<99u\x1b[=0u\x1b[>4;0m\x1b[?9001l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l\x1b[?1l\x1b>\x1b[?1049l\x1b[?25h\x1b[0m';
+// ctrl-] as a plain byte, and as the kitty keyboard protocol and modifyOtherKeys send it
+const DETACH = [Buffer.from([0x1d]), Buffer.from('\x1b[93;5u'), Buffer.from('\x1b[27;5;93~')];
+
 /** This terminal shows the session until ctrl-] (the agent keeps running). */
 function attach(ref) {
   const x = sessionOf(ref);
+  const who = x.meta?.name || x.name;
+  if (x.exited) {
+    // its program ended (e.g. you quit the agent): nothing to attach to
+    const again = x.meta?.role === 'coordinator' ? `start it again: atf-sessions coordinate${x.meta.plan ? ` --plan ${x.meta.plan}` : ''}` : `atf-sessions rm ${x.id} removes it`;
+    fail(`${who}'s session ended ${ago(x.lastOutput)} ago (exit ${x.code}); ${again}`);
+  }
   if (!process.stdin.isTTY) fail('attach needs a terminal');
+  let finished = false;
+  const done = (why) => {
+    if (finished) return;
+    finished = true;
+    try {
+      process.stdin.setRawMode(false);
+    } catch {}
+    process.stdout.write(`${RESET_TERMINAL}\r\n[atf-sessions] ${why}\r\n`, () => process.exit(0));
+  };
   const conn = connect((m) => {
-    if (m.ev === 'replay' && m.id === x.id) process.stdout.write(m.data);
-    else if (m.ev === 'out' && m.id === x.id) process.stdout.write(m.data);
-    else if (m.ev === 'exit' && m.id === x.id) done(`session ended (${m.code})`);
-    else if (m.ev === 'closed') done('daemon connection closed');
+    if (m.id !== undefined && m.id !== x.id) return;
+    if (m.ev === 'replay') {
+      process.stdout.write(m.data);
+      if (m.exited) done(`${who}'s session has ended (exit ${m.code})`);
+    } else if (m.ev === 'out') process.stdout.write(m.data);
+    else if (m.ev === 'exit') done(`${who}'s session ended (exit ${m.code})`);
+    else if (m.ev === 'closed') done('the connection to atf-sessiond closed');
   });
   const size = () => conn.send({ op: 'resize', id: x.id, cols: process.stdout.columns, rows: process.stdout.rows });
-  const done = (why) => {
-    process.stdin.setRawMode(false);
-    process.stdout.write(`\x1b[?1049l\x1b[?25h\r\n[atf-sessions] ${why}\r\n`);
-    process.exit(0);
-  };
   process.stdin.setRawMode(true);
   process.stdin.on('data', (d) => {
-    if (d.includes(0x1d)) return done(`detached from ${x.meta?.name || x.name}; it keeps running`); // ctrl-]
+    if (DETACH.some((k) => d.includes(k))) return done(`detached from ${who}; it keeps running (atf-sessions attach ${who})`);
     conn.send({ op: 'input', id: x.id, data: d.toString('utf8') });
   });
+  for (const sig of ['SIGTERM', 'SIGHUP']) process.on(sig, () => done('detached'));
   process.stdout.on('resize', size);
   conn.socket.on('connect', () => {
     size();
