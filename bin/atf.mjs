@@ -23,6 +23,8 @@ import {
   brief,
 } from '../src/core.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { backendName } from '../src/launch.mjs';
 import { buildPrompt } from '../src/prompts.mjs';
 import { planChanges, levelSets, totals, onlyFile, projectPath, viewerCommand, patchText, changeMode, diffTool, fileOrigin } from '../src/changes.mjs';
 import { activeRuns, taskLive, elapsed, readTail, earlierText, liveView, liveItem, loadLiveKinds, liveKinds, liveKind, refreshLive, refreshError, enableAutoRefresh, summarizeText, classify, registerLiveKind, STYLES } from '../src/live.mjs';
@@ -117,6 +119,13 @@ Tasks (worker)
   atf session <task> <ref> [--kind K] [--for WHO]
                                         record an agent session reference (for resuming)
   atf resume-info <task> [--for WHO]    resume or fresh? (used by launchers)
+  atf spawn <task> [--name N] [--kind K] [--agent A] [--early] [--fresh|--resume]
+                                        coordinator: start a new agent for the task in its own
+                                        session (herdr pane, or ATF's sessions); it is assigned
+                                        the task and given its prompt
+  atf coordinate [plan] [--fresh] [--kind K]
+                                        start the plan's coordinator (resumes its session;
+                                        --fresh: a new one, after a checkpoint handoff)
   atf dispatch <task> [--name N] [--early]  coordinator: assign it and print the prompt for a
                                         subagent of your own harness (it adds --as N to atf commands)
   atf block <task> -m <reason> [--on T8,T9]
@@ -1369,6 +1378,12 @@ const commands = {
     out(lp, `${t.id}: ${bold(lp.mode)} (${lp.reason})${lp.session ? `\nsession: ${lp.session.kind ?? ''} ${lp.session.ref}` : ''}${lp.checkpoint ? `\ncheckpoint: ${lp.checkpoint.message}` : ''}`);
   },
 
+  spawn() {
+    return viaBackend('spawn');
+  },
+  coordinate() {
+    return viaBackend('coordinate');
+  },
   dispatch(pos) {
     // Delegate a task to a subagent of the coordinator's own harness (Copilot's or Claude
     // Code's background subagents): assign it and print the prompt to give that subagent.
@@ -1738,8 +1753,29 @@ const commands = {
   },
 };
 
+/**
+ * `atf spawn` / `atf coordinate`: started by the backend that runs agents here (src/launch.mjs
+ * backendName). herdr: its adapter's command, with every argument as given.
+ */
+function viaBackend(cmd) {
+  const backend = backendName();
+  if (backend === 'herdr') {
+    const bin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../adapters/herdr/atf-herdr.mjs');
+    try {
+      execFileSync(process.execPath, [bin, cmd, ...process.argv.slice(3)], { stdio: 'inherit' });
+      process.exit(0);
+    } catch (e) {
+      process.exit(e.status ?? 1);
+    }
+  }
+  if (backend) die(`atf ${cmd}: unknown backend "${backend}" ($ATF_BACKEND)`);
+  die(`atf ${cmd} needs a place to run agents in: herdr (run inside herdr) or ATF's session daemon. Without either, delegate to your harness's own subagents: atf dispatch <task> --name <agent>`);
+}
+
 // ---------- main ----------
 try {
+  // their arguments are the backend's (atf-herdr's flags): passed on as given, not parsed here
+  if (['spawn', 'coordinate'].includes(process.argv[2]) && !['--help', '-h'].includes(process.argv[3])) viaBackend(process.argv[2]);
   const { pos, flags } = parseArgs(process.argv.slice(2));
   FLAGS = flags;
   const cmd = pos.shift();

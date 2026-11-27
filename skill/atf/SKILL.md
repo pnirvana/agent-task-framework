@@ -188,20 +188,22 @@ show it, or they ask you). Two rules make that work:
    dependency that crosses packages: undeclared cross-package
    dependencies are the main cause of agents waiting on each other.
 4. **Dispatch: you start every subagent.** **Every task of a plan is delegated through
-   ATF**: in herdr with `atf-herdr spawn`, elsewhere with `atf dispatch` (below), never
-   by handing a task to another subagent mechanism directly: work started that way is
-   invisible to ATF. In herdr: `atf-herdr spawn <task>`; it assigns
-   the task, starts a fresh agent and gives it the task. `atf-herdr agents` lists named
-   agent definitions (e.g. `reviewer`, `worker`); `atf-herdr spawn T7 --agent reviewer`
+   ATF**: with `atf spawn` where ATF starts agents (inside herdr, or when `$ATF_BACKEND`
+   is set: ATF's own sessions, e.g. from the web UI), elsewhere with `atf dispatch`
+   (below), never by handing a task to another subagent mechanism directly: work started
+   that way is invisible to ATF. `atf spawn <task>` assigns the task, starts a fresh
+   agent in its own session and gives it the task. `atf-herdr agents` lists named
+   agent definitions (e.g. `reviewer`, `worker`); `atf spawn T7 --agent reviewer`
    (or `atf add … --agent reviewer`) runs a task with one, e.g. a cheaper model for a
    mechanical task. Delegate **work packages, not loose lists**: put related tasks under
-   a parent and spawn the parent (`atf-herdr spawn T2 --name backend`); the agent works
+   a parent and spawn the parent (`atf spawn T2 --name backend`); the agent works
    through it. `atf list --ready` shows what can start now.
    **Starting a dependent task early**: if a meaningful part of a waiting task can be done
-   already (tests against an agreed interface), `atf-herdr spawn T5 --early`; the agent
+   already (tests against an agreed interface), `atf spawn T5 --early`; the agent
    does what it can and blocks `--on` the dependency. If the dependency is not real,
    remove it: `atf edit T5 --dep T2` keeps only T2, `--dep ''` removes all.
-   **Outside herdr** (e.g. GitHub Copilot CLI, `$ATF_HARNESS` is not `herdr`): use your
+   **Where `atf spawn` is not available** (it says so: a plain terminal, e.g. GitHub
+   Copilot CLI started by hand): use your
    harness's own subagents, through ATF: `atf dispatch T2 --name backend` assigns the task
    and prints a prompt; start a **background** subagent (Copilot: the task tool,
    general-purpose agent, background mode) with that prompt, unchanged, and end your turn
@@ -221,7 +223,7 @@ show it, or they ask you). Two rules make that work:
    - `dispatch`: ready, nobody owns it → spawn an agent.
    - `start`, `changes`, `unblocked`, `answered`: work for an owner that is not working
      (it was assigned, sent back, its dependency is done, its question answered) → spawn a
-     new agent for it (`atf-herdr spawn <task>`); it starts fresh with the task, its
+     new agent for it (`atf spawn <task>`); it starts fresh with the task, its
      checkpoint and your instructions.
    - `review`: review it (step 6).
    - `blocked`: a subagent's question → answer or escalate (step 6).
@@ -321,7 +323,7 @@ show it, or they ask you). Two rules make that work:
 **Agent context.** Every agent you spawn starts **fresh**: a focused prompt, the task, its
 checkpoint, feedback and history. That keeps subagent contexts small. Resuming the
 session that worked on a task before is possible when it is worth it:
-`atf-herdr spawn T4 --resume`, or as a policy `atf edit T4 --resume auto` (resume tasks
+`atf spawn T4 --resume`, or as a policy `atf edit T4 --resume auto` (resume tasks
 already worked on). `atf resume-info T4` shows what will happen.
 
 ## Status reference

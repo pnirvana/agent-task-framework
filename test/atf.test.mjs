@@ -839,7 +839,7 @@ test('herdr sweep (v2): closes finished agents, never relaunches them, nudges th
     assert.ok(lifecycleSweep(root).actions.some((a) => /no coordinator running/.test(a)));
     assert.doesNotMatch(fs.readFileSync(calls, 'utf8'), /notification show/);
     const st = { title: 'P', id: 'p1', tasks: { T2: { title: 'ui' } } };
-    assert.match(nudgeText(st, { id: 'lead' }, [{ task: 'T2', reason: 'changes' }], [{ id: 'T3', owner: 'st' }]), /T2 changes \(ui\); T3 stalled .*atf-herdr spawn/);
+    assert.match(nudgeText(st, { id: 'lead' }, [{ task: 'T2', reason: 'changes' }], [{ id: 'T3', owner: 'st' }]), /T2 changes \(ui\); T3 stalled .*atf spawn <id>/);
   } finally {
     process.env = saved;
   }
@@ -2553,4 +2553,16 @@ test('attention: what needs the human, from any liveness source (src/attention.m
   a = attentionOf(fake({}, (actor) => actor.id !== 'lead'), p);
   assert.ok(a.coord.away && a.queued.some((x) => x.task === 'T1'));
   assert.deepEqual(kinds(a).filter((k) => k.startsWith('no-')), []);
+});
+
+test('atf spawn / coordinate: started by the backend that runs agents here, arguments as given', () => {
+  const { dir, env, run } = sandbox();
+  run(['add', 'api']);
+  const atf = (args, extra) => execFileSync('node', [ATF, ...args], { cwd: dir, env: { ...env, HERDR_ENV: '', ATF_BACKEND: '', HERDR_PLUGIN_STATE_DIR: path.join(dir, 'herdr-state'), ...extra }, stdio: 'pipe' }).toString();
+  // no backend: the harness's own subagents, through atf dispatch
+  assert.throws(() => atf(['spawn', 'T1']), (e) => /atf dispatch/.test(e.stderr.toString()));
+  // herdr (inside herdr, or named): atf-herdr's command with its own flags
+  assert.match(atf(['spawn', 'T1', '--name', 'be', '--kind', 'copilot', '--dry-run'], { ATF_BACKEND: 'herdr' }), /T1 → be \(copilot\): fresh/);
+  assert.match(atf(['coordinate', '--dry-run'], { HERDR_ENV: '1' }), /coordinator lead: would start fresh/);
+  assert.throws(() => atf(['spawn', 'T1'], { ATF_BACKEND: 'nope' }), (e) => /unknown backend "nope"/.test(e.stderr.toString()));
 });
