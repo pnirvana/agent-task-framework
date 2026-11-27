@@ -43,9 +43,13 @@ a:hover { color: var(--sky); }
 
 /* ---------- main ---------- */
 #main { display: grid; grid-template-rows: auto minmax(120px, 1fr) 5px var(--panes, 40%); min-width: 0; min-height: 0; }
+/* every part has its own row: hiding one (a 0 row) never moves the others */
+#bar { grid-row: 1; } #board { grid-row: 2; } #split { grid-row: 3; } #panes { grid-row: 4; }
+#board, #panes { overflow: hidden; }
 #main.full-panes { grid-template-rows: auto 0 5px 1fr; }
-#main.full-panes #board { display: none; }
-#main.no-panes { grid-template-rows: auto 1fr 0 0; }
+#main.full-panes #board { visibility: hidden; }
+#main.no-panes { grid-template-rows: auto 1fr 5px 0; }
+#main.no-panes #panes { visibility: hidden; }
 #bar { display: flex; align-items: center; gap: 16px; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--bg-bar); min-width: 0; }
 #crumbs { display: flex; gap: 6px; white-space: nowrap; flex: none; }
 #crumbs button { background: none; border: 0; padding: 0; color: var(--subtext1); }

@@ -682,7 +682,8 @@ function renderPanes() {
       ? h('div', { class: `tab${S.pane === x.a.handle ? ' on' : ''}`, title: `${x.a.kind ?? ''} · ${x.a.status}${multi ? ` · ${planLabel(x.p)}` : ''}`, onclick: () => showPane(x.a.handle, true, x.p) }, h('span', { class: `dot ${x.a.exited ? 'exited' : x.a.status}` }), x.a.name, h('span', { class: 'task' }, x.a.task ?? (x.a.role === 'coordinator' ? (x.a.exited ? 'ended' : 'coordinator') : '')))
       : h('div', { class: `tab${S.pane === 'placeholder' ? ' on' : ''}`, onclick: () => showPane('placeholder') }, h('span', { class: 'dot' }), 'coordinator', h('span', { class: 'task' }, 'not running')),
   );
-  tabs.push(h('span', { class: 'gap' }), h('button', { class: 'ctl', title: 'terminals full screen (f)', onclick: () => togglePanes('full') }, '⤢'), h('button', { class: 'ctl', title: 'hide terminals (t)', onclick: () => togglePanes('hide') }, '▁'));
+  const full = $('#main').classList.contains('full-panes');
+  tabs.push(h('span', { class: 'gap' }), h('button', { class: 'ctl', title: full ? 'back to the board and terminals (f)' : 'terminals full screen (f)', onclick: () => togglePanes('full') }, full ? '⤡ board' : '⤢'), full ? '' : h('button', { class: 'ctl', title: 'hide terminals (t)', onclick: () => togglePanes('hide') }, '▁'));
   $('#ptabs').replaceChildren(...tabs);
   const ph = $('#terms .placeholder');
   const sp = scopePlan();
@@ -724,6 +725,7 @@ function togglePanes(mode) {
   if (mode === 'full') m.classList.remove('no-panes'), m.classList.toggle('full-panes');
   else m.classList.remove('full-panes'), m.classList.toggle('no-panes');
   store.set('panes-mode', m.classList.contains('full-panes') ? 'full' : m.classList.contains('no-panes') ? 'hide' : '');
+  renderPanes(); // the full-screen button says how to get back
   requestAnimationFrame(() => terms.refit());
 }
 // drag the split; double-click: terminals full screen
@@ -735,7 +737,8 @@ function togglePanes(mode) {
   const mode = store.get('panes-mode', '');
   if (mode === 'full') main.classList.add('full-panes');
   if (mode === 'hide') main.classList.add('no-panes');
-  split.addEventListener('dblclick', () => togglePanes('full'));
+  // double-click: terminals full screen and back; hidden terminals come back
+  split.addEventListener('dblclick', () => togglePanes(main.classList.contains('no-panes') ? 'hide' : 'full'));
   split.addEventListener('pointerdown', (e) => {
     split.setPointerCapture(e.pointerId);
     const move = (ev) => {
