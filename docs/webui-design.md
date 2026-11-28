@@ -411,6 +411,42 @@ its own. Core changes land in `src/` in a form the CLI and the board use too.
   extension's report) is `! prompt` under NEEDS YOU, ⏎ opens its pane; a command waiting
   for approval shows on its task's live badge.
 
+## 12b. The IDE layout (replaces the board-like page of phase 3)
+
+The first pages followed the herdr board too closely: one view at a time, switched with
+keys. The page is now laid out like an IDE, so what matters most stays visible:
+
+- **Explorer** (left, can be hidden): projects › plans › agents. A plan opens its page
+  and sets the work panel's filter; an agent opens its terminal.
+- **Needs you** (always, all plans): what needs the human, then their own tasks; a
+  hover shows each row's quick action (Approve, Answer, Done, Start, Terminal).
+- **Work panel** (under it): Tasks, Log and Changes, for all open plans or one (the
+  filter; with all, grouped per plan).
+- **Editor** (centre): everything opened is a tab, as files in an IDE. A task page
+  replaces the detail pane (the question or submission at the top with the actions and an
+  inline composer; acceptance, live runs, changed files, artifacts, notes, history); the
+  plan is a page too (where it stands, the coordinator, documents, tasks, notes), so the
+  board's Plan tab is gone. Live views, files, diffs and terminals are tabs as well.
+  Single click: a preview tab, replaced by the next; double-click or writing in it: kept.
+  Two groups side by side (open to the side). Open tabs are remembered.
+- **In flight** (right, always, all plans): per plan its progress and coordinator, per
+  task in progress its agent and what runs or waits now (the live badge). It belongs to
+  the live view: a run line opens it.
+- **Terminals** (bottom): the agents of the plans the work panel shows; one can move into
+  an editor tab and back.
+- A command palette (⌘K / ctrl+K) over plans, tasks, documents, agents and commands;
+  right-click menus; the keys work on the active tab (a task: `a x r n L d g`; a plan:
+  `s S N c g`). Panel sizes are dragged and remembered.
+
+Code: `public/app.js` (state, panels, palette, keys), `editor.js` (tab groups),
+`pages.js` (the documents), `terms.js` (terminals that move between the panel and tabs),
+`viewer.js` (Markdown, code, diffs), `util.js`.
+
+Found on the way: two starters of the session daemon at the same moment (atf-web and
+`atf-sessions start`) could start two daemons, the second taking the socket over and the
+first one's sessions becoming unreachable. A daemon now takes a lock next to its socket
+(`<socket>.lock`, its pid) and leaves when another one holds it.
+
 ## 13. Open
 
 - Whether replaying raw output holds up across size changes, or the headless screen

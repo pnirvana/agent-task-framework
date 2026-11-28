@@ -202,9 +202,51 @@ function handle(c, req) {
   }
 }
 
+/**
+ * One daemon per socket: whoever starts it (atf-web, atf-sessions, a launcher) may race
+ * another starting at the same moment; the second one must not take the socket over (the
+ * first one's clients and sessions would be cut off from new ones). A lock file next to
+ * the socket holds the running daemon's pid; a lock of a process that is gone is taken.
+ */
+function claim(file) {
+  const lock = `${file}.lock`;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const fd = fs.openSync(lock, 'wx', 0o600);
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      process.on('exit', () => {
+        try {
+          if (fs.readFileSync(lock, 'utf8') === String(process.pid)) fs.rmSync(lock, { force: true });
+        } catch {}
+      });
+      return true;
+    } catch {
+      let pid = 0;
+      try {
+        pid = Number(fs.readFileSync(lock, 'utf8'));
+      } catch {}
+      let alive = false;
+      try {
+        alive = !!pid && (process.kill(pid, 0), true);
+      } catch (e) {
+        alive = e.code === 'EPERM';
+      }
+      if (alive) return false;
+      fs.rmSync(lock, { force: true }); // its daemon is gone
+    }
+  }
+  return false;
+}
+
+/** Serve on `file`; null when another daemon already serves it (this one should exit). */
 export function serve(file = socketPath()) {
   // sun_path: 104 bytes on macOS, 108 on Linux
   if (Buffer.byteLength(file) > 103) throw new Error(`socket path too long for a Unix socket (${Buffer.byteLength(file)} bytes): ${file}; set ATF_SESSIOND_SOCKET to a shorter one`);
+  if (!claim(file)) {
+    log('another daemon serves', file);
+    return null;
+  }
   try {
     fs.unlinkSync(file);
   } catch {}
@@ -244,5 +286,6 @@ export function serve(file = socketPath()) {
 
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname)) {
   process.on('SIGHUP', () => {}); // survive the terminal that started us
-  serve();
+  for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => process.exit(0)); // the lock goes with it
+  if (!serve()) process.exit(0);
 }

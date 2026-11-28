@@ -1,149 +1,111 @@
-// ATF web UI (docs/webui-design.md §4.5): the herdr board's views, scopes, actions and keys,
-// with agent panes below. Plain ES modules, no framework, no build step.
-// Data: /api/overview (projects, open plans with their folded state, what needs you),
-// refreshed when /api/stream says something changed. Writes: /api/action as the human.
+// ATF web UI (docs/webui-design.md §4.5): an IDE for agent work. Explorer (projects,
+// plans, agents) · Needs you (always) and a work panel (Tasks, Log, Changes, per plan or
+// all) · the editor (tasks, plans, live views, files, diffs, terminals as tabs) · In flight
+// (what runs now, always) · the agents' terminals. Plain ES modules, no build step.
+//
+// Data: /api/overview (projects, open plans with their state, what needs you, live
+// badges, agents), loaded again when /api/stream says something changed. Writes: /api/action
+// as the human, /api/coordinator.
+import { $, h, ago, first, store, toast, api, q, menu, closeMenu } from './util.js';
 import { createTerms } from './terms.js';
-import { renderMarkdown, codeBlock, diffBlock, langOf } from './viewer.js';
-
-// ---------------------------------------------------------------- small helpers
-const $ = (s) => document.querySelector(s);
-/** An element: h('div', {class: 'x', onclick}, child, 'text', [more]) (text is never parsed as HTML). */
-function h(tag, props = {}, ...kids) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(props || {})) {
-    if (v == null || v === false) continue;
-    if (k === 'class') el.className = v;
-    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
-    else if (k === 'style') el.style.cssText = v;
-    else el.setAttribute(k, v === true ? '' : v);
-  }
-  for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
-  return el;
-}
-const ago = (ts) => {
-  if (!ts) return '';
-  const s = Math.max(0, Math.round((Date.now() - (typeof ts === 'number' ? ts : Date.parse(ts))) / 1000));
-  return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`;
-};
-const first = (s, max = 160) => {
-  const flat = String(s ?? '').replace(/\s+/g, ' ').trim();
-  return flat.length > max ? flat.slice(0, max - 1) + '…' : flat;
-};
-const store = {
-  get: (k, d) => {
-    try {
-      return JSON.parse(localStorage.getItem(`atf.${k}`)) ?? d;
-    } catch {
-      return d;
-    }
-  },
-  set: (k, v) => localStorage.setItem(`atf.${k}`, JSON.stringify(v)),
-};
-let toastTimer = null;
-function toast(msg, err = false) {
-  const t = $('#toast');
-  t.textContent = msg;
-  t.className = `on${err ? ' err' : ''}`;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.className = ''), err ? 6000 : 3500);
-}
-async function api(path, body) {
-  const r = await fetch(`/api/${path}`, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
-  const j = await r.json().catch(() => ({}));
-  if (r.status === 401) location.reload();
-  if (!r.ok && !('ok' in j)) throw new Error(j.error || `${r.status}`);
-  return j;
-}
-const q = (o) => new URLSearchParams(Object.entries(o).filter(([, v]) => v != null)).toString();
+import { createEditor } from './editor.js';
+import { initPages, renderTab, tabTitle, compose, STATUS_ICON } from './pages.js';
 
 // ---------------------------------------------------------------- what the board says
-// as the herdr board labels them (adapters/herdr/lib/tui.mjs NEED), most urgent first
 const NEED = {
-  prompt: ['! prompt', 'at a prompt in its terminal'],
-  'no-coordinator': ['⚠ no coord', 'nobody runs this plan: start a coordinator'],
-  coordinator: ['? input', 'the coordinator waits for your input'],
-  'your-review': ['◎ review', 'for you to review'],
-  question: ['⊘ question', 'a question'],
-  'plan-question': ['? plan', 'a question about the plan'],
-  failed: ['✗ failed', 'failed'],
-  review: ['◎ review', 'for the coordinator to review'],
-  stale: ['◌ stalled', 'its agent is idle, the task still in progress'],
-  finished: ['● finished', 'all tasks finished: close the plan'],
-  'your-task': ['☐ to do', 'your task'],
+  prompt: ['!', 'waits at a prompt in its terminal'],
+  'no-coordinator': ['⚠', 'no coordinator runs this plan'],
+  coordinator: ['?', 'the coordinator waits for you'],
+  'your-review': ['◎', 'for you to review'],
+  question: ['⊘', 'a question'],
+  'plan-question': ['?', 'a question about the plan'],
+  failed: ['✗', 'failed'],
+  review: ['◎', 'for the coordinator to review'],
+  stale: ['◌', 'its agent is idle, the task still in progress'],
+  finished: ['●', 'all tasks finished: close the plan'],
+  'your-task': ['☐', 'your task'],
 };
 const RANK = Object.fromEntries(Object.keys(NEED).map((k, i) => [k, i]));
-const STATUS_ICON = { todo: '○', in_progress: '◐', blocked: '⊘', review: '◎', done: '●', failed: '✗', cancelled: '–' };
-const TABS = [
-  ['overview', 'Overview'],
-  ['tasks', 'Tasks'],
-  ['plan', 'Plan'],
-  ['log', 'Log'],
-  ['changes', 'Changes'],
-];
 
 // ---------------------------------------------------------------- state
 const S = {
-  ov: null, // /api/overview
-  scope: store.get('scope', { level: 'all' }), // {level: all|project|plan, root, plan}
-  tab: store.get('tab', 'overview'),
-  sel: {}, // view -> selected row key
-  rows: [],
-  closed: new Map(), // key -> planView of a closed plan (fetched on demand)
-  briefs: new Map(), // `${key}#${task}#${seq}` -> brief | 'loading'
-  logs: new Map(), // `${key}#${seq}` -> events
-  docs: new Map(), // `${key}#${doc}` -> text
-  compose: null, // {action, p, task, label, status}
-  pane: store.get('pane', null), // the session shown in the panes
-  viewer: null, // {type: file|diff|live, …}: shown in place of the board
-  changes: new Map(), // `${key}#${seq}` -> /api/changes | 'loading'
-  liveLists: new Map(), // `${key}#${task}` -> {at, runs, earlier}
-  showClosed: new Set(), // project roots whose closed plans are listed
+  ov: null,
+  workTab: store.get('workTab', 'tasks'), // tasks | log | changes
+  filter: store.get('filter', 'all'), // 'all' | plan key
+  closed: new Map(), // key -> planView of a closed plan
+  briefs: new Map(),
+  changes: new Map(),
+  liveLists: new Map(),
+  logs: new Map(),
+  todosOpen: store.get('todosOpen', true),
+  showClosed: new Set(),
+  pane: store.get('pane', null), // the session shown in the terminal panel
   busy: false,
 };
-const viewKey = () => `${S.tab}#${S.scope.level}#${S.scope.root ?? ''}#${S.scope.plan ?? ''}`;
-
 const projects = () => S.ov?.projects ?? [];
 const allPlans = () => projects().flatMap((pr) => pr.plans.map((p) => ({ ...p, project: pr })));
-const planByKey = (key) => {
+const openPlans = () => allPlans().filter((p) => p.open);
+function planByKey(key) {
   const p = allPlans().find((x) => x.key === key);
   if (p && !p.open && S.closed.has(key)) return { ...S.closed.get(key), project: p.project };
-  return p;
-};
-const projectOf = (root) => projects().find((pr) => pr.root === root);
-const title = (p) => p.st?.title ?? p.summary?.title ?? p.id;
-const planLabel = (p) => `${p.project?.name ?? ''} · ${title(p)}`;
-
-/** Plans in scope with their state (closed ones only when the scope is that plan). */
-function scopePlans() {
-  const sc = S.scope;
-  if (sc.level === 'plan') {
-    const p = planByKey(`${sc.root}#${sc.plan}`);
-    return p?.st ? [p] : [];
-  }
-  return allPlans().filter((p) => p.open && (sc.level === 'all' || p.root === sc.root));
+  return p ?? null;
 }
-const scopePlan = () => (S.scope.level === 'plan' ? scopePlans()[0] ?? null : null);
-
-function setScope(scope, tab) {
-  S.scope = scope;
-  if (tab) S.tab = tab;
-  store.set('scope', S.scope);
-  store.set('tab', S.tab);
-  S.compose = null;
-  if (scope.level === 'plan') {
-    const key = `${scope.root}#${scope.plan}`;
-    const p = allPlans().find((x) => x.key === key);
-    if (p && !p.open && !S.closed.has(key)) loadClosed(p);
-  }
-  render();
-}
+const planTitle = (p) => p?.st?.title ?? p?.summary?.title ?? p?.id ?? '';
+const filterPlans = () => (S.filter === 'all' ? openPlans() : [planByKey(S.filter)].filter((p) => p?.st));
 async function loadClosed(p) {
+  if (S.closed.has(p.key) || S.closed.has(`loading#${p.key}`)) return;
+  S.closed.set(`loading#${p.key}`, true);
   try {
     S.closed.set(p.key, await api(`plan?${q({ root: p.root, plan: p.id })}`));
     render();
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    S.closed.delete(`loading#${p.key}`);
   }
+}
+
+// ---------------------------------------------------------------- cached reads
+function briefOf(p, task) {
+  const key = `${p.key}#${task ?? ''}#${p.st.last_seq}`;
+  const b = S.briefs.get(key);
+  if (b === undefined) {
+    S.briefs.set(key, 'loading');
+    api(`brief?${q({ root: p.root, plan: p.id, task })}`)
+      .then((r) => (S.briefs.set(key, r), refreshTabs((t) => t.pk === p.key && t.task === task)))
+      .catch(() => S.briefs.delete(key));
+    return null;
+  }
+  return b === 'loading' ? null : b;
+}
+function changesOf(p) {
+  const key = `${p.key}#${p.st.last_seq}`;
+  const c = S.changes.get(key);
+  if (c === undefined) {
+    S.changes.set(key, 'loading');
+    api(`changes?${q({ root: p.root, plan: p.id })}`)
+      .then((r) => {
+        S.changes.set(key, r);
+        if (S.workTab === 'changes') renderWork();
+        refreshTabs((t) => t.pk === p.key && t.kind === 'task');
+      })
+      .catch((e) => (S.changes.delete(key), toast(e.message, true)));
+    return null;
+  }
+  return c === 'loading' ? null : c;
+}
+function liveListOf(p, task) {
+  const key = `${p.key}#${task}`;
+  const c = S.liveLists.get(key);
+  const t = p.st.tasks[task];
+  const worth = t && !t.children.length && (t.status !== 'todo' || t.artifacts.length);
+  if (worth && (!c || (Date.now() - c.at > 4000 && !c.loading))) {
+    S.liveLists.set(key, { runs: [], ...(c || {}), loading: true, at: c?.at ?? 0 });
+    api(`live?${q({ root: p.root, plan: p.id, task })}`)
+      .then((r) => (S.liveLists.set(key, { ...r, at: Date.now() }), refreshTabs((x) => x.pk === p.key && x.task === task && x.kind === 'task')))
+      .catch(() => S.liveLists.set(key, { runs: [], at: Date.now() }));
+  }
+  return c;
 }
 
 // ---------------------------------------------------------------- loading, live updates
@@ -153,9 +115,10 @@ async function load() {
   loading = (async () => {
     try {
       S.ov = await api('overview');
-      // closed plans in view: fetch again (cheap) so the plan view stays current
-      const sp = S.scope.level === 'plan' ? allPlans().find((x) => x.key === `${S.scope.root}#${S.scope.plan}`) : null;
-      if (sp && !sp.open) S.closed.set(sp.key, await api(`plan?${q({ root: sp.root, plan: sp.id })}`));
+      for (const t of editor.all()) {
+        const p = allPlans().find((x) => x.key === t.pk);
+        if (p && !p.open) S.closed.delete(p.key), loadClosed(p);
+      }
       render();
     } catch (e) {
       toast(`could not load: ${e.message}`, true);
@@ -172,13 +135,492 @@ function stream() {
     clearTimeout(t);
     t = setTimeout(load, 120);
   };
-  es.onopen = () => (conn(true), load());
-  es.onerror = () => conn(false);
+  es.onopen = () => ($('#conn').classList.add('up'), load());
+  es.onerror = () => $('#conn').classList.remove('up');
 }
-const conn = (up) => $('#conn').classList.toggle('up', up);
 
-// ---------------------------------------------------------------- rows
-/** Tasks being worked on now: in progress, reworked after review, or answered; newest first. */
+// ---------------------------------------------------------------- opening things
+const openTask = (p, task, o = {}) => editor.open({ key: `task#${p.key}#${task}`, kind: 'task', pk: p.key, task }, o);
+const openPlan = (p, o = {}) => editor.open({ key: `plan#${p.key}`, kind: 'plan', pk: p.key }, o);
+const openLive = (p, task, ref = null, o = {}) => {
+  const t = editor.open({ key: `live#${p.key}#${task}`, kind: 'live', pk: p.key, task, ...(ref ? { ref } : {}) }, { preview: false, ...o });
+  if (ref && t.ref !== ref) (t.ref = ref), (t.rt.item = null), refreshTab(t);
+  return t;
+};
+const openFile = (p, path, o = {}) => editor.open({ key: `file#${p.root}#${path}`, kind: 'file', pk: p.key, path }, o);
+const openDiff = (p, task, file, o = {}) => editor.open({ key: `diff#${p.key}#${task ?? ''}#${file ?? ''}`, kind: 'diff', pk: p.key, task: task ?? null, file: file ?? null }, o);
+const openTerminalTab = (a, p) => editor.open({ key: `term#${a.handle}`, kind: 'term', pk: p.key, session: a.handle, name: a.name }, { preview: false });
+
+/** What a Needs-you item opens: its task, its plan, or the waiting agent's terminal. */
+function openItem(it, p, o = {}) {
+  if (it.kind === 'coordinator' || it.kind === 'prompt') return showTerminal(it.pane, true, p);
+  if (it.task) return openTask(p, it.task, o);
+  return openPlan(p, o);
+}
+
+// ---------------------------------------------------------------- actions
+const agentOf = (p, actor) => (actor ? (p.agents || []).find((a) => !a.exited && (a.actor === actor || a.name === actor)) : null);
+async function act(action, p, task, message, status) {
+  if (S.busy) return false;
+  S.busy = true;
+  try {
+    const r = await api('action', { root: p.root, plan: p.id, action, task, message, status });
+    toast(r.message, !r.ok);
+    await load();
+    return r.ok;
+  } catch (e) {
+    toast(e.message, true);
+    return false;
+  } finally {
+    S.busy = false;
+  }
+}
+async function coordinator(p, fresh) {
+  if (fresh && !confirm(`Replace the coordinator of "${planTitle(p)}"? It writes a checkpoint first; a new session takes over.`)) return;
+  toast(fresh ? 'asking the coordinator for a checkpoint, then starting a new one… (up to a few minutes)' : 'starting the coordinator…');
+  try {
+    const r = await api('coordinator', { root: p.root, plan: p.id, fresh });
+    toast(r.ok ? (/running/.test(r.message) ? 'the coordinator is already running' : `coordinator ${fresh ? 'replaced' : 'started'}`) : r.message.split('\n').pop(), !r.ok);
+    await load();
+    const np = planByKey(p.key);
+    const c = np?.agents.find((a) => a.role === 'coordinator' && !a.exited);
+    if (c) showTerminal(c.handle, false, np);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/**
+ * What can be done on a task or a plan: [{key, label, run, primary?, danger?, tip?}]. The
+ * task page and the plan page show them as buttons; the keys work on the active tab.
+ */
+function actionsFor({ p, task, tab }) {
+  const st = p.st;
+  const out = [];
+  const human = S.ov.human;
+  const page = tab ?? editor.active();
+  const c = (action, label, extra) => () => page && compose(page, action, p, task ?? null, label, extra);
+  if (task) {
+    const t = st.tasks[task];
+    if (!t) return [];
+    if (t.status === 'review' && t.reviewer && t.reviewer !== 'coordinator') {
+      out.push({ key: 'a', label: 'Approve', primary: true, run: () => act('approve', p, t.id) });
+      out.push({ key: 'x', label: 'Request changes', run: c('changes', `What should change in ${t.id}?`, { button: 'Send change request' }) });
+    } else if (t.status === 'review') out.push({ key: 'x', label: 'Comment for the coordinator', run: c('changes', `Your view on ${t.id}, for the coordinator`) });
+    if (t.owner === human && !['done', 'failed', 'cancelled', 'review'].includes(t.status)) out.push({ key: 'a', label: 'Mark done', primary: true, run: c('finish', `${t.id} done: anything to say? (optional)`, { button: 'Mark done' }) });
+    const question = t.status === 'blocked' && !t.blocked_on.length;
+    out.push({ key: question ? 'r' : 'n', label: question ? 'Answer' : 'Message', primary: question, run: c('note', question ? `Your answer on ${t.id}` : `A message on ${t.id}, for the coordinator`, { button: question ? 'Send answer' : 'Send' }) });
+    if (!t.children.length) out.push({ key: 'L', label: 'Live', run: () => openLive(p, t.id) });
+    out.push({ key: 'd', label: 'Changes', run: () => openDiff(p, t.id, null, { preview: false }) });
+    const agent = agentOf(p, t.owner);
+    if (agent) out.push({ key: 'g', label: `Terminal: ${agent.name}`, run: () => showTerminal(agent.handle, true, p) });
+    return dedupe(out);
+  }
+  if (p.open) {
+    const co = p.coordinator;
+    const agent = (p.agents || []).find((a) => a.role === 'coordinator' && !a.exited);
+    if (!co?.away) {
+      if (!co?.live) out.push({ key: 's', label: 'Start coordinator', primary: !!p.attention?.mine.some((i) => i.kind === 'no-coordinator'), run: () => coordinator(p, false), tip: 'resumes its last session, or starts fresh from the plan checkpoint' });
+      else out.push({ key: 'S', label: 'Replace coordinator', run: () => coordinator(p, true), tip: 'it writes a checkpoint, then a new session takes over' });
+    }
+    if (agent) out.push({ key: 'g', label: 'Coordinator terminal', run: () => showTerminal(agent.handle, true, p) });
+    out.push({ key: 'N', label: 'Note for the coordinator', run: c('plan-note', `A note on "${planTitle(p)}", for the coordinator`) });
+    out.push({ key: 'd', label: 'All changes', run: () => openDiff(p, null, null, { preview: false }) });
+    const finished = !!p.attention?.mine.some((i) => i.kind === 'finished');
+    out.push({ key: 'c', label: 'Close plan', primary: finished, danger: !finished, run: c('close-plan', `Close "${planTitle(p)}": a closing note (optional)`, { button: 'Close plan' }) });
+  }
+  return dedupe(out);
+}
+const dedupe = (list) => {
+  const seen = new Set();
+  return list.filter((a) => !seen.has(a.key) && seen.add(a.key));
+};
+
+// ---------------------------------------------------------------- the editor
+const editor = createEditor({
+  host: $('#editor'),
+  render: (t, el) => renderTab(t, el),
+  title: tabTitle,
+  welcome: () =>
+    h(
+      'div',
+      { class: 'welcome' },
+      h('h1', {}, 'Agent Task Framework'),
+      h('p', {}, 'Open what needs you on the left, a task from the list below it, or a run from In flight on the right. A single click opens a preview; a double-click keeps the tab.'),
+      h('table', {}, [
+        ['⌘K / ctrl+K', 'search plans, tasks, documents, agents and commands'],
+        ['ctrl+`', 'show or hide the terminals'],
+        ['ctrl+]', 'leave a terminal'],
+        ['?', 'all keys'],
+      ].map(([k, v]) => h('tr', {}, h('td', {}, h('kbd', {}, k)), h('td', {}, v)))),
+    ),
+  onChange: () => markOpen(),
+  onClose: (t) => {
+    if (t.kind === 'term') requestAnimationFrame(renderTerminals);
+  },
+});
+const refreshTab = (t) => editor.refresh((x) => x.key === t.key);
+const refreshTabs = (f) => editor.refresh(f);
+
+// ---------------------------------------------------------------- terminals
+const terms = createTerms({
+  onLeave: () => document.activeElement?.blur(),
+  onFocus: (id) => {
+    if (!id) return;
+    const a = allAgents().find((x) => x.handle === id);
+    toast(`typing into ${a?.name ?? 'the terminal'} · ctrl+] back to the page`);
+  },
+});
+const allAgents = () => openPlans().flatMap((p) => (p.agents || []).map((a) => ({ ...a, p })));
+const agentStatus = (handle) => allAgents().find((a) => a.handle === handle)?.status ?? 'off';
+const sessionExists = (handle) => allAgents().some((a) => a.handle === handle && !a.exited);
+const inEditor = (handle) => editor.isOpen(`term#${handle}`);
+
+/** The terminal panel's tabs: the agents of the plans the filter shows (a plan's coordinator first). */
+function paneList() {
+  const out = [];
+  for (const p of S.filter === 'all' ? openPlans() : filterPlans()) {
+    const agents = (p.agents || []).filter((a) => !a.exited || a.role === 'coordinator');
+    const coord = agents.filter((a) => a.role === 'coordinator').sort((a, b) => a.exited - b.exited)[0];
+    if (coord && !coord.exited) out.push({ p, a: coord });
+    else if (S.filter !== 'all' && p.open) out.push({ p, a: null, placeholder: true });
+    for (const a of agents.filter((x) => x.role !== 'coordinator' && !x.exited)) out.push({ p, a });
+  }
+  return out;
+}
+function renderTerminals() {
+  const list = paneList();
+  terms.keep(new Set(allAgents().filter((a) => !a.exited).map((a) => a.handle)));
+  const avail = list.filter((x) => x.a && !inEditor(x.a.handle));
+  const known = list.some((x) => (x.a?.handle ?? 'placeholder') === S.pane);
+  if (!known || (S.pane !== 'placeholder' && inEditor(S.pane))) S.pane = avail[0]?.a.handle ?? (list.some((x) => x.placeholder) ? 'placeholder' : null);
+  $('#ptabs').replaceChildren(
+    ...list.map((x) =>
+      x.a
+        ? h(
+            'div',
+            {
+              class: `tab${S.pane === x.a.handle ? ' on' : ''}${inEditor(x.a.handle) ? ' elsewhere' : ''}`,
+              title: `${x.a.kind ?? ''} · ${x.a.status} · ${planTitle(x.p)}${inEditor(x.a.handle) ? ' · open in the editor' : ''} · right-click: more`,
+              onclick: () => showTerminal(x.a.handle, true, x.p),
+              oncontextmenu: (e) => menu(e, [{ label: 'Open as an editor tab', run: () => openTerminalTab(x.a, x.p) }, { label: x.a.task ? `Open ${x.a.task}` : 'Open the plan', run: () => (x.a.task ? openTask(x.p, x.a.task) : openPlan(x.p)) }]),
+            },
+            h('span', { class: `dot ${x.a.status}` }),
+            x.a.name,
+            h('span', { class: 'task' }, x.a.task ?? (x.a.role === 'coordinator' ? 'coordinator' : '')),
+          )
+        : h('div', { class: `tab${S.pane === 'placeholder' ? ' on' : ''}`, onclick: () => ((S.pane = 'placeholder'), renderTerminals()) }, h('span', { class: 'dot off' }), 'coordinator', h('span', { class: 'task' }, 'not running')),
+    ),
+  );
+  const host = $('#terms');
+  let ph = host.querySelector('.placeholder');
+  if (!S.pane || S.pane === 'placeholder' || inEditor(S.pane)) {
+    terms.clear(host);
+    if (!ph) host.append((ph = h('div', { class: 'placeholder' })));
+    const sp = S.filter === 'all' ? null : planByKey(S.filter);
+    const exitedCoord = sp?.agents?.find((a) => a.role === 'coordinator' && a.exited);
+    ph.replaceChildren(
+      ...(S.pane && S.pane !== 'placeholder'
+        ? [h('div', {}, 'This terminal is open in the editor.')]
+        : sp?.open
+          ? [h('div', {}, sp.coordinator?.away ? `${sp.coordinator.id} runs elsewhere (herdr, another machine).` : exitedCoord ? `The coordinator's session ended (exit ${exitedCoord.code}).` : 'No coordinator runs for this plan.'), sp.coordinator?.away ? '' : h('div', {}, h('button', { class: 'btn primary', onclick: () => coordinator(sp, false) }, 'Start coordinator'))]
+          : list.length
+            ? [h('div', {}, 'The terminals shown here are open as editor tabs.'), h('div', {}, list.filter((x) => x.a).map((x) => h('button', { class: 'btn', onclick: () => (editor.close(`term#${x.a.handle}`), showTerminal(x.a.handle, true, x.p)) }, `${x.a.name} back here`)))]
+            : [h('div', {}, 'No agents run in the plans shown. Start a plan’s coordinator from its page.')]),
+    );
+    ph.style.display = '';
+  } else {
+    if (ph) ph.style.display = 'none';
+    terms.place(S.pane, host);
+  }
+}
+/** Show an agent's terminal: in its editor tab if it has one, else in the panel. */
+function showTerminal(handle, focus = false, p = null) {
+  if (!handle) return toast('no terminal for this', true);
+  if (inEditor(handle)) {
+    editor.activate(`term#${handle}`);
+    if (focus) terms.focus(handle);
+    return;
+  }
+  if (document.body.classList.contains('terms-hidden')) toggleTerminals(true);
+  if (p && S.filter !== 'all' && S.filter !== p.key) setFilter('all');
+  S.pane = handle;
+  store.set('pane', handle);
+  renderTerminals();
+  if (focus) requestAnimationFrame(() => terms.focus(handle));
+}
+function placeTerminal(handle, el) {
+  terms.place(handle, el);
+  requestAnimationFrame(renderTerminals);
+}
+function toggleTerminals(show = document.body.classList.contains('terms-hidden')) {
+  document.body.classList.toggle('terms-hidden', !show);
+  document.body.classList.remove('terms-max');
+  store.set('terms', show ? '' : 'hidden');
+  requestAnimationFrame(() => terms.refit());
+}
+
+// ---------------------------------------------------------------- panels
+function render() {
+  if (!S.ov) return;
+  renderExplorer();
+  renderNeeds();
+  renderWork();
+  renderInflight();
+  renderTerminals();
+  editor.draw();
+  const n = openPlans().reduce((a, p) => a + p.attention.mine.length, 0);
+  document.title = n ? `(${n}) ATF` : 'ATF';
+  const pill = $('#needs-count');
+  pill.textContent = n ? `${n} need${n === 1 ? 's' : ''} you` : 'all quiet';
+  pill.classList.toggle('hot', !!n);
+  notifyCheck();
+}
+/** The panels' rows show which documents are shown in the editor. */
+function markOpen() {
+  const active = new Set(editor.shown().map((t) => t.key));
+  for (const el of document.querySelectorAll('[data-open]')) el.classList.toggle('open', active.has(el.dataset.open));
+}
+
+// Explorer
+function renderExplorer() {
+  const kids = [];
+  const sorted = [...projects()].sort((a, b) => (a.repo || a.dir).localeCompare(b.repo || b.dir) || a.dir.localeCompare(b.dir));
+  for (const pr of sorted) {
+    const open = pr.plans.filter((p) => p.open);
+    const closed = pr.plans.filter((p) => !p.open);
+    const n = open.reduce((a, p) => a + p.attention.mine.length, 0);
+    const worktree = pr.repo && pr.repo !== pr.dir ? ` ⑂ ${pr.repo.split('/').pop()}` : '';
+    kids.push(h('div', { class: 'proj', title: pr.dir }, h('span', { class: 'name' }, pr.name, h('span', { class: 'dim' }, worktree)), n ? h('span', { class: 'count' }, n) : ''));
+    for (const p0 of [...open, ...(S.showClosed.has(pr.root) ? closed : [])]) {
+      const p = { ...p0, project: pr };
+      const pn = p.open ? p.attention.mine.length : 0;
+      kids.push(
+        h(
+          'div',
+          {
+            class: `plan${S.filter === p.key ? ' on' : ''}${p.open ? '' : ' closed'}`,
+            title: `${p.id} · click: open the plan, show its work`,
+            onclick: () => (openPlan(p), setFilter(p.key)),
+            ondblclick: () => openPlan(p, { preview: false }),
+            oncontextmenu: (e) => menu(e, [{ label: 'Open the plan', run: () => openPlan(p, { preview: false }) }, { label: 'Show only its work', run: () => setFilter(p.key) }, { label: 'Show all plans', run: () => setFilter('all') }, ...(p.open && p.st ? [null, ...actionsFor({ p }).filter((a) => !['N', 'c'].includes(a.key)).map((a) => ({ label: a.label, run: a.run }))] : [])]),
+          },
+          h('span', { class: 'name' }, planTitle(p)),
+          pn ? h('span', { class: 'count' }, pn) : '',
+        ),
+      );
+      for (const a of (p.agents || []).filter((x) => !x.exited))
+        kids.push(h('div', { class: 'agent', title: `${a.kind ?? ''} · ${a.status} · click: its terminal`, onclick: () => showTerminal(a.handle, true, p), oncontextmenu: (e) => menu(e, [{ label: 'Terminal in the panel', run: () => showTerminal(a.handle, true, p) }, { label: 'Terminal as an editor tab', run: () => openTerminalTab(a, p) }, ...(a.task ? [{ label: `Open ${a.task}`, run: () => openTask(p, a.task) }] : [])]) }, h('span', { class: `dot ${a.status}` }), h('span', { class: 'name' }, a.name), h('span', { class: 'dim' }, a.task ?? (a.role === 'coordinator' ? 'coord' : ''))));
+    }
+    if (closed.length) kids.push(h('div', { class: 'more', onclick: () => (S.showClosed.has(pr.root) ? S.showClosed.delete(pr.root) : S.showClosed.add(pr.root), renderExplorer()) }, S.showClosed.has(pr.root) ? '− hide closed plans' : `+ ${closed.length} closed`));
+  }
+  if (!kids.length) kids.push(h('div', { class: 'empty' }, 'No ATF projects yet: `atf init` in a project.'));
+  $('#tree').replaceChildren(...kids);
+}
+
+// Needs you
+function needLabel(it, p) {
+  const t = it.task ? p.st.tasks[it.task] : null;
+  if (t) return [h('b', {}, t.id), t.title];
+  if (it.kind === 'coordinator' || it.kind === 'prompt') return [h('b', {}, it.actor), it.task ? ` on ${it.task}` : '', h('span', { class: 'dim' }, ` · ${NEED[it.kind][1]}`)];
+  return [NEED[it.kind]?.[1] ?? it.kind];
+}
+function quickFor(it, p) {
+  const b = (label, run, primary = false) => h('button', { class: primary ? 'primary' : '', onclick: (e) => (e.stopPropagation(), run()) }, label);
+  switch (it.kind) {
+    case 'your-review':
+      return [b('Approve', () => act('approve', p, it.task), true), b('Open', () => openTask(p, it.task, { preview: false }))];
+    case 'your-task':
+      return [b('Done', () => act('finish', p, it.task, ''), true)];
+    case 'question':
+      return [b('Answer', () => compose(openTask(p, it.task, { preview: false }), 'note', p, it.task, `Your answer on ${it.task}`, { button: 'Send answer' }), true)];
+    case 'plan-question':
+      return [b('Answer', () => compose(openPlan(p, { preview: false }), 'plan-note', p, null, 'Your answer, for the coordinator', { button: 'Send answer' }), true)];
+    case 'no-coordinator':
+      return [b('Start', () => coordinator(p, false), true)];
+    case 'coordinator':
+    case 'prompt':
+      return [b('Terminal', () => showTerminal(it.pane, true, p), true)];
+    case 'finished':
+      return [b('Close plan', () => compose(openPlan(p, { preview: false }), 'close-plan', p, null, `Close "${planTitle(p)}": a closing note (optional)`, { button: 'Close plan' }), true)];
+    default:
+      return [];
+  }
+}
+function needItem(it, p) {
+  const msg = ['your-review', 'question', 'failed', 'review', 'plan-question', 'stale'].includes(it.kind) ? it.message : it.kind === 'your-task' && it.waiting?.length ? `${it.waiting.join(', ')} wait${it.waiting.length === 1 ? 's' : ''} on it` : '';
+  const target = it.kind === 'coordinator' || it.kind === 'prompt' ? null : it.task ? `task#${p.key}#${it.task}` : `plan#${p.key}`;
+  return h(
+    'div',
+    { class: 'item', dataset: target ? { open: target } : {}, title: NEED[it.kind]?.[1], onclick: () => openItem(it, p), ondblclick: () => openItem(it, p, { preview: false }) },
+    h('span', { class: `ic k-${it.kind}` }, NEED[it.kind]?.[0] ?? '·'),
+    h('span', { class: 't' }, needLabel(it, p)),
+    h('span', { class: 'side' }, ago(it.ts)),
+    msg ? h('span', { class: `sub${it.kind === 'question' || it.kind === 'plan-question' ? ' q' : ''}` }, first(msg, 200)) : '',
+    h('span', { class: 'quick' }, quickFor(it, p)),
+  );
+}
+function renderNeeds() {
+  const body = $('#needs .body');
+  const kids = [];
+  const plans = openPlans();
+  const needs = plans.flatMap((p) => p.attention.mine.map((it) => ({ it, p }))).sort((a, b) => RANK[a.it.kind] - RANK[b.it.kind] || (a.it.ts || '').localeCompare(b.it.ts || ''));
+  $('#needs-n').textContent = needs.length || '';
+  if (!needs.length) kids.push(h('div', { class: 'empty' }, 'Nothing needs you: every plan is moving on its own.'));
+  const groups = new Map();
+  for (const x of needs) groups.set(x.p.key, [...(groups.get(x.p.key) || []), x]);
+  const multi = groups.size > 1;
+  for (const items of groups.values()) {
+    if (multi) kids.push(h('div', { class: 'plan-h', onclick: () => openPlan(items[0].p) }, planTitle(items[0].p), h('span', { class: 'dim' }, `  ${items[0].p.project.name}`)));
+    for (const { it, p } of items) kids.push(needItem(it, p));
+  }
+  const todos = plans.flatMap((p) => p.attention.todos.map((it) => ({ it, p })));
+  if (todos.length) {
+    kids.push(h('div', { class: 'group-h todos', onclick: () => ((S.todosOpen = !S.todosOpen), store.set('todosOpen', S.todosOpen), renderNeeds()) }, S.todosOpen ? '▾' : '▸', 'Your tasks', h('span', { class: 'n' }, todos.length)));
+    if (S.todosOpen) for (const { it, p } of todos) kids.push(needItem(it, p));
+  }
+  body.replaceChildren(...kids);
+  markOpen();
+}
+
+// the work panel: Tasks · Log · Changes, for all plans or one
+const WORK_TABS = [
+  ['tasks', 'Tasks'],
+  ['log', 'Log'],
+  ['changes', 'Changes'],
+];
+function setFilter(f) {
+  S.filter = f;
+  store.set('filter', f);
+  renderExplorer();
+  renderWork();
+  renderTerminals();
+}
+function renderWork() {
+  $('#work-tabs').replaceChildren(...WORK_TABS.map(([id, label]) => h('button', { role: 'tab', 'aria-selected': String(S.workTab === id), onclick: () => ((S.workTab = id), store.set('workTab', id), renderWork()) }, label)));
+  const sel = $('#work-filter');
+  const opts = [['all', 'All open plans'], ...openPlans().map((p) => [p.key, `${planTitle(p)} · ${p.project.name}`])];
+  if (S.filter !== 'all' && !opts.some(([k]) => k === S.filter)) {
+    const p = planByKey(S.filter);
+    if (p) opts.push([p.key, `${planTitle(p)} (closed)`]);
+    else S.filter = 'all';
+  }
+  sel.replaceChildren(...opts.map(([k, l]) => h('option', { value: k, selected: k === S.filter ? true : null }, l)));
+  sel.onchange = () => setFilter(sel.value);
+  if (S.filter !== 'all') {
+    const p = planByKey(S.filter);
+    if (p && !p.st) loadClosed(p);
+  }
+  const plans = filterPlans();
+  const body = $('#work .body');
+  const top = body.scrollTop;
+  const kids = S.workTab === 'tasks' ? tasksList(plans) : S.workTab === 'log' ? logList(plans) : changesList(plans);
+  body.replaceChildren(...kids);
+  body.scrollTop = top;
+  markOpen();
+}
+function taskItem(p, t, depth = 0) {
+  const s = t.rollup_status ?? t.status;
+  const badge = p.live?.[t.id];
+  const who = t.owner ? (t.owner === S.ov.human ? 'you' : t.owner) : t.ready ? 'ready' : t.waiting_on?.length ? `waits on ${t.waiting_on.join(', ')}` : '';
+  const agent = agentOf(p, t.owner);
+  return h(
+    'div',
+    {
+      class: 'item',
+      dataset: { open: `task#${p.key}#${t.id}` },
+      onclick: () => openTask(p, t.id),
+      ondblclick: () => openTask(p, t.id, { preview: false }),
+      oncontextmenu: (e) => menu(e, [{ label: 'Open', run: () => openTask(p, t.id, { preview: false }) }, { label: 'Open to the side', run: () => openTask(p, t.id, { preview: false, group: 'other' }) }, ...(t.children.length ? [] : [{ label: 'Live view', run: () => openLive(p, t.id) }]), { label: 'Changes', run: () => openDiff(p, t.id, null, { preview: false }) }, ...(agent ? [{ label: `Terminal: ${agent.name}`, run: () => showTerminal(agent.handle, true, p) }] : [])]),
+    },
+    h('span', { class: `ic s-${s}`, title: s.replace('_', ' ') }, STATUS_ICON[s] ?? ''),
+    h('span', { class: 't' }, depth ? h('span', { class: 'tree-i' }, '  '.repeat(depth)) : '', h('b', {}, t.id), t.title),
+    h('span', { class: 'side' }, who),
+    badge ? h('span', { class: `sub c-${badge.color}`, title: 'open its live view', onclick: (e) => (e.stopPropagation(), openLive(p, t.id)) }, `${badge.glyph} ${first(badge.text, 90)}`) : '',
+  );
+}
+function tasksList(plans) {
+  if (!plans.length) return [h('div', { class: 'empty' }, 'No open plans.')];
+  const out = [];
+  for (const p of plans) {
+    if (S.filter === 'all') out.push(h('div', { class: 'plan-h', dataset: { open: `plan#${p.key}` }, onclick: () => openPlan(p) }, planTitle(p), h('span', { class: 'dim' }, `  ${p.project.name} · ${Math.round((p.st.progress || 0) * 100)}%`)));
+    for (const id of p.st.order) out.push(taskItem(p, p.st.tasks[id], p.st.tasks[id].depth ?? 0));
+  }
+  return out;
+}
+// bookkeeping the human does not need to read (change snapshots, session ids)
+const LOG_HIDDEN = new Set(['task.snapshot', 'task.session', 'plan.session']);
+function logOf(p) {
+  const key = `${p.key}#${p.st.last_seq}`;
+  if (!S.logs.has(key)) {
+    S.logs.set(key, null);
+    api(`log?${q({ root: p.root, plan: p.id, n: 300 })}`)
+      .then((r) => (S.logs.set(key, r.events), S.workTab === 'log' && renderWork()))
+      .catch((e) => toast(e.message, true));
+  }
+  return S.logs.get(key);
+}
+function logList(plans) {
+  const all = [];
+  let waiting = false;
+  for (const p of plans) {
+    const evs = logOf(p);
+    if (!evs) waiting = true;
+    else for (const e of evs) if (!LOG_HIDDEN.has(e.type)) all.push({ e, p });
+  }
+  if (!all.length) return [h('div', { class: 'empty' }, waiting ? 'loading…' : 'No events.')];
+  all.sort((a, b) => (b.e.ts || '').localeCompare(a.e.ts || ''));
+  const multi = plans.length > 1;
+  return all.slice(0, 400).map(({ e, p }) => {
+    const d = e.data || {};
+    const status = e.type.endsWith('.status');
+    let what = status ? `→ ${String(d.status).replace('_', ' ')}${d.message ? `  ${d.message}` : ''}` : d.message ?? d.title ?? d.assignee ?? d.ref ?? d.summary ?? (d.percent != null ? `${d.percent}%` : '');
+    if (typeof what !== 'string') what = JSON.stringify(what);
+    return h(
+      'div',
+      { class: 'item', title: `${e.ts} · ${e.type}`, onclick: () => (e.task ? openTask(p, e.task) : openPlan(p)) },
+      h('span', { class: `ic ${status ? `s-${d.status}` : 'dim'}` }, status ? STATUS_ICON[d.status] ?? '·' : '·'),
+      h('span', { class: 't' }, h('b', {}, e.actor?.id ?? ''), e.task ? `${e.task} ` : '', h('span', { class: 'dim' }, e.type.replace(/^(task|plan)\./, ''))),
+      h('span', { class: 'side' }, new Date(e.ts).toLocaleTimeString()),
+      what ? h('span', { class: `sub${status ? ` s-${d.status}` : ''}` }, multi ? `${planTitle(p)} · ` : '', first(what, 200)) : '',
+    );
+  });
+}
+function changesList(plans) {
+  if (!plans.length) return [h('div', { class: 'empty' }, 'No open plans.')];
+  const out = [];
+  for (const p of plans) {
+    const c = changesOf(p);
+    if (S.filter === 'all') out.push(h('div', { class: 'plan-h', onclick: () => openPlan(p) }, planTitle(p), c ? h('span', { class: 'dim' }, `  ${c.plan.totals.files} files · +${c.plan.totals.added} −${c.plan.totals.removed}`) : ''));
+    if (!c) {
+      out.push(h('div', { class: 'empty' }, 'reading the changes (git)…'));
+      continue;
+    }
+    if (!c.plan.totals.files) out.push(h('div', { class: 'empty' }, 'No changes recorded yet.'));
+    for (const id of p.st.order) {
+      const ch = c.tasks[id];
+      if (!ch) continue;
+      const t = p.st.tasks[id];
+      out.push(h('div', { class: 'item', dataset: { open: `diff#${p.key}#${id}#` }, onclick: () => openDiff(p, id), ondblclick: () => openDiff(p, id, null, { preview: false }) }, h('span', { class: `ic s-${t.status}` }, STATUS_ICON[t.status] ?? ''), h('span', { class: 't' }, h('b', {}, id), t.title), h('span', { class: 'side mono' }, h('span', { class: 'c-green' }, `+${ch.totals.added}`), ' ', h('span', { class: 'c-red' }, `−${ch.totals.removed}`))));
+      for (const set of ch.sets)
+        for (const f of set.files) {
+          const also = (f.tasks || []).filter((x) => x !== id);
+          out.push(
+            h(
+              'div',
+              { class: 'item', dataset: { open: `diff#${p.key}#${id}#${f.project}` }, title: f.project, onclick: () => openDiff(p, id, f.project), ondblclick: () => openDiff(p, id, f.project, { preview: false }), oncontextmenu: (e) => menu(e, [{ label: 'Diff', run: () => openDiff(p, id, f.project, { preview: false }) }, { label: 'Open the file', run: () => openFile(p, f.project, { preview: false }) }]) },
+              h('span', { class: 'ic dim mono' }, f.status ?? ''),
+              h('span', { class: 't mono', style: 'font-size:12px' }, '  ', f.project, also.length ? h('span', { class: 'c-yellow' }, `  also ${also.join(', ')}`) : ''),
+              h('span', { class: 'side mono' }, h('span', { class: 'c-green' }, `+${f.added ?? 0}`), ' ', h('span', { class: 'c-red' }, `−${f.removed ?? 0}`)),
+            ),
+          );
+        }
+    }
+  }
+  return out;
+}
+
+// In flight: what runs now, per plan
 const currentWork = (st) =>
   st.order
     .map((id) => st.tasks[id])
@@ -197,746 +639,140 @@ function idleReason(st) {
   if (n((t) => t.status === 'todo' && t.waiting_on.length)) bits.push(`${n((t) => t.status === 'todo' && t.waiting_on.length)} waiting on dependencies`);
   return 'nothing in progress' + (bits.length ? ': ' + bits.join(', ') : '');
 }
-function coordState(p) {
-  const c = p.coordinator;
-  if (!c?.id) return 'no coordinator';
-  if (c.away) return `${c.id} runs elsewhere`;
-  if (!c.live) return `${c.id} not running`;
-  return `${c.id} ${c.live.status}`;
-}
-const bar = (frac) => h('span', { class: 'bar' }, h('i', { style: `width:${Math.round((frac || 0) * 100)}%` }));
-
-function needRow(it, p, k) {
-  const t = it.task ? p.st.tasks[it.task] : null;
-  const [label] = NEED[it.kind] ?? [it.kind];
-  const who = it.kind === 'review' ? 'for the coordinator' : ['your-review', 'your-task'].includes(it.kind) || (it.kind === 'question' && it.for === S.ov.human) ? 'for you' : it.actor && !['coordinator', 'prompt'].includes(it.kind) ? it.actor : '';
-  const text = t ? `${t.id} ${t.title}` : it.kind === 'coordinator' || it.kind === 'prompt' ? `${it.actor}${it.task ? ` (${it.task})` : ''}` : it.kind === 'no-coordinator' ? title(p) : first(it.message, 120);
-  return { k, type: 'need', it, p, task: it.task, cells: [h('span', { class: `k-${it.kind}` }, label), text, `${who}${who ? ' · ' : ''}${ago(it.ts)}`] };
-}
-
-function overviewRows() {
-  const out = []; // {k?, type, cells} or {sec} / {grp} / {sub} / {empty}
-  const plans = scopePlans();
-  const needs = plans.flatMap((p) => p.attention.mine.map((it) => ({ it, p }))).sort((a, b) => RANK[a.it.kind] - RANK[b.it.kind] || (a.it.ts || '').localeCompare(b.it.ts || ''));
-  out.push({ sec: 'needs', title: 'NEEDS YOU', n: needs.length, hint: needs.length ? '' : 'nothing: every plan is moving on its own' });
-  const groups = new Map();
-  for (const x of needs) groups.set(x.p.key, [...(groups.get(x.p.key) || []), x]);
-  const headed = S.scope.level !== 'plan' && groups.size > 0;
-  for (const items of groups.values()) {
-    if (headed) out.push({ grp: planLabel(items[0].p) });
-    for (const { it, p } of items) {
-      out.push(needRow(it, p, `need#${p.key}#${it.kind}#${it.task ?? it.actor ?? ''}`));
-      const t = it.task ? p.st.tasks[it.task] : null;
-      const msg = it.kind === 'your-review' || it.kind === 'question' || it.kind === 'failed' || it.kind === 'review' ? it.message : t ? '' : it.kind === 'no-coordinator' || it.kind === 'finished' ? NEED[it.kind][1] : '';
-      if (msg) out.push({ sub: first(msg, 220) });
-    }
-  }
-  const todos = plans.flatMap((p) => p.attention.todos.map((it) => ({ it, p })));
-  if (todos.length) {
-    out.push({ sec: 'todos', title: 'YOUR TASKS', n: todos.length });
-    for (const { it, p } of todos) {
-      out.push(needRow(it, p, `todo#${p.key}#${it.task}`));
-      const waits = it.waiting?.length ? `${it.waiting.join(', ')} wait${it.waiting.length === 1 ? 's' : ''} on it` : '';
-      const t = p.st.tasks[it.task];
-      const msg = [waits, t.description && t.description !== t.title ? t.description : ''].filter(Boolean).join(' · ');
-      if (msg) out.push({ sub: first(msg, 220) });
-    }
-  }
-  out.push({ sec: 'flight', title: 'IN FLIGHT' });
-  if (!plans.length) out.push({ empty: 'No active plans here. A coordinator starts one with `atf plan new <title>`.' });
+function renderInflight() {
+  const body = $('#inflight .body');
+  const kids = [];
+  const plans = openPlans();
+  if (!plans.length) kids.push(h('div', { class: 'empty' }, 'No active plans.'));
   for (const p of plans) {
     const st = p.st;
-    const done = st.counts?.done ?? 0;
-    out.push({ k: `plan#${p.key}`, type: 'plan', p, cells: [h('span', { class: 's-in_progress' }, `${Math.round((st.progress || 0) * 100)}%`), h('span', {}, h('b', {}, title(p)), S.scope.level === 'all' ? h('span', { class: 'dim' }, `  ${p.project.name}`) : ''), h('span', {}, bar(st.progress), `  ${done}/${st.total ?? 0} · ${coordState(p)}`)] });
+    const c = p.coordinator || {};
+    const coordAgent = (p.agents || []).find((a) => a.role === 'coordinator' && !a.exited);
+    const pct = Math.round((st.progress || 0) * 100);
     const work = currentWork(st);
-    for (const t of work.slice(0, 3)) out.push(taskRow(p, t, `work#${p.key}#${t.id}`, true));
-    if (work.length > 3) out.push({ sub: `+ ${work.length - 3} more in progress (⏎ on the plan opens it)` });
-    if (!work.length) out.push({ sub: idleReason(st) });
-  }
-  return out;
-}
-
-function taskRow(p, t, k, brief = false, depth = 0) {
-  const st = p.st;
-  const side = [t.owner ? (t.owner === S.ov.human ? 'you' : t.owner) : t.ready ? 'ready' : t.waiting_on?.length ? `waits on ${t.waiting_on.join(', ')}` : '', t.status === 'in_progress' && t.percent != null ? `${t.percent}%` : ''].filter(Boolean).join(' · ');
-  const badge = p.live?.[t.id];
-  const main = h('span', {}, depth ? h('span', { class: 'tree-i' }, '  '.repeat(depth) + '└ ') : '', h('b', {}, t.id), ' ', t.title, badge ? h('span', { class: `c-${badge.color}` }, `  ${badge.glyph} ${first(badge.text, 70)}`) : brief && t.last_message ? h('span', { class: 'dim' }, `  ${first(t.last_message, 140)}`) : '');
-  return { k, type: 'task', p, task: t.id, cells: [h('span', { class: `s-${t.rollup_status ?? t.status}` }, `${STATUS_ICON[t.rollup_status ?? t.status] ?? ''} ${(t.rollup_status ?? t.status).replace('_', ' ')}`), main, side] };
-}
-
-function tasksRows() {
-  const out = [];
-  const plans = scopePlans();
-  if (!plans.length) out.push({ empty: 'No plan in scope.' });
-  for (const p of plans) {
-    if (S.scope.level !== 'plan') out.push({ grp: planLabel(p) });
-    for (const id of p.st.order) out.push(taskRow(p, p.st.tasks[id], `task#${p.key}#${id}`, false, p.st.tasks[id].depth ?? 0));
-  }
-  return out;
-}
-
-function planRows() {
-  const out = [];
-  const p = scopePlan();
-  if (!p) {
-    // all projects / a project: its plans, closed ones too
-    const list = allPlans().filter((x) => S.scope.level === 'all' || x.root === S.scope.root);
-    out.push({ sec: 'flight', title: 'PLANS', n: list.length });
-    for (const x of list) {
-      const sm = x.st ?? x.summary;
-      out.push({ k: `plan#${x.key}`, type: 'plan', p: x, cells: [h('span', { class: x.open ? 's-in_progress' : 's-done' }, sm.status), h('span', {}, h('b', {}, title(x)), h('span', { class: 'dim' }, `  ${x.project.name}`)), h('span', {}, bar(sm.progress), `  ${ago(sm.updated_at)}`)] });
-    }
-    return out;
-  }
-  const st = p.st;
-  out.push({ k: `plan#${p.key}`, type: 'plan', p, cells: [h('span', { class: p.open ? 's-in_progress' : 's-done' }, st.status), h('b', {}, st.title), h('span', {}, bar(st.progress), `  ${Math.round((st.progress || 0) * 100)}%`)] });
-  if (st.docs?.length) {
-    out.push({ sec: 'flight', title: 'DOCUMENTS', n: st.docs.length });
-    for (const d of st.docs) out.push({ k: `doc#${p.key}#${d}`, type: 'doc', p, doc: d, cells: ['  doc', d, ''] });
-  }
-  const notes = [...st.notes].reverse().slice(0, 30);
-  out.push({ sec: 'flight', title: 'PLAN NOTES', n: st.notes.length });
-  if (!notes.length) out.push({ empty: 'none' });
-  for (const n of notes) out.push({ k: `pnote#${p.key}#${n.seq}`, type: 'pnote', p, note: n, cells: [h('span', { class: n.kind === 'question' || n.kind === 'warning' ? 'k-coordinator' : 'dim' }, n.kind), first(n.message, 200), `${n.actor} · ${ago(n.ts)}`] });
-  return out;
-}
-
-function logRows() {
-  const p = scopePlan();
-  if (!p) return [{ empty: 'The log is per plan: pick a plan (sidebar, or ⏎ on a plan).' }];
-  const key = `${p.key}#${p.st.last_seq}`;
-  const evs = S.logs.get(key);
-  if (!evs) {
-    if (!S.logs.has(`loading#${key}`)) {
-      S.logs.set(`loading#${key}`, true);
-      api(`log?${q({ root: p.root, plan: p.id })}`)
-        .then((r) => {
-          S.logs.set(key, r.events);
-          render();
-        })
-        .catch((e) => toast(e.message, true));
-    }
-    return [{ empty: 'loading…' }];
-  }
-  const out = [{ log: true, events: [...evs].reverse() }];
-  return out;
-}
-
-function changesOf(p) {
-  const key = `${p.key}#${p.st.last_seq}`;
-  const c = S.changes.get(key);
-  if (c === undefined) {
-    S.changes.set(key, 'loading');
-    api(`changes?${q({ root: p.root, plan: p.id })}`)
-      .then((r) => {
-        S.changes.set(key, r);
-        if (S.tab === 'changes') render();
-      })
-      .catch((e) => (S.changes.delete(key), toast(e.message, true)));
-    return null;
-  }
-  return c === 'loading' ? null : c;
-}
-const plusMinus = (tt) => h('span', {}, h('span', { class: 'c-green' }, `+${tt.added}`), ' ', h('span', { class: 'c-red' }, `−${tt.removed}`));
-function changesRows() {
-  const p = scopePlan();
-  if (!p) return [{ empty: 'Changes are per plan: pick a plan (sidebar, or ⏎ on a plan).' }];
-  const c = changesOf(p);
-  if (!c) return [{ empty: 'reading the changes (git)…' }];
-  const out = [{ sec: 'flight', title: 'CHANGES', n: c.plan.totals.files, hint: `${c.plan.totals.files ? `+${c.plan.totals.added} −${c.plan.totals.removed} · ` : ''}${c.mode === 'artifacts' ? 'files the agents reported' : 'per task, from snapshots when it started and ended'}` }];
-  if (!c.plan.totals.files) out.push({ empty: 'No changes recorded yet.' });
-  for (const id of p.st.order) {
-    const ch = c.tasks[id];
-    if (!ch) continue;
-    const t = p.st.tasks[id];
-    out.push({ k: `chg#${p.key}#${id}`, type: 'chg-task', p, task: id, cells: [h('span', { class: `s-${t.status}` }, `${STATUS_ICON[t.status] ?? ''} ${t.status.replace('_', ' ')}`), h('span', {}, h('b', {}, id), ' ', t.title), h('span', {}, `${ch.totals.files} file${ch.totals.files === 1 ? '' : 's'}  `, plusMinus(ch.totals))] });
-    for (const set of ch.sets)
-      for (const f of set.files) {
-        const overlap = (f.tasks || []).filter((x) => x !== id);
-        out.push({ k: `chgf#${p.key}#${id}#${f.project}`, type: 'chg-file', p, task: id, file: f.project, f, cells: [h('span', { class: 'dim' }, f.status ?? ''), h('span', {}, '   ', f.project, overlap.length ? h('span', { class: 'c-yellow' }, `  also ${overlap.join(', ')}`) : ''), plusMinus(f)] });
-      }
-  }
-  return out;
-}
-
-const ROWS = { overview: overviewRows, tasks: tasksRows, plan: planRows, log: logRows, changes: changesRows };
-
-// ---------------------------------------------------------------- rendering
-function render() {
-  if (!S.ov) return;
-  renderTree();
-  renderList();
-  renderBar();
-  renderDetail();
-  renderPanes();
-  renderViewer();
-  notifyCheck();
-  const n = allPlans().reduce((a, p) => a + (p.attention?.mine.length ?? 0), 0);
-  document.title = n ? `(${n}) ATF` : 'ATF';
-}
-
-function renderTree() {
-  const tree = $('#tree');
-  const kids = [];
-  // a repository's worktrees next to each other
-  const sorted = [...projects()].sort((a, b) => (a.repo || a.dir).localeCompare(b.repo || b.dir) || a.dir.localeCompare(b.dir));
-  for (const pr of sorted) {
-    const open = pr.plans.filter((p) => p.open);
-    const closed = pr.plans.filter((p) => !p.open);
-    const n = open.reduce((a, p) => a + p.attention.mine.length, 0);
-    const worktree = pr.repo && pr.repo !== pr.dir ? ` ⑂ ${pr.repo.split('/').pop()}` : '';
-    const on = S.scope.level === 'project' && S.scope.root === pr.root;
-    kids.push(h('div', { class: `proj${on ? ' on' : ''}`, title: pr.dir, onclick: () => setScope({ level: 'project', root: pr.root }) }, h('span', { class: 'name' }, pr.name, h('span', { class: 'dim' }, worktree)), n ? h('span', { class: 'count' }, n) : ''));
-    for (const p of [...open, ...(S.showClosed.has(pr.root) ? closed : [])]) {
-      const pn = p.open ? p.attention.mine.length : 0;
-      const pOn = S.scope.level === 'plan' && S.scope.root === p.root && S.scope.plan === p.id;
-      kids.push(h('div', { class: `plan${pOn ? ' on' : ''}${p.open ? '' : ' closed'}`, title: p.id, onclick: () => setScope({ level: 'plan', root: p.root, plan: p.id }) }, h('span', { class: 'name' }, title(p)), pn ? h('span', { class: 'count' }, pn) : ''));
-      for (const a of (p.agents || []).filter((a) => !a.exited)) kids.push(h('div', { class: 'agent', title: `${a.kind ?? ''} · ${a.status}`, onclick: () => showPane(a.handle, true, p) }, h('span', { class: `dot ${a.status}` }), h('span', { class: 'name' }, a.name), h('span', { class: 'dim' }, a.task ?? (a.role === 'coordinator' ? 'coord' : ''))));
-    }
-    if (closed.length) kids.push(h('div', { class: 'more', onclick: () => (S.showClosed.has(pr.root) ? S.showClosed.delete(pr.root) : S.showClosed.add(pr.root), render()) }, S.showClosed.has(pr.root) ? '− hide closed' : `+ ${closed.length} closed`));
-  }
-  if (!kids.length) kids.push(h('div', { class: 'empty' }, 'No ATF projects yet (atf init in a project).'));
-  tree.replaceChildren(...kids);
-}
-
-function renderBar() {
-  const sc = S.scope;
-  const crumbs = [h('button', { onclick: () => setScope({ level: 'all' }) }, 'all projects')];
-  if (sc.level !== 'all') {
-    const pr = projectOf(sc.root);
-    crumbs.push(h('span', { class: 'sep' }, '›'), h('button', { onclick: () => setScope({ level: 'project', root: sc.root }) }, pr?.name ?? sc.root));
-  }
-  if (sc.level === 'plan') {
-    const p = planByKey(`${sc.root}#${sc.plan}`);
-    crumbs.push(h('span', { class: 'sep' }, '›'), h('button', {}, p ? title(p) : sc.plan));
-  }
-  $('#crumbs').replaceChildren(...crumbs);
-  $('#tabs').replaceChildren(...TABS.map(([id, label], i) => h('button', { role: 'tab', 'aria-selected': String(S.tab === id), onclick: () => setTab(id) }, h('kbd', {}, i), label)));
-  $('#hint').textContent = hintFor(selRow());
-}
-const setTab = (id) => {
-  S.tab = id;
-  store.set('tab', id);
-  S.compose = null;
-  render();
-};
-
-function renderList() {
-  const list = $('#list');
-  const rows = ROWS[S.tab]();
-  const prev = S.rows;
-  S.rows = rows.filter((r) => r.k);
-  const vk = viewKey();
-  if (!S.rows.some((r) => r.k === S.sel[vk])) {
-    // the selected row is gone (approved, answered): the one now at its place
-    const at = prev.findIndex((r) => r.k === S.sel[vk]);
-    S.sel[vk] = S.rows[Math.min(Math.max(at, 0), S.rows.length - 1)]?.k ?? null;
-  }
-  const kids = [];
-  for (const r of rows) {
-    if (r.sec) kids.push(h('div', { class: `sec ${r.sec}` }, r.title, r.n != null ? h('span', { class: 'n' }, r.n) : '', r.hint ? h('span', { class: 'dim' }, r.hint) : ''));
-    else if (r.grp) kids.push(h('div', { class: 'grp' }, r.grp));
-    else if (r.sub) kids.push(h('div', { class: 'row sub' }, h('span'), h('span', { class: 'main' }, r.sub), h('span')));
-    else if (r.empty) kids.push(h('div', { class: 'empty' }, r.empty));
-    else if (r.log) kids.push(logView(r.events));
-    else {
-      const sel = r.k === S.sel[vk];
-      kids.push(h('div', { class: `row${sel ? ' sel' : ''}`, 'data-k': r.k, onclick: () => select(r.k), ondblclick: () => (select(r.k), enter()) }, h('span', {}, r.cells[0]), h('span', { class: 'main' }, r.cells[1]), h('span', { class: 'side' }, r.cells[2])));
-    }
-  }
-  const top = list.scrollTop;
-  list.replaceChildren(...kids);
-  list.scrollTop = top;
-}
-
-// bookkeeping the human does not need to read (change snapshots, session ids)
-const LOG_HIDDEN = new Set(['task.snapshot', 'task.session', 'plan.session']);
-function logView(events) {
-  const cells = [];
-  for (const e of events) {
-    if (LOG_HIDDEN.has(e.type)) continue;
-    const d = e.data || {};
-    const type = e.type.replace(/^(task|plan)\./, '');
-    let what = e.type === 'task.status' || e.type === 'plan.status' ? `→ ${String(d.status).replace('_', ' ')}${d.message ? `  ${d.message}` : ''}` : d.message ?? d.title ?? d.assignee ?? d.ref ?? d.summary ?? (d.percent != null ? `${d.percent}%` : '');
-    if (typeof what !== 'string') what = JSON.stringify(what);
-    const cls = e.type.endsWith('.status') ? `s-${d.status}` : '';
-    cells.push(h('div', { class: 'dim', title: e.ts }, new Date(e.ts).toLocaleTimeString()), h('div', {}, e.actor?.id ?? ''), h('div', { class: 'dim' }, type), h('div', {}, e.task ?? ''), h('div', { class: cls, title: what }, first(what, 300)));
-  }
-  return h('div', { class: 'log' }, cells);
-}
-
-const selRow = () => S.rows.find((r) => r.k === S.sel[viewKey()]) ?? null;
-function select(k, scroll = false) {
-  if (S.sel[viewKey()] !== k) S.compose = null;
-  S.sel[viewKey()] = k;
-  for (const el of $('#list').querySelectorAll('.row.sel')) el.classList.remove('sel');
-  const el = $('#list').querySelector(`.row[data-k="${CSS.escape(k)}"]`);
-  el?.classList.add('sel');
-  if (scroll) el?.scrollIntoView({ block: 'nearest' });
-  renderDetail();
-  $('#hint').textContent = hintFor(selRow());
-}
-function move(d) {
-  const i = S.rows.findIndex((r) => r.k === S.sel[viewKey()]);
-  const n = S.rows[Math.max(0, Math.min(S.rows.length - 1, (i < 0 ? 0 : i) + d))];
-  if (n) select(n.k, true);
-}
-/** ⏎: a plan opens it; a task in the Overview opens it in its plan's Tasks view. */
-function enter() {
-  const r = selRow();
-  if (!r) return;
-  if (r.type === 'plan' && S.scope.level !== 'plan') return setScope({ level: 'plan', root: r.p.root, plan: r.p.id }, S.tab === 'plan' ? 'plan' : 'overview');
-  if ((r.type === 'task' || r.type === 'need') && r.task && (S.tab !== 'tasks' || S.scope.level !== 'plan')) {
-    setScope({ level: 'plan', root: r.p.root, plan: r.p.id }, 'tasks');
-    S.sel[viewKey()] = `task#${r.p.key}#${r.task}`;
-    return render();
-  }
-  if (r.type === 'need' && ['coordinator', 'prompt'].includes(r.it.kind)) return goAgent();
-  if (r.type === 'chg-file') return openDiff(r.p, r.task, r.file);
-  if (r.type === 'chg-task') return openDiff(r.p, r.task);
-  if (r.type === 'doc') return openFile(r.p, r.doc);
-  if (r.type === 'task' && S.tab === 'tasks') return openLive(r.p, r.task);
-}
-
-// ---------------------------------------------------------------- the detail panel
-function briefOf(p, task) {
-  const key = `${p.key}#${task ?? ''}#${p.st.last_seq}`;
-  const b = S.briefs.get(key);
-  if (b === undefined) {
-    S.briefs.set(key, 'loading');
-    api(`brief?${q({ root: p.root, plan: p.id, task })}`)
-      .then((r) => {
-        S.briefs.set(key, r);
-        renderDetail();
-      })
-      .catch(() => S.briefs.delete(key));
-    return null;
-  }
-  return b === 'loading' ? null : b;
-}
-
-const section = (name, ...kids) => [h('h3', {}, name), ...kids];
-const notesList = (notes, max = 8) =>
-  [...notes]
-    .reverse()
-    .slice(0, max)
-    .map((n) => h('div', { class: 'note' }, h('span', { class: 'who' }, `${n.actor} · ${n.kind} · ${ago(n.ts)}  `), h('span', { class: `kind-${n.kind}` }, n.message)));
-
-function renderDetail() {
-  const d = $('#detail');
-  const r = selRow();
-  if (!r) return d.replaceChildren(h('p', { class: 'meta' }, S.ov && !allPlans().length ? 'No plans yet.' : S.tab === 'log' ? "The plan's events, newest first (change snapshots and session ids left out)." : 'Nothing selected.'));
-  const kids = [];
-  const p = r.p;
-  if (r.type === 'plan') kids.push(...planDetail(p));
-  else if (r.type === 'doc') kids.push(...docDetail(p, r.doc));
-  else if (r.type === 'pnote') kids.push(h('h2', {}, `${r.note.kind} by ${r.note.actor}`), h('p', { class: 'meta' }, new Date(r.note.ts).toLocaleString()), h('pre', {}, r.note.message), actionsBar(r));
-  else if (r.type === 'need' && !r.task) kids.push(...planNeedDetail(r));
-  else if (r.task) kids.push(...taskDetail(r));
-  if (S.compose) kids.push(composeBox());
-  d.replaceChildren(...kids);
-  if (S.compose) d.querySelector('textarea')?.focus();
-}
-
-function planDetail(p) {
-  const st = p.st;
-  if (!st) {
-    if (!S.closed.has(p.key)) loadClosed(p);
-    return [h('h2', {}, title(p)), h('p', { class: 'meta' }, 'loading…')];
-  }
-  const out = [h('h2', {}, st.title), h('p', { class: 'meta' }, `${p.project?.name ?? ''} · ${st.id} · ${st.status} · ${Math.round((st.progress || 0) * 100)}% · updated ${ago(st.updated_at)} ago`)];
-  if (st.goal) out.push(...section('Goal', h('p', {}, st.goal)));
-  if (st.description) out.push(...section('Description', h('pre', {}, st.description)));
-  if (p.open) out.push(...section('Coordinator', h('p', {}, coordState(p)), p.attention.queued.length ? h('p', { class: 'meta' }, `waiting on it: ${p.attention.queued.map((i) => `${i.task ?? 'plan'} ${i.kind}`).join(', ')}`) : ''));
-  if (st.checkpoint) out.push(...section('Where it stands', h('pre', {}, st.checkpoint.message), h('p', { class: 'meta' }, `${st.checkpoint.actor} · ${ago(st.checkpoint.ts)} ago`)));
-  if (st.questions?.length) out.push(...section('Questions for you', ...st.questions.map((x) => h('p', { class: 'q' }, x.message))));
-  const c = st.counts || {};
-  out.push(...section('Tasks', h('p', {}, Object.entries(c).filter(([, n]) => n).map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(' · ') || 'none')));
-  out.push(actionsBar({ type: 'plan', p }));
-  return out;
-}
-
-function planNeedDetail(r) {
-  const { it, p } = r;
-  const out = [h('h2', {}, h('span', { class: `k-${it.kind}` }, NEED[it.kind]?.[0] ?? it.kind), '  ', title(p)), h('p', { class: 'meta' }, `${NEED[it.kind]?.[1] ?? ''} · ${ago(it.ts)} ago`)];
-  if (it.kind === 'plan-question') out.push(h('pre', { class: 'q' }, it.message), h('p', { class: 'meta' }, `asked by ${it.actor}`));
-  if (it.kind === 'coordinator' || it.kind === 'prompt') out.push(h('p', {}, `${it.actor} ${it.kind === 'prompt' ? 'is at a prompt in its terminal (an approval, a question)' : 'waits for your input'}. `, h('a', { href: '#', onclick: (e) => (e.preventDefault(), goAgent()) }, 'Open its pane (g)')));
-  if (it.kind === 'no-coordinator') out.push(h('p', {}, 'Nobody decides or starts anything for this plan. Start its coordinator (it resumes its last session, or starts fresh from the plan checkpoint).'));
-  if (it.kind === 'finished') out.push(h('p', {}, 'Every task is done, failed or cancelled. Close the plan when you are satisfied.'));
-  out.push(actionsBar(r));
-  return out;
-}
-
-function taskDetail(r) {
-  const p = r.p;
-  const t = p.st.tasks[r.task];
-  if (!t) return [h('p', { class: 'meta' }, `${r.task} is gone`)];
-  const b = briefOf(p, t.id);
-  const out = [h('h2', {}, `${t.id} ${t.title}`), h('p', { class: 'meta' }, [`${planLabel(p)}`, `${STATUS_ICON[t.status]} ${t.status.replace('_', ' ')}`, t.owner ? `owner ${t.owner}` : '', t.reviewer ? `reviewer ${t.reviewer}` : '', t.percent != null && t.status === 'in_progress' ? `${t.percent}%` : '', `updated ${ago(t.updated_at)} ago`].filter(Boolean).join(' · '))];
-  if (t.path.length > 1) out.push(h('p', { class: 'meta' }, t.path.map((id) => p.st.tasks[id]?.title ?? id).join(' › ')));
-  if (b?.question) out.push(...section(b.question.for === S.ov.human ? 'Question for you' : 'Question', h('pre', { class: 'q' }, b.question.message ?? ''), h('p', { class: 'meta' }, `asked by ${b.question.asked_by ?? '?'} · ${ago(b.question.ts)} ago`), b.question.recommend ? h('p', {}, h('b', {}, 'Recommended: '), b.question.recommend) : '', b.question.original ? h('p', { class: 'meta' }, `originally from ${b.question.original.actor}: ${b.question.original.message}`) : ''));
-  if (b?.review) out.push(...section(`Review${b.review.round > 1 ? ` (round ${b.review.round})` : ''}`, h('pre', {}, b.review.submitted?.message ?? ''), h('p', { class: 'meta' }, b.review.submitted ? `submitted by ${b.review.submitted.actor} · ${ago(b.review.submitted.ts)} ago` : ''), ...b.review.notes.map((n) => h('p', {}, h('span', { class: 'dim' }, `${n.kind}: `), n.message)), b.review.assessment ? h('p', {}, h('b', {}, 'Coordinator: '), b.review.assessment) : ''));
-  if (b?.failure) out.push(...section('Failed', h('pre', {}, b.failure.message ?? '')));
-  if (t.description && t.description !== t.title) out.push(...section('Description', h('pre', {}, t.description)));
-  if (t.acceptance?.length) out.push(...section('Acceptance', h('ul', {}, t.acceptance.map((a) => h('li', {}, a)))));
-  if (b?.latest) out.push(...section('Latest', h('pre', {}, b.latest.message)));
-  if (b?.checkpoint) out.push(...section('Checkpoint', h('pre', {}, b.checkpoint.message)));
-  if (t.steps?.length) out.push(...section('Steps', h('ul', {}, t.steps.map((s) => h('li', { class: `s-${s.status}` }, `${STATUS_ICON[s.status] ?? ''} ${s.title}`)))));
-  if (t.waiting_on?.length) out.push(...section('Waits on', h('p', {}, t.waiting_on.map((id) => `${id} ${p.st.tasks[id]?.title ?? ''}`).join(' · '))));
-  const lv = liveListOf(p, t.id);
-  if (lv?.runs.length) out.push(...section('Live', h('ul', { class: 'runs' }, lv.runs.slice(0, 8).map((x) => h('li', {}, h('a', { href: '#', onclick: (e) => (e.preventDefault(), openLive(p, t.id, x.ref)) }, runGlyph(x), ' ', x.kind), ' ', h('span', { class: stateClass(x) }, first(x.summary.line || x.cmd || '', 90))))), lv.earlierText ? h('p', { class: 'meta' }, lv.earlierText) : ''));
-  // what is under Live (runs, live files, the live kinds' reports) is not listed again
-  // (as src/live.mjs taskLive picks them: a plain log stays an artifact)
-  const arts = t.artifacts.filter((a) => !a.live && !a.cmd && !['maven', 'tests', 'pipeline', 'build', 'deploy', 'wait'].includes(a.kind));
-  const projDir = p.project?.dir;
-  const inProject = (ref) => (ref.startsWith('/') ? (projDir && ref.startsWith(projDir + '/') ? ref.slice(projDir.length + 1) : null) : ref);
-  if (arts.length) out.push(...section('Artifacts', h('ul', {}, [...arts].reverse().slice(0, 10).map((a) => {
-    const rel = a.kind === 'file' || a.kind === 'log' ? inProject(a.git?.path ?? a.ref) : null;
-    return h('li', {}, h('span', { class: 'dim' }, `${a.kind} `), a.kind === 'url' || a.kind === 'pr' ? h('a', { href: a.ref, target: '_blank', rel: 'noopener' }, a.ref) : rel ? h('a', { href: '#', onclick: (e) => (e.preventDefault(), openFile(p, rel)) }, a.ref) : a.ref, a.description ? h('span', { class: 'dim' }, ` — ${first(a.description, 100)}`) : '');
-  }))));
-  if (t.notes.length) out.push(...section('Notes', ...notesList(t.notes)));
-  out.push(actionsBar(r));
-  return out;
-}
-
-function docDetail(p, doc) {
-  const key = `${p.key}#${doc}`;
-  if (!S.docs.has(key)) {
-    S.docs.set(key, null);
-    api(`doc?${q({ root: p.root, plan: p.id, doc })}`)
-      .then((r) => {
-        S.docs.set(key, r.text);
-        renderDetail();
-      })
-      .catch((e) => S.docs.set(key, `could not read it: ${e.message}`));
-  }
-  const text = S.docs.get(key);
-  const body = text == null ? h('p', { class: 'meta' }, 'loading…') : /\.(md|markdown)$/i.test(doc) ? renderMarkdown(text, { onLink: (href) => openFile(p, joinPath(doc, href)) }) : codeBlock(text, langOf(doc), h);
-  return [h('h2', {}, doc), h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: () => openFile(p, doc) }, h('kbd', {}, '⏎'), 'Open')), body];
-}
-/** A link in document `from` (project-relative) to `href`: the project-relative path. */
-function joinPath(from, href) {
-  const parts = from.split('/').slice(0, -1);
-  for (const seg of href.split('/')) {
-    if (seg === '..') parts.pop();
-    else if (seg && seg !== '.') parts.push(seg);
-  }
-  return parts.join('/');
-}
-
-// ---------------------------------------------------------------- live runs of a task
-const RUN_STATE = { ok: ['✓', 'c-green'], failed: ['✗', 'c-red'], waiting: ['⧖', 'c-yellow'], running: ['⚙', 'c-cyan'], gone: ['–', 'dim'], unknown: ['·', ''] };
-const runGlyph = (x) => (x.active ? (x.waiting || x.approval ? RUN_STATE.waiting : RUN_STATE.running) : RUN_STATE[x.summary.state] || RUN_STATE.unknown)[0];
-const stateClass = (x) => (x.active ? (x.waiting || x.approval ? RUN_STATE.waiting : RUN_STATE.running) : RUN_STATE[x.summary.state] || RUN_STATE.unknown)[1];
-function liveListOf(p, task) {
-  const key = `${p.key}#${task}`;
-  const c = S.liveLists.get(key);
-  const t = p.st.tasks[task];
-  const worth = t && !t.children.length && (t.status !== 'todo' || t.artifacts.length);
-  if (worth && (!c || (Date.now() - c.at > 4000 && !c.loading))) {
-    S.liveLists.set(key, { ...(c || { runs: [] }), loading: true, at: c?.at ?? 0 });
-    api(`live?${q({ root: p.root, plan: p.id, task })}`)
-      .then((r) => {
-        S.liveLists.set(key, { ...r, at: Date.now() });
-        if (selRow()?.task === task) renderDetail();
-      })
-      .catch(() => S.liveLists.set(key, { runs: [], at: Date.now() }));
-  }
-  return c;
-}
-
-// ---------------------------------------------------------------- the viewer
-async function openFile(p, rel) {
-  openViewer({ type: 'file', p, path: rel, loading: true });
-  try {
-    const f = await api(`file?${q({ root: p.root, path: rel })}`);
-    if (S.viewer?.path !== rel) return;
-    Object.assign(S.viewer, { loading: false, data: f, mode: /\.(md|markdown|mdx)$/i.test(f.path) ? 'rendered' : 'source' });
-  } catch (e) {
-    if (S.viewer?.path === rel) Object.assign(S.viewer, { loading: false, error: e.message });
-  }
-  renderViewer();
-}
-async function openDiff(p, task, file) {
-  const label = file ? `${file}` : task ? `${task} ${p.st.tasks[task]?.title ?? ''}` : title(p);
-  const v = { type: 'diff', p, task, file, title: label, loading: true };
-  openViewer(v);
-  try {
-    const r = await api(`diff?${q({ root: p.root, plan: p.id, task, file })}`);
-    if (S.viewer === v) Object.assign(v, { loading: false, text: r.text });
-  } catch (e) {
-    if (S.viewer === v) Object.assign(v, { loading: false, error: e.message });
-  }
-  renderViewer();
-}
-function openLive(p, task, ref = null) {
-  openViewer({ type: 'live', p, task, ref, raw: false, item: null, folded: new Map(), runs: null, data: null, follow: true });
-  liveTick();
-}
-async function liveTick() {
-  const v = S.viewer;
-  if (v?.type !== 'live') return;
-  clearTimeout(S.liveTimer);
-  try {
-    const list = await api(`live?${q({ root: v.p.root, plan: v.p.id, task: v.task })}`);
-    if (S.viewer !== v) return;
-    v.runs = list.runs;
-    v.earlierText = list.earlierText;
-    const x = v.runs.find((r) => r.ref === v.ref) || v.runs[0];
-    if (x) {
-      v.ref = x.ref;
-      const raw = v.raw || !x.view;
-      const r = await api(`live/run?${q({ root: v.p.root, plan: v.p.id, task: v.task, ref: x.ref, ...(raw ? { raw: 1 } : {}), ...(v.item != null ? { item: v.item } : {}) })}`);
-      if (S.viewer !== v) return;
-      v.data = r;
-      v.error = null;
-    } else v.data = null;
-  } catch (e) {
-    if (S.viewer === v) v.error = e.message;
-  }
-  renderViewer();
-  // while it runs: again soon; a finished run rarely changes
-  const active = v.runs?.some((r) => r.active);
-  if (S.viewer === v) S.liveTimer = setTimeout(liveTick, active ? 1500 : 5000);
-}
-function openViewer(v) {
-  S.viewer = v;
-  renderViewer();
-}
-function closeViewer() {
-  clearTimeout(S.liveTimer);
-  S.viewer = null;
-  renderViewer();
-  $('#list').focus();
-}
-const segView = (segs) => segs.map(([text, style]) => h('span', { class: style ? style.split(' ').map((x) => `st-${x}`).join(' ') : '' }, text));
-
-function renderViewer() {
-  const board = $('#board');
-  let el = $('#viewer');
-  const v = S.viewer;
-  board.classList.toggle('viewing', !!v);
-  if (!v) return el && el.replaceChildren();
-  if (!el) board.append((el = h('div', { id: 'viewer' })));
-  const keepScroll = el.querySelector('.vbody')?.scrollTop ?? 0;
-  const body = h('div', { class: 'vbody', tabindex: '0' });
-  let head;
-  const close = h('button', { class: 'btn', onclick: closeViewer, title: 'back to the board (esc)' }, h('kbd', {}, 'esc'), ' close');
-  if (v.type === 'file') {
-    const f = v.data;
-    const md = f && /\.(md|markdown|mdx)$/i.test(f.path);
-    head = h('div', { class: 'vhead' }, h('div', { class: 'vtitle' }, h('b', {}, v.path), f ? h('span', { class: 'dim' }, `  ${(f.size / 1024).toFixed(f.size < 10240 ? 1 : 0)} KB${f.truncated ? ' · first 2 MB' : ''}`) : ''), h('div', { class: 'vtools' }, md ? h('button', { class: 'btn', onclick: () => ((v.mode = v.mode === 'rendered' ? 'source' : 'rendered'), renderViewer()) }, h('kbd', {}, 'm'), v.mode === 'rendered' ? ' source' : ' rendered') : '', close));
-    if (v.loading) body.append(h('p', { class: 'meta' }, 'loading…'));
-    else if (v.error) body.append(h('p', { class: 'c-red' }, v.error));
-    else if (f.binary) body.append(h('p', { class: 'meta' }, 'A binary file: not shown.'));
-    else if (md && v.mode === 'rendered') body.append(renderMarkdown(f.text, { onLink: (href) => openFile(v.p, joinPath(v.path, href)) }));
-    else body.append(codeBlock(f.text, langOf(f.path), h));
-  } else if (v.type === 'diff') {
-    head = h('div', { class: 'vhead' }, h('div', { class: 'vtitle' }, h('span', { class: 'dim' }, 'changes  '), h('b', {}, v.title)), h('div', { class: 'vtools' }, v.file ? h('button', { class: 'btn', onclick: () => openFile(v.p, v.file) }, h('kbd', {}, 'o'), ' open file') : '', close));
-    if (v.loading) body.append(h('p', { class: 'meta' }, 'loading…'));
-    else if (v.error) body.append(h('p', { class: 'c-red' }, v.error));
-    else body.append(diffBlock(v.text, h));
-  } else {
-    const t = v.p.st.tasks[v.task];
-    const runs = v.runs || [];
-    const x = runs.find((r) => r.ref === v.ref);
-    const i = runs.indexOf(x);
-    const when = !x ? '' : x.active ? `${x.approval ? 'waiting for your approval' : x.waiting ? 'waiting' : 'running'} ${ago(x.since)}` : x.exit != null ? `exit ${x.exit}${x.duration_ms ? ` · took ${Math.round(x.duration_ms / 1000)}s` : ''} · ${ago(x.ts)} ago` : x.live ? 'live file' : '';
-    const raw = v.raw || (x && !x.view);
-    head = h(
-      'div',
-      { class: 'vhead' },
-      h('div', { class: 'vtitle' }, h('span', { class: 'dim' }, 'live  '), h('b', {}, `${v.task} `), t?.title ?? '', runs.length > 1 ? h('span', { class: 'dim' }, `   run ${i + 1}/${runs.length}`) : ''),
+    kids.push(
       h(
         'div',
-        { class: 'vtools' },
-        runs.length > 1 ? h('button', { class: 'btn', onclick: () => stepRun(-1) }, h('kbd', {}, '['), ' prev') : '',
-        runs.length > 1 ? h('button', { class: 'btn', onclick: () => stepRun(1) }, h('kbd', {}, ']'), ' next') : '',
-        x?.view ? h('button', { class: 'btn', onclick: () => ((v.raw = !v.raw), (v.item = null), liveTick()) }, h('kbd', {}, 'o'), v.raw ? ' view' : ' output') : '',
-        v.item != null ? h('button', { class: 'btn', onclick: () => ((v.item = null), liveTick()) }, h('kbd', {}, '⌫'), ' back') : '',
-        close,
+        { class: 'flight' },
+        h('div', { class: 'fh', title: 'open the plan', onclick: () => openPlan(p), ondblclick: () => openPlan(p, { preview: false }) }, h('b', {}, planTitle(p)), h('span', { class: 'pct' }, `${pct}%`)),
+        h('div', { class: 'progress' }, h('i', { style: `width:${pct}%` })),
+        h(
+          'div',
+          { class: 'coord' },
+          h('span', { class: `dot ${c.live?.status ?? 'off'}` }),
+          coordAgent ? h('a', { title: 'its terminal', onclick: () => showTerminal(coordAgent.handle, true, p) }, c.id) : h('span', {}, c.id ?? 'no coordinator'),
+          h('span', { class: 'dim' }, c.away ? 'runs elsewhere' : c.live ? c.live.status : 'not running'),
+          !c.live && !c.away ? h('a', { onclick: () => coordinator(p, false) }, 'start') : '',
+        ),
+        work.length ? '' : h('div', { class: 'why' }, idleReason(st)),
+        work.slice(0, 8).map((t) => {
+          const a = agentOf(p, t.owner);
+          const badge = p.live?.[t.id];
+          return h(
+            'div',
+            { class: 'run' },
+            h('span', { class: 'tid', title: `${t.title}: open the task`, onclick: () => openTask(p, t.id) }, t.id),
+            h('span', { class: 'who', title: a ? 'its terminal' : '', onclick: () => a && showTerminal(a.handle, true, p) }, a ? h('span', { class: `dot ${a.status}` }) : '', t.owner ?? ''),
+            h('span', { class: `what ${badge ? `c-${badge.color}` : 'dim'}`, title: `${badge ? badge.text : t.last_message ?? t.title}: open the live view`, onclick: () => openLive(p, t.id) }, badge ? `${badge.glyph} ${badge.text}` : first(t.last_message ?? t.title, 80)),
+          );
+        }),
+        work.length > 8 ? h('div', { class: 'why' }, `+ ${work.length - 8} more in progress`) : '',
       ),
-      x ? h('div', { class: 'vrun' }, h('span', { class: stateClass(x) }, `${runGlyph(x)} ${x.kind}`), h('span', { class: 'dim' }, `  ${when}  `), h('span', { class: stateClass(x) }, x.summary.line || '')) : '',
-      x ? h('div', { class: 'vcmd dim' }, x.cmd ? `$ ${String(x.cmd).split('\n')[0]}` : x.ref) : '',
     );
-    if (!v.runs) body.append(h('p', { class: 'meta' }, 'loading…'));
-    else if (!runs.length) body.append(h('p', { class: 'meta' }, `Nothing live on ${v.task}: builds, tests and pipelines its agent runs show here.`));
-    else if (v.error) body.append(h('p', { class: 'c-red' }, v.error));
-    else if (v.data?.item) body.append(h('div', { class: 'lines' }, v.data.item.map((l) => h('div', { class: 'ln' }, segView(l)))));
-    else if (raw) {
-      const text = v.data?.raw;
-      if (text == null) body.append(h('p', { class: 'meta' }, 'no output (yet)'));
-      else body.append(h('pre', { class: 'raw' }, text.split('\n').slice(-4000).map((l) => h('div', { class: /\b(ERROR|FAIL(ED|URE)?)\b/.test(l) ? 'c-red' : /\bWARN(ING)?\b/.test(l) ? 'c-yellow' : '' }, l || ' '))));
-    } else if (v.data?.lines) {
-      const box = h('div', { class: 'lines' });
-      let folded = false;
-      for (const l of v.data.lines) {
-        if (l.section) {
-          const sec = l.section;
-          folded = v.folded.has(sec) ? v.folded.get(sec) : l.folded;
-          box.append(h('div', { class: 'ln sechead', onclick: () => (v.folded.set(sec, !folded), renderViewer()) }, h('span', { class: 'c-cyan' }, folded ? '▸ ' : '▾ '), segView(l.segs)));
-          continue;
-        }
-        if (folded) continue;
-        box.append(h('div', { class: `ln${l.item != null ? ' item' : ''}`, onclick: l.item != null ? () => ((v.item = l.item), liveTick()) : null, title: l.item != null ? 'details' : null }, segView(l.segs)));
-      }
-      body.append(box);
-    }
   }
-  const atEnd = el.querySelector('.vbody') ? el.querySelector('.vbody').scrollHeight - keepScroll - el.querySelector('.vbody').clientHeight < 30 : false;
-  el.replaceChildren(head, body);
-  // the output of a running command: follow its end while you are at the end
-  if (v.type === 'live' && (v.raw || !v.data?.lines) && (atEnd || v.follow)) (body.scrollTop = body.scrollHeight), (v.follow = false);
-  else body.scrollTop = keepScroll;
-}
-function stepRun(d) {
-  const v = S.viewer;
-  if (!v?.runs?.length) return;
-  const i = v.runs.findIndex((r) => r.ref === v.ref);
-  v.ref = v.runs[(i + d + v.runs.length) % v.runs.length].ref;
-  v.item = null;
-  v.follow = true;
-  liveTick();
-}
-function viewerKey(e) {
-  const v = S.viewer;
-  const k = e.key;
-  const b = $('#viewer .vbody');
-  if (k === 'Escape' || k === 'q') return v.item != null ? ((v.item = null), liveTick()) : closeViewer();
-  if (k === 'Backspace' && v.item != null) return (v.item = null), liveTick();
-  if (k === 'j' || k === 'ArrowDown') return e.preventDefault(), b?.scrollBy(0, 40);
-  if (k === 'k' || k === 'ArrowUp') return e.preventDefault(), b?.scrollBy(0, -40);
-  if (k === ' ' || k === 'PageDown') return e.preventDefault(), b?.scrollBy(0, b.clientHeight * 0.9);
-  if (k === 'PageUp') return e.preventDefault(), b?.scrollBy(0, -b.clientHeight * 0.9);
-  if (k === 'g') return b && (b.scrollTop = 0);
-  if (k === 'G') return b && (b.scrollTop = b.scrollHeight);
-  if (k === 'm' && v.type === 'file') return (v.mode = v.mode === 'rendered' ? 'source' : 'rendered'), renderViewer();
-  if (k === 'o' && v.type === 'live') return (v.raw = !v.raw), (v.item = null), (v.follow = true), liveTick();
-  if (k === 'o' && v.type === 'diff' && v.file) return openFile(v.p, v.file);
-  if (k === '[') return stepRun(-1);
-  if (k === ']') return stepRun(1);
-  if (/^[0-4]$/.test(k)) return closeViewer(), setTab(TABS[Number(k)][0]);
+  body.replaceChildren(...kids);
 }
 
-// ---------------------------------------------------------------- actions
-/** What can be done on a row: [{key, label, run, primary?, danger?}]. */
-function actionsFor(r) {
-  if (!r?.p) return [];
-  const p = r.p;
-  const st = p.st;
+// ---------------------------------------------------------------- the command palette
+function paletteItems() {
   const out = [];
-  const t = r.task && st?.tasks[r.task];
-  const human = S.ov.human;
-  if (t) {
-    if (t.status === 'review' && t.reviewer && t.reviewer !== 'coordinator') {
-      out.push({ key: 'a', label: 'Approve', primary: true, run: () => act('approve', p, t.id) });
-      out.push({ key: 'x', label: 'Request changes', run: () => compose('changes', p, t.id, `What should change in ${t.id}?`) });
-    } else if (t.status === 'review') out.push({ key: 'x', label: 'Comment for the coordinator', run: () => compose('changes', p, t.id, `Your view on ${t.id}, for the coordinator`) });
-    if (t.owner === human && !['done', 'failed', 'cancelled', 'review'].includes(t.status)) out.push({ key: 'a', label: 'Mark done', primary: true, run: () => compose('finish', p, t.id, `${t.id} done: anything to say (optional)?`) });
-    const question = t.status === 'blocked' && !t.blocked_on.length;
-    out.push({ key: question ? 'r' : 'n', label: question ? 'Answer' : 'Message', primary: question, run: () => compose('note', p, t.id, question ? `Your answer on ${t.id}` : `A message on ${t.id}, for the coordinator`) });
-    const agent = agentOf(p, t.owner);
-    if (agent) out.push({ key: 'g', label: `Go to ${agent.name}`, run: () => showPane(agent.handle, true, p) });
-    if (!t.children.length) out.push({ key: 'L', label: 'Live', run: () => openLive(p, t.id) });
-    if (r.type === 'chg-file') out.push({ key: 'd', label: 'Diff', primary: true, run: () => openDiff(p, t.id, r.file) }, { key: 'o', label: 'Open file', run: () => openFile(p, r.file) });
-    else out.push({ key: 'd', label: 'Changes', run: () => openDiff(p, t.id) });
-  }
-  if (r.type === 'doc') out.push({ key: 'o', label: 'Open', primary: true, run: () => openFile(p, r.doc) });
-  if (r.type === 'need' && (r.it.kind === 'coordinator' || r.it.kind === 'prompt')) out.push({ key: 'g', label: `Go to ${r.it.actor}`, primary: true, run: goAgent });
-  if (r.type === 'need' && r.it.kind === 'plan-question') out.push({ key: 'r', label: 'Answer', primary: true, run: () => compose('plan-note', p, null, 'Your answer, for the coordinator') });
-  if (p.open) {
-    const c = p.coordinator;
-    const running = !!c?.live;
-    if (!c?.away) {
-      if (!running) out.push({ key: 's', label: 'Start coordinator', primary: r.it?.kind === 'no-coordinator', run: () => coordinator(p, false) });
-      else out.push({ key: 'S', label: 'Replace coordinator', run: () => coordinator(p, true) });
+  for (const p of allPlans()) {
+    out.push({ icon: '▣', label: planTitle(p), detail: `plan · ${p.project.name}${p.open ? '' : ' · closed'}`, run: () => openPlan(p, { preview: false }) });
+    if (!p.st) continue;
+    for (const id of p.st.order) {
+      const t = p.st.tasks[id];
+      out.push({ icon: STATUS_ICON[t.status] ?? '·', label: `${id} ${t.title}`, detail: planTitle(p), run: () => openTask(p, id, { preview: false }) });
     }
-    out.push({ key: 'N', label: 'Plan note', run: () => compose('plan-note', p, null, `A note on "${title(p)}", for the coordinator`) });
-    out.push({ key: 'c', label: 'Close plan', danger: r.it?.kind !== 'finished', primary: r.it?.kind === 'finished', run: () => compose('close-plan', p, null, `Close "${title(p)}": a closing note (optional)`) });
+    for (const d of p.st.docs || []) out.push({ icon: '📄', label: d, detail: `document · ${planTitle(p)}`, run: () => openFile(p, d, { preview: false }) });
+    for (const a of (p.agents || []).filter((x) => !x.exited)) out.push({ icon: '⌨', label: a.name, detail: `terminal · ${a.task ?? a.role ?? ''} · ${planTitle(p)}`, run: () => showTerminal(a.handle, true, p) });
+    if (p.open) for (const a of actionsFor({ p }).filter((x) => !['N', 'c'].includes(x.key))) out.push({ icon: '›', label: `${a.label}: ${planTitle(p)}`, detail: 'command', run: a.run });
   }
-  // one action per key: the first wins
-  const seen = new Set();
-  return out.filter((a) => !seen.has(a.key) && seen.add(a.key));
+  out.push({ icon: '›', label: 'Show / hide the terminals', detail: 'ctrl+`', run: () => toggleTerminals() });
+  out.push({ icon: '›', label: 'Show / hide the Explorer', detail: 'command', run: toggleExplorer });
+  out.push({ icon: '›', label: 'Show all plans in the work panel', detail: 'command', run: () => setFilter('all') });
+  out.push({ icon: '›', label: 'Turn on notifications', detail: 'command', run: () => $('#bell').click() });
+  return out;
 }
-function actionsBar(r) {
-  const acts = actionsFor(r);
-  return acts.length ? h('div', { class: 'actions' }, acts.map((a) => h('button', { class: a.primary ? 'primary' : a.danger ? 'danger' : '', onclick: a.run }, h('kbd', {}, a.key), a.label))) : '';
+/** A fuzzy match: the query's characters in order; better when together and at word starts. */
+function score(label, query) {
+  const l = label.toLowerCase();
+  let s = 0,
+    i = 0,
+    last = -2;
+  for (const ch of query.toLowerCase()) {
+    if (ch === ' ') continue;
+    const j = l.indexOf(ch, i);
+    if (j < 0) return -1;
+    s += j === last + 1 ? 3 : 1;
+    if (j === 0 || /[\s/·-]/.test(l[j - 1])) s += 2;
+    last = j;
+    i = j + 1;
+  }
+  return s - l.length / 100;
 }
-function hintFor(r) {
-  const acts = actionsFor(r).map((a) => `${a.key} ${a.label.toLowerCase()}`);
-  return [...acts, 'j/k move', '⏎ open', '? help'].join(' · ');
-}
-
-function compose(action, p, task, label, status) {
-  S.compose = { action, p, task, label, status };
-  renderDetail();
-}
-function composeBox() {
-  const c = S.compose;
-  const optional = ['finish', 'close-plan', 'approve'].includes(c.action);
-  const send = () => {
-    const text = $('#detail textarea').value;
-    if (!optional && !text.trim()) return toast('nothing to send', true);
-    act(c.action, c.p, c.task, text, c.status);
+function palette() {
+  const el = $('#palette');
+  const items = paletteItems();
+  let sel = 0;
+  let shown = [];
+  const input = h('input', { placeholder: 'Search plans, tasks, documents, agents, commands…', spellcheck: 'false' });
+  const list = h('div', { class: 'list' });
+  const close = () => ((el.hidden = true), el.replaceChildren());
+  const draw = () => {
+    const qy = input.value.trim();
+    shown = qy
+      ? items
+          .map((it) => ({ it, s: score(`${it.label} ${it.detail}`, qy) }))
+          .filter((x) => x.s >= 0)
+          .sort((a, b) => b.s - a.s)
+          .slice(0, 60)
+          .map((x) => x.it)
+      : items.slice(0, 60);
+    sel = Math.min(sel, Math.max(0, shown.length - 1));
+    list.replaceChildren(...(shown.length ? shown.map((it, i) => h('div', { class: `opt${i === sel ? ' on' : ''}`, onmousemove: () => sel !== i && ((sel = i), draw()), onclick: () => (close(), it.run()) }, h('span', {}, it.icon), h('span', { class: 'l' }, it.label), h('span', { class: 'd' }, it.detail))) : [h('div', { class: 'empty' }, 'Nothing matches.')]));
+    list.querySelector('.on')?.scrollIntoView({ block: 'nearest' });
   };
-  return h(
-    'div',
-    { class: 'compose' },
-    h('label', {}, c.label),
-    h('textarea', { onkeydown: (e) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) (e.preventDefault(), send());
-      if (e.key === 'Escape') (e.preventDefault(), (S.compose = null), renderDetail(), $('#list').focus());
-    } }),
-    h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: send }, h('kbd', {}, '⌃⏎'), c.action === 'close-plan' ? 'Close plan' : c.action === 'finish' ? 'Mark done' : 'Send'), h('button', { onclick: () => ((S.compose = null), renderDetail()) }, h('kbd', {}, 'esc'), 'Cancel')),
-  );
-}
-async function act(action, p, task, message, status) {
-  if (S.busy) return;
-  S.busy = true;
-  try {
-    const r = await api('action', { root: p.root, plan: p.id, action, task, message, status });
-    toast(r.message, !r.ok);
-    if (r.ok) S.compose = null;
-    await load();
-    $('#list').focus();
-  } catch (e) {
-    toast(e.message, true);
-  } finally {
-    S.busy = false;
-  }
-}
-async function coordinator(p, fresh) {
-  if (fresh && !confirm(`Replace the coordinator of "${title(p)}"? It writes a checkpoint first; a new session takes over.`)) return;
-  toast(fresh ? 'asking the coordinator for a checkpoint, then starting a new one… (up to a few minutes)' : 'starting the coordinator…');
-  try {
-    const r = await api('coordinator', { root: p.root, plan: p.id, fresh });
-    toast(r.ok ? (/running/.test(r.message) ? 'the coordinator is already running' : `coordinator ${fresh ? 'replaced' : 'started'}`) : r.message.split('\n').pop(), !r.ok);
-    await load();
-    const fresh2 = planByKey(p.key);
-    const c = fresh2?.agents.find((a) => a.role === 'coordinator' && !a.exited);
-    if (c) showPane(c.handle, false, fresh2);
-  } catch (e) {
-    toast(e.message, true);
-  }
+  input.oninput = () => ((sel = 0), draw());
+  input.onkeydown = (e) => {
+    if (e.key === 'ArrowDown') (e.preventDefault(), (sel = Math.min(shown.length - 1, sel + 1)), draw());
+    else if (e.key === 'ArrowUp') (e.preventDefault(), (sel = Math.max(0, sel - 1)), draw());
+    else if (e.key === 'Enter') (e.preventDefault(), shown[sel] && (close(), shown[sel].run()));
+    else if (e.key === 'Escape') (e.preventDefault(), close());
+  };
+  el.onclick = (e) => e.target === el && close();
+  el.replaceChildren(h('div', { class: 'box' }, input, list));
+  el.hidden = false;
+  draw();
+  input.focus();
 }
 
 // ---------------------------------------------------------------- notifications
 // The browser's own (after you allow them once), for what needs you: the same items and
 // texts as herdr's notifications (src/notify.mjs). Each is notified once, when it appears;
 // again only after it went away and came back. What comes from agents' live state must
-// hold a few seconds first. While this page has the focus, a toast instead.
+// hold a few seconds first. While this page has the focus: a toast instead.
 const LIVE_N = new Set(['prompt', 'no-coordinator', 'coordinator', 'stale']);
 const SETTLE_MS = 5000;
 const firstSeen = new Map();
 let notifyTimer = null;
 function notifyCheck() {
-  const fresh = store.get('notified', null) === null; // the first time: what is there now counts as seen
+  const fresh = store.get('notified', null) === null;
   const notified = new Set(store.get('notified', []));
   const now = Date.now();
   const present = new Set();
   const due = [];
   let later = false;
-  for (const p of allPlans().filter((x) => x.open))
+  for (const p of openPlans())
     for (const it of [...p.attention.mine, ...p.attention.todos]) {
       present.add(it.nkey);
       if (!firstSeen.has(it.nkey)) firstSeen.set(it.nkey, now);
@@ -954,18 +790,12 @@ function notifyCheck() {
   clearTimeout(notifyTimer);
   if (later) notifyTimer = setTimeout(notifyCheck, SETTLE_MS);
   if (!due.length) return;
-  const one = due.length === 1;
-  const plans = new Set(due.map((d) => title(d.p)));
-  const head = one ? `ATF · ${title(due[0].p)}` : `ATF · ${due.length} things need you${plans.size === 1 ? ` · ${[...plans][0]}` : ''}`;
-  const body = due.map((d) => (plans.size > 1 ? `${title(d.p)}: ` : '') + d.it.text).join(' · ');
+  const plans = new Set(due.map((d) => planTitle(d.p)));
+  const head = due.length === 1 ? `ATF · ${planTitle(due[0].p)}` : `ATF · ${due.length} things need you${plans.size === 1 ? ` · ${[...plans][0]}` : ''}`;
+  const body = due.map((d) => (plans.size > 1 ? `${planTitle(d.p)}: ` : '') + d.it.text).join(' · ');
   if (window.Notification?.permission === 'granted' && (document.hidden || !document.hasFocus())) {
-    const n = new Notification(head, { body, tag: one ? due[0].it.nkey : 'atf' });
-    n.onclick = () => {
-      window.focus();
-      const d = due[0];
-      setScope({ level: 'plan', root: d.p.root, plan: d.p.id }, 'overview');
-      n.close();
-    };
+    const n = new Notification(head, { body, tag: due.length === 1 ? due[0].it.nkey : 'atf' });
+    n.onclick = () => (window.focus(), openItem(due[0].it, due[0].p, { preview: false }), n.close());
   } else toast(body);
 }
 function bell() {
@@ -983,181 +813,171 @@ $('#bell').onclick = async () => {
 };
 bell();
 
-// ---------------------------------------------------------------- agent panes
-const terms = createTerms({ host: $('#terms'), onLeave: () => $('#list').focus(), onState: () => {} });
-const agentOf = (p, actor) => (actor ? (p.agents || []).find((a) => !a.exited && (a.actor === actor || a.name === actor)) : null);
-
-/** The panes in scope: the agents of the plans in scope (a plan's coordinator always). */
-function paneList() {
-  const plans = scopePlans();
-  const out = [];
-  for (const p of plans) {
-    const agents = (p.agents || []).filter((a) => !a.exited || a.role === 'coordinator');
-    const coord = agents.filter((a) => a.role === 'coordinator').sort((a, b) => a.exited - b.exited)[0];
-    if (S.scope.level === 'plan' && p.open) out.push(coord ? { p, a: coord } : { p, a: null, placeholder: true });
-    else if (coord && !coord.exited) out.push({ p, a: coord });
-    for (const a of agents.filter((a) => a.role !== 'coordinator' && !a.exited)) out.push({ p, a });
-  }
-  return out;
-}
-function renderPanes() {
-  const list = paneList();
-  const ids = new Set(list.filter((x) => x.a).map((x) => x.a.handle));
-  if (S.pane && !ids.has(S.pane) && !(S.pane === 'placeholder' && list.some((x) => x.placeholder))) S.pane = list[0]?.a?.handle ?? (list[0]?.placeholder ? 'placeholder' : null);
-  if (!S.pane && list.length) S.pane = list[0].a?.handle ?? 'placeholder';
-  terms.keep(ids);
-  const multi = S.scope.level !== 'plan';
-  const tabs = list.map((x) =>
-    x.a
-      ? h('div', { class: `tab${S.pane === x.a.handle ? ' on' : ''}`, title: `${x.a.kind ?? ''} · ${x.a.status}${multi ? ` · ${planLabel(x.p)}` : ''}`, onclick: () => showPane(x.a.handle, true, x.p) }, h('span', { class: `dot ${x.a.exited ? 'exited' : x.a.status}` }), x.a.name, h('span', { class: 'task' }, x.a.task ?? (x.a.role === 'coordinator' ? (x.a.exited ? 'ended' : 'coordinator') : '')))
-      : h('div', { class: `tab${S.pane === 'placeholder' ? ' on' : ''}`, onclick: () => showPane('placeholder') }, h('span', { class: 'dot' }), 'coordinator', h('span', { class: 'task' }, 'not running')),
-  );
-  const full = $('#main').classList.contains('full-panes');
-  tabs.push(h('span', { class: 'gap' }), h('button', { class: 'ctl', title: full ? 'back to the board and terminals (f)' : 'terminals full screen (f)', onclick: () => togglePanes('full') }, full ? '⤡ board' : '⤢'), full ? '' : h('button', { class: 'ctl', title: 'hide terminals (t)', onclick: () => togglePanes('hide') }, '▁'));
-  $('#ptabs').replaceChildren(...tabs);
-  const ph = $('#terms .placeholder');
-  const sp = scopePlan();
-  const placeholder = S.pane === 'placeholder' || !list.length;
-  if (placeholder) {
-    const el = ph || h('div', { class: 'placeholder' });
-    const exitedCoord = sp?.agents.find((a) => a.role === 'coordinator' && a.exited);
-    el.replaceChildren(
-      ...(sp?.open
-        ? [h('div', {}, sp.coordinator?.away ? `${sp.coordinator.id} runs elsewhere (herdr, another machine).` : exitedCoord ? `The coordinator's session ended (exit ${exitedCoord.code}).` : 'No coordinator runs for this plan.'), sp.coordinator?.away ? '' : h('div', {}, h('button', { class: 'btn', onclick: () => coordinator(sp, false) }, 'Start coordinator (s)'))]
-        : [h('div', {}, list.length ? '' : S.scope.level === 'plan' ? 'This plan is closed.' : 'No agents run in this scope. Open a plan to start its coordinator.')]),
-    );
-    if (!ph) $('#terms').append(el);
-    el.style.display = '';
-    terms.show(null);
-  } else {
-    if (ph) ph.style.display = 'none';
-    terms.show(S.pane);
-  }
-}
-function showPane(handle, focus = false, p = null) {
-  if ($('#main').classList.contains('no-panes')) togglePanes('hide');
-  if (p && S.scope.level === 'plan' && p.key !== `${S.scope.root}#${S.scope.plan}`) setScope({ level: 'plan', root: p.root, plan: p.id });
-  else if (p && S.scope.level === 'project' && p.root !== S.scope.root) setScope({ level: 'plan', root: p.root, plan: p.id });
-  S.pane = handle;
-  store.set('pane', handle);
-  renderPanes();
-  if (focus && handle !== 'placeholder') terms.show(handle, { focus: true });
-}
-function goAgent() {
-  const r = selRow();
-  if (!r?.p) return;
-  const handle = r.it?.pane || agentOf(r.p, r.task ? r.p.st.tasks[r.task]?.owner : r.it?.actor)?.handle;
-  if (handle) showPane(handle, true, r.p);
-  else toast('no agent of this runs here', true);
-}
-function togglePanes(mode) {
-  const m = $('#main');
-  if (mode === 'full') m.classList.remove('no-panes'), m.classList.toggle('full-panes');
-  else m.classList.remove('full-panes'), m.classList.toggle('no-panes');
-  store.set('panes-mode', m.classList.contains('full-panes') ? 'full' : m.classList.contains('no-panes') ? 'hide' : '');
-  renderPanes(); // the full-screen button says how to get back
+// ---------------------------------------------------------------- layout: sizes, panels
+function toggleExplorer() {
+  document.body.classList.toggle('no-explorer');
+  store.set('explorer', document.body.classList.contains('no-explorer') ? 'hidden' : '');
   requestAnimationFrame(() => terms.refit());
 }
-// drag the split; double-click: terminals full screen
 (() => {
-  const split = $('#split');
-  const main = $('#main');
-  const saved = store.get('panes-size', null);
-  if (saved) main.style.setProperty('--panes', saved);
-  const mode = store.get('panes-mode', '');
-  if (mode === 'full') main.classList.add('full-panes');
-  if (mode === 'hide') main.classList.add('no-panes');
-  // double-click: terminals full screen and back; hidden terminals come back
-  split.addEventListener('dblclick', () => togglePanes(main.classList.contains('no-panes') ? 'hide' : 'full'));
-  split.addEventListener('pointerdown', (e) => {
-    split.setPointerCapture(e.pointerId);
-    const move = (ev) => {
-      const box = main.getBoundingClientRect();
-      const px = Math.max(80, Math.min(box.height - 120, box.bottom - ev.clientY));
-      main.style.setProperty('--panes', `${px}px`);
-    };
-    const up = () => {
-      split.removeEventListener('pointermove', move);
-      store.set('panes-size', main.style.getPropertyValue('--panes'));
-      terms.refit();
-    };
-    split.addEventListener('pointermove', move);
-    split.addEventListener('pointerup', up, { once: true });
-  });
+  const root = document.documentElement;
+  for (const [k, v] of Object.entries(store.get('sizes', {}))) root.style.setProperty(`--${k}`, v);
+  // narrow windows: the Explorer starts hidden (☰ shows it)
+  const pref = store.get('explorer', null);
+  if (pref === 'hidden' || (pref == null && innerWidth < 1400)) document.body.classList.add('no-explorer');
+  if (store.get('terms', '') === 'hidden') document.body.classList.add('terms-hidden');
+  const save = (k, v) => {
+    root.style.setProperty(`--${k}`, v);
+    store.set('sizes', { ...store.get('sizes', {}), [k]: v });
+  };
+  for (const g of document.querySelectorAll('.gutter')) {
+    g.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      g.setPointerCapture(e.pointerId);
+      g.classList.add('drag');
+      const col = g.dataset.col;
+      const row = g.dataset.row;
+      const target = col ? $(`#${col}`) : row === 'needs' ? $('#needs') : $('#terminals');
+      const start = target.getBoundingClientRect();
+      const x0 = e.clientX;
+      const y0 = e.clientY;
+      const move = (ev) => {
+        if (col) {
+          const w = g.dataset.side === 'right' ? start.width - (ev.clientX - x0) : start.width + (ev.clientX - x0);
+          save(col === 'explorer' ? 'w-explorer' : col === 'leftcol' ? 'w-left' : 'w-inflight', `${Math.round(Math.max(160, Math.min(innerWidth * 0.5, w)))}px`);
+        } else if (row === 'needs') {
+          const parent = $('#leftcol').getBoundingClientRect();
+          save('h-needs', `${Math.round(Math.max(80, Math.min(parent.height - 120, start.height + (ev.clientY - y0))))}px`);
+        } else save('h-terms', `${Math.round(Math.max(80, Math.min(innerHeight * 0.85, start.height - (ev.clientY - y0))))}px`);
+      };
+      const up = () => {
+        g.classList.remove('drag');
+        g.removeEventListener('pointermove', move);
+        terms.refit();
+      };
+      g.addEventListener('pointermove', move);
+      g.addEventListener('pointerup', up, { once: true });
+    });
+    g.addEventListener('dblclick', () => {
+      if (g.dataset.row === 'terminals') document.body.classList.toggle('terms-max');
+      requestAnimationFrame(() => terms.refit());
+    });
+  }
 })();
+$('#explorer-toggle').onclick = toggleExplorer;
+$('#palette-open').onclick = palette;
+$('#term-hide').onclick = () => toggleTerminals(false);
+$('#term-max').onclick = () => (document.body.classList.toggle('terms-max'), requestAnimationFrame(() => terms.refit()));
+$('#term-to-editor').onclick = () => {
+  const a = allAgents().find((x) => x.handle === S.pane);
+  if (a) openTerminalTab(a, a.p);
+  else toast('no terminal shown', true);
+};
+$('#needs-count').onclick = () => $('#needs .body').scrollTo({ top: 0, behavior: 'smooth' });
+addEventListener('resize', () => terms.refit());
 
 // ---------------------------------------------------------------- keys
 const HELP = [
-  ['0 1 2 3 4', 'Overview · Tasks · Plan · Log · Changes'],
-  ['j k ↑ ↓', 'move'],
-  ['⏎', 'open: a plan, a task in its plan'],
-  ['esc', 'up a level (plan › project › all), or cancel'],
-  ['a', 'approve a review · mark your task done'],
-  ['x', 'request changes'],
-  ['r', 'answer a question'],
-  ['n', 'a message on the task'],
-  ['N', 'a note on the plan'],
-  ['s', 'start the coordinator'],
-  ['S', 'replace the coordinator (after a checkpoint)'],
-  ['c', 'close the plan'],
-  ['g', 'go to the agent'],
-  ['L', "a task's live view: its builds, tests, pipelines (⏎ in Tasks)"],
-  ['d', "a task's changes (diff); in Changes: the file's"],
-  ['o', 'open the file · in the live view: output / view'],
-  ['m', 'Markdown: rendered / source'],
-  ['[ ]', 'the live view: other runs'],
-  ['t · f', 'hide the terminals · terminals full screen'],
-  ['ctrl+]', 'leave a terminal (back to the board)'],
-  ['ctrl+⏎', 'send what you wrote'],
+  ['Everywhere', [
+    ['⌘K / ctrl+K', 'search: plans, tasks, documents, agents, commands'],
+    ['ctrl+`', 'show or hide the terminals'],
+    ['ctrl+]', 'leave a terminal (the page has the keys again)'],
+    ['?', 'this help'],
+    ['esc', 'cancel what you write, close the search'],
+  ]],
+  ['On a task (its tab active)', [
+    ['a', 'approve a review · mark your task done'],
+    ['x', 'request changes'],
+    ['r · n', 'answer a question · a message for the coordinator'],
+    ['L', 'its live view'],
+    ['d', 'its changes'],
+    ['g', 'its agent’s terminal'],
+  ]],
+  ['On a plan (its tab active)', [
+    ['s · S', 'start · replace the coordinator'],
+    ['N', 'a note for the coordinator'],
+    ['c', 'close the plan'],
+    ['g', 'the coordinator’s terminal'],
+  ]],
+  ['In a live view', [
+    ['[ ]', 'the previous · next run'],
+    ['o', 'the raw output / the view'],
+  ]],
+  ['Mouse', [
+    ['click', 'a preview tab (the next click replaces it)'],
+    ['double-click', 'keep the tab open'],
+    ['right-click', 'more: open to the side, live view, terminal as a tab, …'],
+    ['middle-click', 'close a tab'],
+    ['drag', 'the lines between the panels; double-click the one above the terminals: taller'],
+  ]],
 ];
 function help() {
   const d = $('#help');
-  d.replaceChildren(h('h3', {}, 'Keys'), h('table', {}, HELP.map(([k, v]) => h('tr', {}, h('td', {}, h('kbd', {}, k)), h('td', {}, v)))), h('p', { class: 'dim' }, 'Agents keep running when you close this page.'), h('form', { method: 'dialog' }, h('button', { class: 'btn' }, 'Close')));
+  d.replaceChildren(
+    h('h2', { style: 'margin:0 0 6px;font-size:16px' }, 'Agent Task Framework'),
+    h('p', { class: 'dim', style: 'margin:0' }, 'Agents keep running when you close this page.'),
+    HELP.map(([title, rows]) => [h('h3', {}, title), h('table', {}, rows.map(([k, v]) => h('tr', {}, h('td', {}, h('kbd', {}, k)), h('td', {}, v))))]),
+    h('form', { method: 'dialog', style: 'margin-top:14px' }, h('button', { class: 'btn' }, 'Close')),
+  );
   d.showModal();
 }
+$('#help-open').onclick = help;
 document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') return e.preventDefault(), palette();
+  if (e.ctrlKey && (e.key === '`' || e.code === 'Backquote')) return e.preventDefault(), toggleTerminals();
+  if (e.key === 'Escape') closeMenu();
   const tag = e.target.tagName;
-  if (tag === 'TEXTAREA' || tag === 'INPUT' || e.target.closest?.('.xterm') || e.metaKey || e.ctrlKey || e.altKey) return;
-  const k = e.key;
-  const r = selRow();
-  const byKey = actionsFor(r).find((a) => a.key === k);
-  if (S.viewer) return viewerKey(e);
-  if (/^[0-4]$/.test(k)) return setTab(TABS[Number(k)][0]);
-  if (k === 'j' || k === 'ArrowDown') return e.preventDefault(), move(1);
-  if (k === 'k' || k === 'ArrowUp') return e.preventDefault(), move(-1);
-  if (k === 'Enter') return enter();
-  if (k === 'Escape') {
-    if (S.compose) return (S.compose = null), renderDetail();
-    const sc = S.scope;
-    if (sc.level === 'plan') return setScope({ level: 'project', root: sc.root });
-    if (sc.level === 'project') return setScope({ level: 'all' });
-    return;
+  if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT' || e.target.closest?.('.xterm') || e.metaKey || e.ctrlKey || e.altKey || !$('#palette').hidden) return;
+  if (e.key === '?') return help();
+  const t = editor.active();
+  if (!t) return;
+  const p = planByKey(t.pk);
+  if (!p?.st) return;
+  if (t.kind === 'live') {
+    if (e.key === '[') return t.rt.step?.(-1);
+    if (e.key === ']') return t.rt.step?.(1);
+    if (e.key === 'o') return t.rt.toggleRaw?.();
   }
-  if (k === '?') return help();
-  if (k === 't') return togglePanes('hide');
-  if (k === 'f') return togglePanes('full');
-  if (byKey) return e.preventDefault(), byKey.run();
-});
-$('.brand').onclick = () => setScope({ level: 'all' });
-// typing into a terminal: say so, and how to get back
-$('#terms').addEventListener('focusin', () => {
-  const x = paneList().find((y) => y.a?.handle === S.pane);
-  $('#hint').textContent = `typing into ${x?.a?.name ?? 'the terminal'} · ctrl+] back to the board`;
-  $('#hint').classList.add('typing');
-});
-$('#terms').addEventListener('focusout', () => {
-  $('#hint').classList.remove('typing');
-  $('#hint').textContent = hintFor(selRow());
+  const acts = t.kind === 'task' ? actionsFor({ p, task: t.task, tab: t }) : t.kind === 'plan' ? actionsFor({ p, tab: t }) : [];
+  const a = acts.find((x) => x.key === e.key);
+  if (a) (e.preventDefault(), a.run());
 });
 
 // ---------------------------------------------------------------- start
-setInterval(() => S.ov && (renderList(), renderTree()), 15_000); // relative times
+initPages({
+  editor,
+  get human() {
+    return S.ov?.human ?? 'human';
+  },
+  planByKey,
+  planTitle,
+  loadClosed,
+  briefOf,
+  changesOf,
+  liveListOf,
+  agentOf,
+  agentStatus,
+  sessionExists,
+  actionsFor,
+  act,
+  refreshTab,
+  openTask,
+  openPlan,
+  openLive,
+  openFile,
+  openDiff,
+  showTerminal,
+  placeTerminal,
+});
+setInterval(() => S.ov && (renderNeeds(), renderInflight()), 15_000); // relative times
 // xterm measures the cell size when a terminal opens: load the font first
 Promise.all([document.fonts.load("13px 'JetBrains Mono'"), document.fonts.load("bold 13px 'JetBrains Mono'")])
   .catch(() => {})
-  .finally(() => {
+  .finally(async () => {
     terms.connect();
     stream();
-    load();
-    $('#list').focus();
+    await load();
+    // the tabs that were open: those whose plan still exists
+    editor.restore((t) => !!allPlans().find((p) => p.key === t.pk));
+    render();
   });

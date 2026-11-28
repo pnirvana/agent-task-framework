@@ -2662,6 +2662,12 @@ process.stdin.on('data', (d) => process.stdout.write('got ' + JSON.stringify(Str
     assert.equal(daemonUp(), false);
     assert.equal(ensureDaemon(), true, 'started');
     assert.equal(ensureDaemon(), false, 'already running');
+    // a second daemon started on the same socket (a race between starters) leaves it alone
+    const keep = call({ op: 'create', name: 'keep', argv: ['/bin/sh', '-c', 'sleep 30'], cwd: dir, env: process.env });
+    const second = spawn(process.execPath, [path.join(path.dirname(ATF), '..', 'src', 'sessiond.mjs')], { env: process.env, stdio: 'ignore' });
+    assert.equal(await new Promise((r) => second.on('exit', r)), 0, 'the second daemon exits');
+    assert.ok(call({ op: 'list' }).list.some((x) => x.id === keep.id), 'the first one still serves the socket, with its sessions');
+    call({ op: 'remove', id: keep.id });
 
     // the daemon: a session, replayed to a client attaching later, input, size, end
     const { id } = call({ op: 'create', name: 'sh', argv: ['/bin/sh', '-c', 'echo "hello there"; stty size; printf "\\033]7501;state=blocked:app=x:kind=permission\\007"; read x; echo "read $x"'], cwd: dir, env: process.env, cols: 90, rows: 20, meta: { note: 'x' } });

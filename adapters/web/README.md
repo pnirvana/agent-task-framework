@@ -1,8 +1,8 @@
 # ATF web UI
 
-ATF in the browser: what the herdr board and herdr do together, without herdr or a
-terminal. Follow plans, answer, review, give direction, start and replace coordinators,
-and watch and type into every agent. Design: [docs/webui-design.md](../../docs/webui-design.md).
+ATF in the browser, laid out like an IDE: follow plans, answer, review, give direction,
+start and replace coordinators, watch every build and test, and type into every agent,
+without herdr or a terminal. Design: [docs/webui-design.md](../../docs/webui-design.md).
 
 ## Start
 
@@ -29,52 +29,64 @@ restart `atf-web`. Pick the agent kind in `~/.config/atf/config.toml`:
 agent_kind = "copilot"   # pi | copilot | opencode | claude | codex
 ```
 
-## The page
+## The layout
 
-- **Sidebar:** projects, their plans, each plan's agents with their state (green
-  working, grey idle, red pulsing waits for you). The red counts are what needs you.
-- **Views** (`0`-`4`): Overview (NEEDS YOU, YOUR TASKS, IN FLIGHT), Tasks, Plan (notes,
-  documents), Log, Changes (per task the files it changed, with line counts). The scope
-  is all projects, one project or one plan: the sidebar, the crumbs and `esc` change it,
-  and `⏎` on a plan opens it.
-- **Detail** (right): what you need to act on the selected row (the question and the
-  recommendation, the submission and the acceptance criteria, …) and the actions.
-- **Viewer** (in place of the board, `esc` closes it): files with Markdown rendered and
-  code highlighted, diffs, and a task's **live view**: its builds, tests and pipelines,
-  with the kind's view (Maven: modules, failures with their stack traces, test classes)
-  or the raw output, following it while it runs.
-- **Notifications:** the bell (top left) turns on the browser's notifications for what
-  needs you while the page is in the background; the tab title counts it.
-- **Agent panes** (below): the agents of the plans in scope. A plan's coordinator is
-  always there, with a start button when it is not running. Drag the line above to
-  resize, double-click it for full-screen terminals.
+```
+┌ Explorer ──┐┌ Needs you ─────────┐┌ editor: [Plan] [T2 ×] [T1 live ×] … ┐┌ In flight ───────┐
+│ projects   ││ what needs you,    ││                                     ││ per plan: progress│
+│  plans     ││ your tasks         ││  the task, plan, live view, file,   ││ coordinator, what │
+│   agents   │├ Tasks Log Changes ─┤│  diff or terminal you opened        ││ runs now          │
+│            ││ ▾ all / one plan   ││                                     ││                   │
+└────────────┘└────────────────────┘└─────────────────────────────────────┘└───────────────────┘
+ Terminals: [lead ●] [be T1 ●] …
+```
+
+- **Explorer:** projects, their plans and each plan's agents (green working, grey idle,
+  red pulsing waits for you). A plan opens its page and filters the work panel to it; an
+  agent opens its terminal. Hidden with ☰ (narrow windows start without it).
+- **Needs you** (always, for every plan): questions, reviews, a coordinator waiting, a
+  plan without one, then your own tasks. Hovering a row shows its quick action (Approve,
+  Answer, Done, Start, Terminal).
+- **Work panel:** Tasks, Log and Changes, for all open plans or the one chosen in the
+  filter (the Explorer sets it too).
+- **Editor:** what you open is a tab. A single click opens a preview (the next one
+  replaces it, its title in italics); a double-click, or writing in it, keeps it.
+  Right-click a tab or a row for more: open to the side (two groups), close others, …
+  - **a task:** the question or the submission at the top with the actions (Approve,
+    Request changes, Answer, Message, Mark done), then acceptance, live runs, changed
+    files, artifacts, notes, history;
+  - **a plan:** where it stands, the coordinator (start, replace, its terminal),
+    documents, tasks, notes, closing it;
+  - **a live view:** a task's builds, tests, pipelines, deployments: the kind's view
+    (Maven: modules, failures with their stack traces, test classes) or the raw output,
+    following it while it runs; other runs from the list or with `[` `]`;
+  - **files** (Markdown rendered, code highlighted), **diffs**, and **terminals** (from
+    the terminal panel's ⧉ or a right-click on an agent).
+- **In flight** (always, for every plan): progress, the coordinator and what it does,
+  and per task in progress its agent and what runs or waits now; a click on that opens
+  the live view, the task id its page, the agent its terminal.
+- **Terminals:** the agents of the plans the work panel shows, the coordinator first.
+  `ctrl+]` leaves a terminal; `ctrl+\`` hides and shows the panel.
+
+Panel sizes are dragged on the lines between them and remembered, as are the open tabs.
 
 ## Keys
 
 | key | |
 |---|---|
-| `0` … `4` | Overview · Tasks · Plan · Log · Changes |
-| `j` `k` `↑` `↓` | move |
-| `⏎` | open: a plan, a task in its plan, a waiting agent's pane |
-| `esc` | up a level (plan › project › all), or cancel |
-| `a` | approve a review · mark your task done |
-| `x` | request changes |
-| `r` | answer a question |
-| `n` / `N` | a message on the task / a note on the plan |
-| `s` / `S` | start / replace the coordinator |
-| `c` | close the plan |
-| `g` | go to the agent (its terminal gets the keys) |
-| `L` | the task's live view (⏎ in Tasks) |
-| `d` / `o` | a task's or file's diff / open the file |
-| in the viewer | `esc` close · `j` `k` `space` scroll · `g` `G` top, end · `m` Markdown rendered / source · `o` raw output / view · `[` `]` other runs |
-| `ctrl+]` | leave a terminal: the board has the keys again |
-| `t` / `f` | hide the terminals / terminals full screen |
-| `ctrl+⏎` | send what you wrote |
+| `⌘K` / `ctrl+K` | search: plans, tasks, documents, agents, commands |
+| `ctrl+\`` | show or hide the terminals |
+| `ctrl+]` | leave a terminal |
 | `?` | the keys |
+| on a task tab | `a` approve / mark done · `x` request changes · `r` answer · `n` message · `L` live · `d` changes · `g` its agent's terminal |
+| on a plan tab | `s` / `S` start / replace the coordinator · `N` note · `c` close · `g` the coordinator's terminal |
+| in a live view | `[` `]` other runs · `o` raw output / view |
+| writing | `⌘/ctrl+⏎` sends · `esc` cancels |
 
 Everything you do is written as the human (`human`) through the same functions as the
 board and the CLI (`src/actions.mjs`); the coordinator decides what follows, as with the
-board.
+board. Notifications: the bell in the top bar turns on the browser's notifications for
+what needs you while the page is in the background; the tab title counts it.
 
 ## Not yet
 

@@ -199,7 +199,7 @@ try {
   switch (pos[0]) {
     case 'daemon':
       process.on('SIGHUP', () => {});
-      serve(socketPath());
+      if (!serve(socketPath())) fail(`a daemon already serves ${socketPath()}`);
       break;
     case 'start':
       say(`${ensureDaemon() ? 'started' : 'running'}: ${socketPath()}`);

@@ -10,28 +10,64 @@
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<aside id="side">
-  <header><button class="brand" data-scope="all" title="all projects">Agent Task Framework</button><span class="hdr-r"><button id="bell" class="bell"></button><span id="conn" class="conn" title="connection to the server">●</span></span></header>
-  <nav id="tree" aria-label="projects and plans"></nav>
-</aside>
-<main id="main">
-  <header id="bar">
-    <nav id="crumbs" aria-label="scope"></nav>
-    <nav id="tabs" role="tablist"></nav>
-    <span id="hint" class="dim"></span>
-  </header>
-  <section id="board">
-    <div id="list" tabindex="0" aria-label="board"></div>
-    <aside id="detail" aria-live="polite"></aside>
+<header id="top">
+  <button id="explorer-toggle" class="icon" title="show / hide the Explorer">☰</button>
+  <span class="brand">Agent Task Framework</span>
+  <button id="palette-open" class="search" title="search plans, tasks, documents, agents and commands"><span>Search plans, tasks, files, agents…</span><kbd>⌘K</kbd></button>
+  <span class="grow"></span>
+  <button id="needs-count" class="pill" title="what needs you"></button>
+  <button id="bell" class="icon"></button>
+  <button id="help-open" class="icon" title="keys and help">?</button>
+  <span id="conn" class="conn" title="connection to the server">●</span>
+</header>
+
+<div id="ws">
+  <aside id="explorer" class="panel">
+    <header><span>Explorer</span></header>
+    <nav id="tree" class="body" aria-label="projects, plans and agents"></nav>
+  </aside>
+  <div class="gutter v" data-col="explorer"></div>
+
+  <section id="leftcol">
+    <section id="needs" class="panel">
+      <header><span>Needs you</span><span id="needs-n" class="n"></span></header>
+      <div class="body"></div>
+    </section>
+    <div class="gutter h" data-row="needs"></div>
+    <section id="work" class="panel">
+      <header>
+        <nav id="work-tabs" role="tablist"></nav>
+        <select id="work-filter" title="which plans the list shows"></select>
+      </header>
+      <div class="body"></div>
+    </section>
   </section>
-  <div id="split" title="drag to resize; double-click: terminals full screen, or back"></div>
-  <section id="panes">
+  <div class="gutter v" data-col="leftcol"></div>
+
+  <main id="editor"></main>
+  <div class="gutter v" data-col="inflight" data-side="right"></div>
+
+  <aside id="inflight" class="panel">
+    <header><span>In flight</span></header>
+    <div class="body"></div>
+  </aside>
+</div>
+
+<div class="gutter h" id="term-gutter" data-row="terminals"></div>
+<section id="terminals" class="panel">
+  <header>
     <nav id="ptabs"></nav>
-    <div id="terms"></div>
-  </section>
-</main>
+    <span class="grow"></span>
+    <button id="term-to-editor" class="icon" title="open this terminal as an editor tab">⧉</button>
+    <button id="term-max" class="icon" title="terminals taller / back">⤢</button>
+    <button id="term-hide" class="icon" title="hide the terminals (ctrl+`)">▁</button>
+  </header>
+  <div id="terms"></div>
+</section>
+
 <div id="toast" role="status"></div>
 <dialog id="help"></dialog>
+<div id="palette" hidden></div>
 <script type="module" src="app.js"></script>
 </body>
 </html>
