@@ -23,6 +23,12 @@
 //   T6 android    ./gradlew build                   build: a log, warnings counted
 //   T7 dba        ./scripts/migrate.sh --env staging   waits for your approval, then runs
 //   T8 app        ./run-app.sh > app.log 2>&1 &     a live log file: errors and warnings
+//   T9-T11 you    your own tasks (release notes, a deploy window, API keys); T12 (ops)
+//                 waits on the deploy window
+//   T13 Payments  three levels: T13.1 Card payments › T13.1.1 Stripe webhook (payments),
+//                 T13.1.2 3-D Secure (waits on it); T13.2 Refunds (refunds)
+//   T14 Search    T14.1 Index (search) and T14.2 Results page (searchui) side by side;
+//                 T14.3 analytics waits on the index
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -51,7 +57,7 @@ const TEAM = [
 ];
 fs.mkdirSync(dir, { recursive: true });
 const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', ATF_BACKEND: '', HERDR_ENV: '' };
-const atf = (a, extra = {}) => JSON.parse(execFileSync(process.execPath, [ATF, ...a, '--json'], { cwd: dir, env: { ...env, ...extra } }).toString());
+const atf = (a, extra = {}) => JSON.parse(execFileSync(process.execPath, [ATF, ...a, '--json'], { cwd: dir, env: { ...env, ...extra }, maxBuffer: 256 << 20 }).toString());
 if (!fs.existsSync(path.join(dir, '.git'))) {
   execFileSync('git', ['init', '-q'], { cwd: dir });
   fs.writeFileSync(path.join(dir, '.gitignore'), '.atf/\napp.log\n*/target/\nbuild/\n');
@@ -64,11 +70,67 @@ if (!fs.existsSync(path.join(root, 'plans'))) {
   root = atf(['init']).root;
   atf(['projects', 'add', dir]);
 }
-let plan = atf(['plan', 'list']).find((p) => p.title === 'Live views' && p.status === 'active')?.id;
+// the plan: "Shop release" (its tasks show every live view; earlier demos called it "Live views")
+const TITLE = 'Shop release';
+let plan = atf(['plan', 'list']).find((p) => [TITLE, 'Live views'].includes(p.title) && p.status === 'active')?.id;
+if (plan) atf(['plan', 'update', '--title', TITLE], { ATF_PLAN: plan });
 if (!plan) {
-  plan = atf(['plan', 'new', 'Live views', '--coordinator', 'lead', '--goal', 'Every live view at work: builds, tests, a pipeline, a deployment, a wait, an approval, a live log']).plan;
+  plan = atf(['plan', 'new', TITLE, '--coordinator', 'lead', '--goal', 'Every live view at work: builds, tests, a pipeline, a deployment, a wait, an approval, a live log']).plan;
   for (const [, who, title, accept] of TEAM) atf(['add', title, '--assign', who, '--accept', accept], { ATF_PLAN: plan });
 }
+// the human's own tasks (Your tasks in the web UI): some to do eventually, one that a
+// later task waits on
+const HUMAN_TASKS = [
+  ['Write the release notes for 2.4', 'What changed for shoppers: coupons, the new checkout, faster search.'],
+  ['Agree the production deploy window with ops', 'Thursday or Friday morning; "Deploy to production" waits on it.'],
+  ['Rotate the staging API keys', 'The payment provider keys expire at the end of the month.'],
+];
+{
+  const have = new Set(atf(['list'], { ATF_PLAN: plan }).map((t) => t.title));
+  const ids = {};
+  for (const [title, desc] of HUMAN_TASKS) if (!have.has(title)) ids[title] = atf(['add', title, '--assign', 'human', '--desc', desc], { ATF_PLAN: plan }).task.id;
+  const window = ids['Agree the production deploy window with ops'] ?? atf(['list'], { ATF_PLAN: plan }).find((t) => t.title === 'Agree the production deploy window with ops')?.id;
+  if (window && !have.has('Deploy to production')) atf(['add', 'Deploy to production', '--assign', 'ops', '--dep', window, '--accept', 'shop runs in production'], { ATF_PLAN: plan });
+}
+
+// tasks with parts, three levels deep (T13 › T13.1 › T13.1.1), two of them in flight at
+// once: their cards sit under their parents; one subtask waits on another
+const TREE = [
+  { title: 'Payments', kids: [
+    { title: 'Card payments', kids: [
+      { title: 'Stripe webhook handler', who: 'payments', accept: 'webhooks are verified and stored' },
+      { title: '3-D Secure challenge', who: 'payments', accept: 'the challenge completes', dep: 'Stripe webhook handler' },
+    ] },
+    { title: 'Refunds', who: 'refunds', accept: 'partial and full refunds' },
+  ] },
+  { title: 'Search', kids: [
+    { title: 'Index the products', who: 'search', accept: 'every product is in the index' },
+    { title: 'Search results page', who: 'searchui', accept: 'results, filters and paging' },
+    { title: 'Search analytics', accept: 'queries without results are reported', dep: 'Index the products' },
+  ] },
+];
+const TREE_AGENTS = {}; // who -> the task it works on
+{
+  const all = () => atf(['list'], { ATF_PLAN: plan });
+  const ids = {};
+  const make = (node, parent) => {
+    let id = all().find((t) => t.title === node.title && (t.parent ?? null) === parent)?.id;
+    if (!id) {
+      const a = ['add', node.title];
+      if (parent) a.push('--parent', parent);
+      if (node.who) a.push('--assign', node.who);
+      if (node.accept) a.push('--accept', node.accept);
+      if (node.dep && ids[node.dep]) a.push('--dep', ids[node.dep]);
+      id = atf(a, { ATF_PLAN: plan }).task.id;
+    }
+    ids[node.title] = id;
+    if (node.who && !node.dep) TREE_AGENTS[node.who] = id;
+    for (const k of node.kids ?? []) make(k, id);
+  };
+  for (const n of TREE) make(n, null);
+}
+for (const [who, id] of Object.entries(TREE_AGENTS)) TEAM.push([id, who]);
+
 // every agent has its task in progress (the observer attributes commands to it)
 for (const [id, who] of TEAM) {
   try {
@@ -176,30 +238,31 @@ const maven = (n) =>
 
 // ---------------------------------------------------------------- T2 tests (jest)
 const SUITES = ['cart', 'checkout', 'coupon', 'price', 'search', 'account', 'address', 'payment'];
-const npmTest = (n) =>
-  command('frontend', 'npm test', async (out) => {
-    const failing = n % 2 === 0 ? 'coupon' : null;
+const npmTest = (n, who = 'frontend', cmd = 'npm test', suites = SUITES) =>
+  command(who, cmd, async (out) => {
+    const failing = suites === SUITES ? (n % 2 === 0 ? 'coupon' : null) : n % 3 === 1 ? suites[suites.length - 1] : null;
     out('> shop-web@2.4.0 test');
     out('> jest --ci');
     out('');
     let total = 0;
-    for (const s of SUITES) {
+    for (const s of suites) {
       await sleep(jitter(1800));
       const k = 4 + (s.length % 5);
       total += k;
       if (s === failing) {
+        const what = s === 'coupon' ? 'applies a 10% coupon to the cart total' : `${s} recovers after a timeout`;
         out(`FAIL src/${s}/${s}.test.ts`);
-        out(`  ● ${s} › applies a 10% coupon to the cart total`);
+        out(`  ● ${s} › ${what}`);
         out('');
         out('    expect(received).toBe(expected) // Object.is equality');
         out('    Expected: 8910');
         out('    Received: 9900');
         out('');
-        out(`  ✕ applies a 10% coupon to the cart total (14 ms)`);
+        out(`  ✕ ${what} (14 ms)`);
       } else out(`PASS src/${s}/${s}.test.ts (${(0.8 + s.length / 10).toFixed(2)} s)`);
     }
     out('');
-    out(`Test Suites: ${failing ? '1 failed, ' : ''}${SUITES.length - (failing ? 1 : 0)} passed, ${SUITES.length} total`);
+    out(`Test Suites: ${failing ? '1 failed, ' : ''}${suites.length - (failing ? 1 : 0)} passed, ${suites.length} total`);
     out(`Tests:       ${failing ? '1 failed, ' : ''}${total - (failing ? 1 : 0)} passed, ${total} total`);
     out('Time:        14.2 s');
     return failing ? 1 : 0;
@@ -352,16 +415,43 @@ const appLog = async () => {
 };
 
 // ---------------------------------------------------------------- the team at work
+// some agents work through steps (atf steps / atf step): one step per run, then again
+const STEPS = {
+  backend: ['Reproduce the refund bug', 'Fix RefundTest', 'Add the missing index', 'Full build green'],
+  frontend: ['Coupon rounding', 'Cart totals', 'All suites green'],
+  ops: ['Build the image', 'Roll out to staging', 'Smoke test'],
+  android: ['Upgrade Gradle', 'Fix deprecations', 'Release build'],
+  payments: ['Verify signatures', 'Store the events', 'Retry on failure'],
+  search: ['Product mapping', 'Bulk import'],
+  searchui: ['Results list', 'Filters', 'Paging'],
+};
+const taskOf = Object.fromEntries(TEAM.map(([id, who]) => [who, id]));
+const asAgent = (who) => ({ ATF_PLAN: plan, ATF_ACTOR: who, ATF_ROLE: 'subagent' });
+for (const [who, steps] of Object.entries(STEPS)) atf(['steps', taskOf[who], ...steps], asAgent(who));
+const stepAt = {}; // per agent: the steps finished so far (a failed run keeps its step)
+function stepTo(who, state) {
+  const steps = STEPS[who];
+  if (!steps) return;
+  const k = (stepAt[who] ?? 0) % steps.length;
+  if (state === 'done') stepAt[who] = (stepAt[who] ?? 0) + 1;
+  try {
+    if (state === 'start' && k === 0) for (let i = 1; i <= steps.length; i++) atf(['step', taskOf[who], String(i), 'todo'], asAgent(who));
+    atf(['step', taskOf[who], String(k + 1), state], asAgent(who));
+  } catch {}
+}
+
 /** An agent repeating its command: one run, a pause, the next run (n counts them). */
 async function agent(name, run, pause) {
   for (let n = 0; !stopping; n++) {
+    stepTo(name, 'start');
     const exit = await run(n);
+    if (!exit) stepTo(name, 'done');
     console.log(`${new Date().toLocaleTimeString()} ${name.padEnd(9)} run ${n + 1}: ${exit ? 'failed' : 'ok'}`);
     if (once) return;
     await sleep(jitter(pause));
   }
 }
-console.log(`project ${dir}\nplan ${plan} "Live views": T1-T8, one agent each · ctrl+c stops`);
+console.log(`project ${dir}\nplan ${plan} "${TITLE}": T1-T8 and the parts of T13, T14, one agent each · ctrl+c stops`);
 console.log('web UI: the plan, Tasks, ⏎ (or L) on a task · herdr board: L on a task');
 process.on('SIGINT', () => {
   stopping = true;
@@ -377,6 +467,10 @@ await Promise.all([
   staggered(8000, () => agent('qa', waitHealthy, 30_000)),
   staggered(10_000, () => agent('android', gradle, 15_000)),
   staggered(3000, () => agent('dba', migrate, 40_000)),
+  staggered(5000, () => agent('payments', (n) => npmTest(n, 'payments', 'npm test -- webhook', ['webhook', 'signature', 'events', 'retry']), 14_000)),
+  staggered(7000, () => agent('refunds', (n) => npmTest(n, 'refunds', 'npm test -- refunds', ['refund', 'partial', 'ledger']), 18_000)),
+  staggered(9000, () => agent('search', (n) => npmTest(n, 'search', 'npm run test:index', ['mapping', 'bulk', 'synonyms']), 16_000)),
+  staggered(11_000, () => agent('searchui', (n) => npmTest(n, 'searchui', 'npm test -- search', ['results', 'filters', 'paging', 'empty']), 13_000)),
   once ? staggered(1000, async () => {
     const p = appLog();
     await sleep(30_000);

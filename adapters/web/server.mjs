@@ -28,7 +28,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { knownRoots, listPlanIds, readEvents, eventsPath, readConfig } from '../../src/store.mjs';
 import { fold, brief, HUMAN } from '../../src/core.mjs';
-import { attentionOf } from '../../src/attention.mjs';
+import { attentionOf, liveAgent } from '../../src/attention.mjs';
 import { humanAction, ACTIONS } from '../../src/actions.mjs';
 import { liveDir, activeRuns, taskLive, liveBadge, liveView, liveItem, hasView, hasItem, readTail, earlierText, loadLiveKinds, enableAutoRefresh } from '../../src/live.mjs';
 import { planChanges, changeMode, levelSets, totals, onlyFile, patchText, projectPath } from '../../src/changes.mjs';
@@ -81,6 +81,32 @@ function liveBadges(root, id, st) {
   return out;
 }
 
+/**
+ * Per task in flight (in progress, blocked, in review): its run at a glance, for the
+ * cockpit: the run running or waiting now, else its latest current one; the kind's compact
+ * view (what the board shows below a task), at most 7 lines of [text, style] segments.
+ */
+function liveGlances(root, id, st) {
+  const runs = activeRuns(root, id);
+  const out = {};
+  for (const tid of st.order) {
+    const t = st.tasks[tid];
+    if (t.children.length || !['in_progress', 'blocked', 'review'].includes(t.status)) continue;
+    const live = taskLive(t, runs);
+    const r = live.now.find((x) => x.waiting) || live.now[0] || live.recorded[0];
+    if (!r) continue;
+    let lines = [];
+    try {
+      lines = liveView(r, r.summary, { width: 110, full: false, active: !!r.active })
+        .filter((l) => !l.section)
+        .slice(0, 7)
+        .map((l) => [...l]);
+    } catch {}
+    out[tid] = { ...runOut(r), lines, runs: live.now.length + live.recorded.length };
+  }
+  return out;
+}
+
 /** A run or artifact for the client: what the list and the view's head show. */
 const runOut = (x) => ({
   ref: x.out || x.ref,
@@ -110,6 +136,7 @@ function liveRunsOf(root, id, st, task) {
   return { live, runs: [...live.now.filter((n) => n.waiting), ...live.now.filter((n) => !n.waiting), ...live.recorded] };
 }
 const ANSI = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+const ORPHAN_MS = 10 * 60_000; // a task in progress without an agent and without activity this long: flagged
 const MAX_FILE = 2 << 20; // the file viewer shows at most this much of a file
 
 /**
@@ -189,6 +216,26 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
 
   const agentsOf = (root, id) => sessions.filter((x) => x.meta?.root && real(x.meta.root) === root && (x.meta.plan === id || (!x.meta.plan && x.meta.role === 'coordinator'))).map(sessionAgent);
 
+  /**
+   * Per task in progress with an agent owner and no session of it here: `elsewhere` when
+   * its writes came from herdr or another daemon; `orphan` when nothing happened on it for
+   * ORPHAN_MS either (no command running, no update): work nobody does, which the cockpit
+   * flags. An agent ATF did not start (a subagent of your own harness) is active, not lost.
+   */
+  function healthOf(lv, root, id, st) {
+    const out = {};
+    const runs = activeRuns(root, id);
+    for (const tid of st.order) {
+      const t = st.tasks[tid];
+      if (t.status !== 'in_progress' || t.children.length || !t.owner || t.owner === HUMAN) continue;
+      if (liveAgent(lv, { ...st, root }, t.owner)) continue;
+      const actor = st.actors[t.owner];
+      if (actor && !lv.local(actor)) out[tid] = 'elsewhere';
+      else if (!runs.some((r) => r.task === tid) && Date.now() - Date.parse(t.updated_at) > ORPHAN_MS) out[tid] = 'orphan';
+    }
+    return out;
+  }
+
   /** One plan for the client: its state, attention, agents. Closed plans: no attention. */
   function planView(root, id, lv = sessionsLiveness(sessions, socket)) {
     const st = plan(root, id);
@@ -203,6 +250,8 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
       open,
       attention: { mine: att.mine.map(said), queued: att.queued.map(strip), todos: att.todos.map(said) },
       live: open ? liveBadges(root, id, st) : {},
+      glance: open ? liveGlances(root, id, st) : {},
+      health: open ? healthOf(lv, root, id, st) : {},
       coordinator: { id: att.coord.id, live: att.coord.live, away: att.coord.away },
       agents: agentsOf(root, id),
     };

@@ -11,58 +11,53 @@
 </head>
 <body>
 <header id="top">
-  <button id="explorer-toggle" class="icon" title="show / hide the Explorer">☰</button>
+  <button id="plans-toggle" class="icon" title="show / hide the plans">☰</button>
   <span class="brand">Agent Task Framework</span>
   <button id="palette-open" class="search" title="search plans, tasks, documents, agents and commands"><span>Search plans, tasks, files, agents…</span><kbd>⌘K</kbd></button>
   <span class="grow"></span>
-  <button id="needs-count" class="pill" title="what needs you"></button>
+  <span id="summary" class="summary"></span>
   <button id="bell" class="icon"></button>
   <button id="help-open" class="icon" title="keys and help">?</button>
   <span id="conn" class="conn" title="connection to the server">●</span>
 </header>
 
-<div id="ws">
-  <aside id="explorer" class="panel">
-    <header><span>Explorer</span></header>
-    <nav id="tree" class="body" aria-label="projects, plans and agents"></nav>
-  </aside>
-  <div class="gutter v" data-col="explorer"></div>
-
-  <section id="leftcol">
+<div id="cockpit">
+  <section id="plans" class="panel">
+    <header><span>Plans</span></header>
+    <div class="body"></div>
+  </section>
+  <div class="gutter v" data-col="plans"></div>
+  <div id="leftcol">
     <section id="needs" class="panel">
-      <header><span>Needs you</span><span id="needs-n" class="n"></span></header>
+      <header><span>Needs you</span><span id="needs-n" class="n"></span><span class="grow"></span><span class="sum">now</span></header>
       <div class="body"></div>
     </section>
     <div class="gutter h" data-row="needs"></div>
-    <section id="work" class="panel">
-      <header>
-        <nav id="work-tabs" role="tablist"></nav>
-        <select id="work-filter" title="which plans the list shows"></select>
-      </header>
+    <section id="todos" class="panel">
+      <header><span>Your tasks</span><span id="todos-n" class="n"></span><span class="grow"></span><span class="sum">eventually</span></header>
       <div class="body"></div>
     </section>
-  </section>
-  <div class="gutter v" data-col="leftcol"></div>
-
-  <main id="editor"></main>
-  <div class="gutter v" data-col="inflight" data-side="right"></div>
-
-  <aside id="inflight" class="panel">
-    <header><span>In flight</span></header>
+  </div>
+  <div class="gutter v" data-col="needs"></div>
+  <section id="flight" class="panel">
+    <header><span>In flight</span><span class="grow"></span><span id="flight-sum" class="sum"></span></header>
     <div class="body"></div>
-  </aside>
+    <aside id="drawer" aria-label="details"></aside>
+  </section>
 </div>
 
 <div class="gutter h" id="term-gutter" data-row="terminals"></div>
 <section id="terminals" class="panel">
-  <header>
-    <nav id="ptabs"></nav>
-    <span class="grow"></span>
-    <button id="term-to-editor" class="icon" title="open this terminal as an editor tab">⧉</button>
-    <button id="term-max" class="icon" title="terminals taller / back">⤢</button>
-    <button id="term-hide" class="icon" title="hide the terminals (ctrl+`)">▁</button>
-  </header>
-  <div id="terms"></div>
+  <div id="term-main">
+    <header id="term-h">
+      <span id="term-title"></span>
+      <span class="grow"></span>
+      <button id="term-max" class="icon" title="terminal taller / back">⤢</button>
+      <button id="term-hide" class="icon" title="minimize the terminal (ctrl+`)">▁</button>
+    </header>
+    <div id="tbody"></div>
+  </div>
+  <nav id="term-list" aria-label="terminals, per plan"></nav>
 </section>
 
 <div id="toast" role="status"></div>

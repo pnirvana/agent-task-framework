@@ -1,6 +1,6 @@
-// The editor's documents: a task, a plan, a task's live view, a file, a diff, a terminal.
-// Each renders into the tab's element from the page's state (ctx, from app.js) and keeps
-// its own runtime state in tab.rt (a draft being written, the live view's data, …).
+// The inspector's views: a task, a plan, a task's live view, a file, a diff. Each renders
+// into the inspector's body from the page's state (ctx, from app.js) and keeps its own
+// runtime state in view.rt (a draft being written, the live view's data, …).
 import { h, ago, first, api, q, toast } from './util.js';
 import { renderMarkdown, codeBlock, diffBlock, langOf } from './viewer.js';
 
@@ -101,7 +101,6 @@ function composer(t) {
   );
 }
 export function compose(t, action, p, task, label, extra = {}) {
-  ctx.editor.keep(t.key); // working in a tab keeps it
   t.rt.compose = { action, p, task, label, ...extra };
   t.rt.draft = t.rt.draft ?? '';
   ctx.refreshTab(t);
@@ -117,15 +116,15 @@ function taskPage(tab, p) {
   const facts = h(
     'div',
     { class: 'facts' },
-    h('span', { class: `chip s-${t.status}` }, `${STATUS_ICON[t.status] ?? ''} ${t.status.replace('_', ' ')}`),
+    h('span', { class: `chip s-${t.rollup_status ?? t.status}` }, `${STATUS_ICON[t.rollup_status ?? t.status] ?? ''} ${(t.rollup_status ?? t.status).replace('_', ' ')}`),
     h('a', { onclick: () => ctx.openPlan(p, { preview: false }) }, `▣ ${ctx.planTitle(p)}`),
-    t.owner ? h('span', {}, 'owner ', agent ? h('a', { onclick: () => ctx.showTerminal(agent.handle, true, p) }, h('span', { class: `dot ${agent.status}` }), ' ', t.owner) : t.owner === ctx.human ? 'you' : t.owner) : h('span', {}, t.ready ? 'ready, not started' : 'not started'),
+    t.owner ? h('span', {}, 'owner ', agent ? h('a', { onclick: () => ctx.showTerminal(agent.handle, true, p) }, h('span', { class: `dot ${agent.status}` }), ' ', t.owner) : t.owner === ctx.human ? 'you' : t.owner) : t.children.length ? '' : h('span', {}, t.ready ? 'ready, not started' : 'not started'),
     t.reviewer ? h('span', {}, `reviewer ${t.reviewer === ctx.human ? 'you' : t.reviewer}`) : '',
     t.status === 'in_progress' && t.percent != null ? h('span', {}, `${t.percent}%`) : '',
     h('span', {}, `updated ${ago(t.updated_at)} ago`),
   );
   const out = [h('h1', {}, h('span', { class: 'id' }, t.id), t.title), facts];
-  if (t.path.length > 1) out.push(h('div', { class: 'facts' }, t.path.slice(0, -1).map((id, i) => [i ? ' › ' : '', h('a', { onclick: () => ctx.openTask(p, id) }, `${id} ${st.tasks[id]?.title ?? ''}`)])));
+  if (t.path.length) out.push(h('div', { class: 'facts' }, 'part of ', t.path.map((id, i) => [i ? ' › ' : '', h('a', { onclick: () => ctx.openTask(p, id) }, `${id} ${st.tasks[id]?.title ?? ''}`)])));
   out.push(h('div', { class: 'toolbar' }, ctx.actionsFor({ p, task: t.id, tab }).map(btn)));
   out.push(composer(tab));
   if (b?.question)
@@ -137,7 +136,7 @@ function taskPage(tab, p) {
   if (t.acceptance?.length) out.push(sec('Acceptance', h('ul', {}, t.acceptance.map((a) => h('li', {}, a)))));
   if (b?.latest) out.push(sec(t.status === 'in_progress' ? 'Latest' : 'Result', h('pre', {}, b.latest.message)));
   if (b?.checkpoint) out.push(sec('Checkpoint', h('pre', {}, b.checkpoint.message)));
-  if (t.steps?.length) out.push(sec('Steps', h('ul', {}, t.steps.map((s) => h('li', { class: `s-${s.status}` }, `${STATUS_ICON[s.status] ?? ''} ${s.title}`)))));
+  if (t.steps?.length) out.push(sec('Steps', h('ul', {}, t.steps.map((s) => h('li', { class: `step s-${s.status}` }, h('span', { class: 'si' }, STATUS_ICON[s.status] ?? ''), ` ${s.title}`)))));
   if (t.waiting_on?.length) out.push(sec('Waits on', h('div', { class: 'rows' }, t.waiting_on.map((id) => h('div', { class: 'r click', onclick: () => ctx.openTask(p, id) }, h('span', { class: `s-${st.tasks[id]?.status}` }, STATUS_ICON[st.tasks[id]?.status] ?? ''), h('span', { class: 'm' }, `${id} ${st.tasks[id]?.title ?? ''}`), '')))));
   // live runs
   const lv = ctx.liveListOf(p, t.id);

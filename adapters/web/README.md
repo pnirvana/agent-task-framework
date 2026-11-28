@@ -1,6 +1,6 @@
 # ATF web UI
 
-ATF in the browser, laid out like an IDE: follow plans, answer, review, give direction,
+ATF in the browser, as a cockpit: follow plans, answer, review, give direction,
 start and replace coordinators, watch every build and test, and type into every agent,
 without herdr or a terminal. Design: [docs/webui-design.md](../../docs/webui-design.md).
 
@@ -29,58 +29,80 @@ restart `atf-web`. Pick the agent kind in `~/.config/atf/config.toml`:
 agent_kind = "copilot"   # pi | copilot | opencode | claude | codex
 ```
 
-## The layout
+## The layout: a cockpit
 
 ```
-┌ Explorer ──┐┌ Needs you ─────────┐┌ editor: [Plan] [T2 ×] [T1 live ×] … ┐┌ In flight ───────┐
-│ projects   ││ what needs you,    ││                                     ││ per plan: progress│
-│  plans     ││ your tasks         ││  the task, plan, live view, file,   ││ coordinator, what │
-│   agents   │├ Tasks Log Changes ─┤│  diff or terminal you opened        ││ runs now          │
-│            ││ ▾ all / one plan   ││                                     ││                   │
-└────────────┘└────────────────────┘└─────────────────────────────────────┘└───────────────────┘
- Terminals: [lead ●] [be T1 ●] …
+┌ Needs you ─────────────────┐┌ In flight ────────────────────────────────────────────────┐
+│┌ Checkout service  demo  2┐││┌ Checkout service  demo                      ▰▰▱▱ 2/4 done┐│
+││ ? T4 which token TTL?     ││││ ● coordinator lead working 12s           changed 3m ago  ││
+││   [Answer] [Open]         ││││ ┌ T3 Backend API    ● be working ┐ ┌ T5 Frontend ──────┐ ││
+││ ⚠ T6 no agent runs it     ││││ │ step 2/4 ✓ schema ▶ endpoints  │ │ step 1/3 ▶ coupon │ ││
+││   [Tell the coordinator]  ││││ │ ⚙ maven 4/6 shop-api 40/~71 … │ │ ⚙ tests 212 ✓     │ ││
+│└───────────────────────────┘│││ └────────────────────────────────┘ └───────────────────┘ ││
+│ YOUR TASKS …                │└───────────────────────────────────────────────────────────┘│
+└─────────────────────────────┘└────────────────────────────────────────────────────────────┘
+┌ Checkout service › Coordinator   lead · copilot · ● working ────┐┌ Checkout service ──┐
+│ (the terminal)                                                  ││ ● Coordinator  lead│
+│                                                                 ││ ● T3 Backend API be│
+│                                                                 ││ Shop release       │
+└─────────────────────────────────────────────────────────────────┘│ ○ Coordinator  not…│
 ```
 
-- **Explorer:** projects, their plans and each plan's agents (green working, grey idle,
-  red pulsing waits for you). A plan opens its page and filters the work panel to it; an
-  agent opens its terminal. Hidden with ☰ (narrow windows start without it).
-- **Needs you** (always, for every plan): questions, reviews, a coordinator waiting, a
-  plan without one, then your own tasks. Hovering a row shows its quick action (Approve,
-  Answer, Done, Start, Terminal).
-- **Work panel:** Tasks, Log and Changes, for all open plans or the one chosen in the
-  filter (the Explorer sets it too).
-- **Editor:** what you open is a tab. A single click opens a preview (the next one
-  replaces it, its title in italics); a double-click, or writing in it, keeps it.
-  Right-click a tab or a row for more: open to the side (two groups), close others, …
-  - **a task:** the question or the submission at the top with the actions (Approve,
-    Request changes, Answer, Message, Mark done), then acceptance, live runs, changed
-    files, artifacts, notes, history;
-  - **a plan:** where it stands, the coordinator (start, replace, its terminal),
-    documents, tasks, notes, closing it;
-  - **a live view:** a task's builds, tests, pipelines, deployments: the kind's view
-    (Maven: modules, failures with their stack traces, test classes) or the raw output,
-    following it while it runs; other runs from the list or with `[` `]`;
-  - **files** (Markdown rendered, code highlighted), **diffs**, and **terminals** (from
-    the terminal panel's ⧉ or a right-click on an agent).
-- **In flight** (always, for every plan): progress, the coordinator and what it does,
-  and per task in progress its agent and what runs or waits now; a click on that opens
-  the live view, the task id its page, the agent its terminal.
-- **Terminals:** the agents of the plans the work panel shows, the coordinator first.
-  `ctrl+]` leaves a terminal; `ctrl+\`` hides and shows the panel.
+Every open plan at once, each in a box under its name: task ids are per plan, so nothing
+appears without its plan. A small marker in the plan's colour is only a second hint.
+Plans that need you come first, then those at work, then the quiet ones.
 
-Panel sizes are dragged on the lines between them and remembered, as are the open tabs.
+- **Plans** (left, `☰` shows and hides it; shown on wide windows): every open plan with
+  its task tree (subtasks under their parents, the done ones dimmed); closed plans below.
+  A dot by the owner says whether a task in progress is being worked on right now: green
+  (its agent works or a command of it runs), yellow (a command waits for your approval),
+  grey (its agent waits), hollow (nothing running), red (no agent runs it); a parent shows
+  how many of its tasks are in progress, with the most urgent dot.
+- **Needs you:** what needs you now, per plan, with its action at hand:
+  questions, reviews, a coordinator waiting, a command waiting for your approval, a plan
+  without a coordinator, a task in progress that no agent runs any more (no session and
+  nothing happening for 10 minutes), an idle agent, failures. Answers, change requests
+  and closing notes are written right there (`⌘/ctrl+⏎` sends). Clicking an item shows
+  it in the details: the question, review, failure or command in full, its context (the
+  task's steps, its last run, its agent; who waits on a task of yours) and its actions;
+  tabs lead on to the task, its live runs and changes. A coordinator waiting at its prompt
+  opens its terminal.
+- **Your tasks**, below it: what you will have to do eventually, per plan.
+- **In flight:** what is being worked on and how it goes. Per plan: progress, its
+  coordinator, how many things wait for the coordinator, when it last changed, its
+  parts (its top-level tasks that have parts, each with its state: in progress, done, or what it waits
+  on; they run side by side unless one depends on another) and where it stands; a card per task in progress, all of one size and in the
+  plan's order (only their content changes), subtasks nested under their parent tasks as in the
+  plan's tree, any depth (a subtask's own id says little): its agent, its steps (a track, a segment per step, then the current step and the next one), its run at a glance
+  (the kind's compact view: modules, tests, failures, a pipeline's jobs, a deployment).
+- **Details** slide in over In flight (a task, a plan, a run, a file, a diff), with
+  tabs: a task's Overview, Live, Changes; a plan's Overview, Log, Changes, Diff. A task's
+  state is beside its tabs: the dot of the Plans view with its status in words ("in
+  progress · no agent runs it", "todo · waits on T13.1.1", "2 working · 0/2 parts done"). `esc`
+  closes them, `‹` and the browser's back go to what they showed before.
+- **Terminal**, across the bottom: the terminal shown, under a title saying whose it is
+  (plan › Coordinator, or plan › task · agent); beside it the list of all terminals, per
+  plan, its coordinator first (or "not running"). Big enough to follow a conversation and
+  answer (40% of the window; dragged smaller it keeps about ten rows). `⤢` taller,
+  `▁` (or `ctrl+\``) minimizes it to its title bar at the bottom; a click on the bar
+  brings it back.
+
+Panel sizes are dragged on the lines between them and remembered, as are the details
+shown and the terminal.
 
 ## Keys
 
 | key | |
 |---|---|
 | `⌘K` / `ctrl+K` | search: plans, tasks, documents, agents, commands |
-| `ctrl+\`` | show or hide the terminals |
+| `alt+1` … `alt+9` | the coordinators' terminals, in the order of the plans |
+| `ctrl+\`` | minimize the terminal to its title bar / bring it back |
 | `ctrl+]` | leave a terminal |
+| `esc` | close the details · cancel what you write |
 | `?` | the keys |
-| on a task tab | `a` approve / mark done · `x` request changes · `r` answer · `n` message · `L` live · `d` changes · `g` its agent's terminal |
-| on a plan tab | `s` / `S` start / replace the coordinator · `N` note · `c` close · `g` the coordinator's terminal |
-| in a live view | `[` `]` other runs · `o` raw output / view |
+| details of a task | `a` approve / mark done · `x` request changes · `r` answer · `n` message · `L` live · `d` changes · `g` its agent's terminal |
+| details of a plan | `s` / `S` start / replace the coordinator · `N` note · `c` close · `g` the coordinator's terminal |
+| a live view | `[` `]` other runs · `o` raw output / view |
 | writing | `⌘/ctrl+⏎` sends · `esc` cancels |
 
 Everything you do is written as the human (`human`) through the same functions as the

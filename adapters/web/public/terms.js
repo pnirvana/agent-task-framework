@@ -50,11 +50,20 @@ export function createTerms({ onLeave = () => {}, onState = () => {}, onFocus = 
     else if (m.ev === 'exit') t.term.write(`\r\n\x1b[2m[session ended: exit ${m.code}]\x1b[0m\r\n`);
   }
 
+  const FONT = "'JetBrains Mono', monospace";
+  // weight and size from the stylesheet (--term-font-weight, --term-font-weight-bold, --term-font-size)
+  const css = (name, dflt) => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || dflt;
+  const fontOpts = () => ({ fontFamily: FONT, fontWeight: css('--term-font-weight', '400'), fontWeightBold: css('--term-font-weight-bold', '700'), fontSize: Number(css('--term-font-size', '13')) });
+  const fontReady = (() => {
+    const o = fontOpts();
+    return Promise.all([`${o.fontWeight} ${o.fontSize}px`, `${o.fontWeightBold} ${o.fontSize}px`, `italic ${o.fontWeight} ${o.fontSize}px`].map((f) => document.fonts.load(`${f} 'JetBrains Mono'`))).catch(() => {});
+  })();
+
   function ensure(id) {
     if (open.has(id)) return open.get(id);
     const el = document.createElement('div');
     el.className = 'term';
-    const term = new Terminal({ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, theme: theme(), cursorBlink: true, scrollback: 10000, allowProposedApi: true });
+    const term = new Terminal({ ...fontOpts(), theme: theme(), cursorBlink: true, scrollback: 10000, allowProposedApi: true });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     const t = { term, fit: fitAddon, el, attached: false, size: '', opened: false };
@@ -90,6 +99,13 @@ export function createTerms({ onLeave = () => {}, onState = () => {}, onFocus = 
     }
     t.term.textarea?.addEventListener('focus', () => onFocus(id));
     t.term.textarea?.addEventListener('blur', () => onFocus(null));
+    // a terminal opened before the font arrived measured and drew a fallback font: once it is
+    // loaded, set the font again (xterm measures anew, the renderer redraws its glyphs)
+    fontReady.then(() => {
+      t.term.options.fontFamily = 'monospace';
+      t.term.options.fontFamily = FONT;
+      fit(id, true);
+    });
   }
 
   function fit(id, force = false) {

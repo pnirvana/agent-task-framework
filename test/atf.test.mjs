@@ -2873,6 +2873,10 @@ test('atf-web: live runs, changes without .atf, the file viewer stays in the pro
     const review = plan.attention.mine.find((i) => i.kind === 'your-review');
     assert.equal(review.text, 'T1 waits for your review (api)');
     assert.match(review.nkey, /\|your-review\|T1\|/);
+    // the cockpit's glance at a task in flight: its run, the kind's compact view
+    assert.equal(plan.glance.T1.kind, 'tests');
+    assert.ok(Array.isArray(plan.glance.T1.lines));
+    assert.deepEqual(plan.health, {}, 'nothing in progress without an agent');
 
     // live: the task's recorded runs; a run's output; only the task's own files
     const live = (await get(`/api/live?${R}&task=T1`)).body;

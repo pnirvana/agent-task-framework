@@ -411,7 +411,7 @@ its own. Core changes land in `src/` in a form the CLI and the board use too.
   extension's report) is `! prompt` under NEEDS YOU, ⏎ opens its pane; a command waiting
   for approval shows on its task's live badge.
 
-## 12b. The IDE layout (replaces the board-like page of phase 3)
+## 12b. The IDE layout (replaced by 12c)
 
 The first pages followed the herdr board too closely: one view at a time, switched with
 keys. The page is now laid out like an IDE, so what matters most stays visible:
@@ -446,6 +446,60 @@ Found on the way: two starters of the session daemon at the same moment (atf-web
 `atf-sessions start`) could start two daemons, the second taking the socket over and the
 first one's sessions becoming unreachable. A daemon now takes a lock next to its socket
 (`<socket>.lock`, its pid) and leaves when another one holds it.
+
+## 12c. The cockpit (replaces the IDE layout)
+
+The editor approach was wrong for this: nothing is edited, and managing tabs is work the
+human should not have. What they look at most of the time is what needs them and what is
+in flight, for every plan at once (as herdr's overview, rarely filtered by plan); the plan
+itself mainly to recall where it stands, its details a click away. Next most: the
+coordinators, often in a conversation while agents work. And whether everything actually
+runs: no task in progress that nobody works on.
+
+- **Structure first:** every view is grouped per plan, in a box under the plan's name
+  (task ids are per plan); a marker in the plan's colour (muted, a few in rotation) is a
+  second hint. Plans that need the human come first, then those at work, then the quiet.
+- **Plans** (leftmost, can be hidden): every open plan with its task tree, closed plans
+  below; a task opens its details. A task in progress carries a dot saying whether it is
+  worked on right now (its agent working or a command running, a command waiting for
+  approval, its agent idle, nothing running, no agent); a parent the count of its tasks in
+  progress with the most urgent dot.
+- **Needs you** (left, top): what needs the human now, per plan, each with its action
+  at hand; answers, change requests and closing notes are written right there. An item
+  opens in the details as itself (not its task): what it is in full, its context, its
+  actions, then tabs to the task, Live, Changes; once handled it stays, greyed, saying so. Besides the
+  plan's attention: commands held for the human's approval (from the live glance) and
+  orphaned tasks (below). **Your tasks** below it, a panel of its own: what the human
+  will have to do eventually, not now.
+- **Subtasks** are numbered under their parent (T4.2): the id says little. Wherever one
+  appears its parents come with it: in In flight the cards sit under their parents, nested as
+  the plan's tree is at any depth (id, title, parts done; a parent's own cards, then its
+  parts with work; siblings side by side, no order implied), in Needs you and the details' path their titles precede it.
+- **In flight** (centre): only what is being worked on. Per plan its progress, coordinator,
+  how many items wait for the coordinator, last change, its parts (the top-level tasks
+  with parts, each with its own state: how many in progress, done, or `after T2` when it
+  waits on a dependency; not a sequence with one current stage, since tasks run side by
+  side unless they depend on each other), where it stands (the checkpoint); a card per task in progress, in the plan's
+  order. Cards have one fixed size (title, one line of steps: a track with a segment per step, then
+  the current step first, so it is never what gets cut, and the next one, a live box of fixed height),
+  so nothing moves while the content changes: its agent and state, its steps, its run at a
+  glance (the kind's compact view, as below a task on the board: the server sends it with
+  the overview, `glance`).
+- **Health:** the server marks a task in progress whose agent has no session here
+  (`health`): `elsewhere` when its writes came from herdr or another daemon, `orphan` when
+  in addition nothing happened on it for 10 minutes (no command running, no update): an
+  agent ATF did not start (a subagent of the human's own harness) is not flagged while it
+  works. Orphans are in Needs you, with "Tell the coordinator".
+- **Details** slide in over In flight (one at a time, tabs per kind, `‹` / the browser's
+  back / `esc`). A task's state sits on the tabs' row: the Plans view's dot, in words. Files and diffs open there too.
+- **Terminal** across the bottom: the one shown, titled plan › Coordinator (or plan ›
+  task · agent), and the list of all terminals beside it, per plan, coordinator first.
+  40% of the height so a conversation can be followed and answered without enlarging;
+  `alt+1…9` the coordinators.
+
+Code: `public/app.js` (state, panels, terminal, palette, keys), `drawer.js` (the
+details), `pages.js` (their views), `terms.js`, `viewer.js`, `util.js`. The demo
+(`examples/live-views.mjs`) has its agents work through steps.
 
 ## 13. Open
 
