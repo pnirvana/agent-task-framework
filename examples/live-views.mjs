@@ -56,7 +56,10 @@ const TEAM = [
   ['T8', 'app', 'Smoke-test the app', 'app.log has no errors after a while'],
 ];
 fs.mkdirSync(dir, { recursive: true });
-const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', ATF_BACKEND: '', HERDR_ENV: '' };
+// not as whoever runs this (a herdr pane, an agent): the plan's actors (the agents played
+// here too) belong to no terminal, else the cockpit takes them for ones running elsewhere
+for (const k of Object.keys(process.env)) if (k.startsWith('HERDR_')) delete process.env[k];
+const env = { ...process.env, ATF_DIR: '', ATF_PLAN: '', ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', ATF_BACKEND: '' };
 const atf = (a, extra = {}) => JSON.parse(execFileSync(process.execPath, [ATF, ...a, '--json'], { cwd: dir, env: { ...env, ...extra }, maxBuffer: 256 << 20 }).toString());
 if (!fs.existsSync(path.join(dir, '.git'))) {
   execFileSync('git', ['init', '-q'], { cwd: dir });

@@ -274,7 +274,11 @@ function headOf(v) {
       { label: 'Diff', on: v.kind === 'diff', run: () => openDiff(p, null) },
     ];
   const agent = p && t ? agentOf(p, t.owner) : null;
-  const tools = agent ? [h('button', { class: 'btn', title: 'its agent’s terminal (g)', onclick: () => showTerminal(agent.handle, true) }, h('span', { class: `dot ${agent.status}` }), ` ${agent.name}`)] : [];
+  const tools = agent && agent.role !== 'coordinator' ? [h('button', { class: 'btn', title: 'its agent’s terminal (g)', onclick: () => showTerminal(agent.handle, true) }, h('span', { class: `dot ${agent.status}` }), ` ${agent.name}`)] : [];
+  if (p?.st && p.open) {
+    const c = coordState(p);
+    tools.push(h('button', { class: `btn coord-btn${c.cls === 'blocked' ? ' waits' : ''}`, title: `${c.tip} (C)`, onclick: () => openCoordinator(p) }, h('span', { class: `dot ${c.cls}` }), c.ca ? ` Coordinator` : ' Coordinator…'));
+  }
   let status = null;
   if (t) {
     const so = statusOf(p, t);
@@ -322,8 +326,10 @@ async function coordinator(p, fresh) {
     const np = planByKey(p.key);
     const c = np && coordAgentOf(np);
     if (c) showTerminal(c.handle, false);
+    return r.ok;
   } catch (e) {
     toast(e.message, true);
+    return false;
   }
 }
 
@@ -557,8 +563,36 @@ function planHead(p, extra = []) {
     h('span', { class: 'mk' }),
     h('span', { class: 'pname' }, planTitle(p)),
     h('span', { class: 'proj', title: `project ${p.project.name}: ${shortPath(p.project.dir)}` }, p.project.name),
-    h('span', { class: 'right' }, extra),
+    h('span', { class: 'right' }, coordChip(p), extra),
   );
+}
+/**
+ * The plan's coordinator, one click away wherever the plan shows: its dot and name; a
+ * click opens its terminal (none running: the terminal's place for it, with "Start").
+ */
+function coordState(p) {
+  const ca = coordAgentOf(p);
+  const waits = (p.attention?.mine ?? []).some((it) => it.kind === 'coordinator' || (it.kind === 'prompt' && it.actor === p.coordinator?.id));
+  if (ca) return { ca, cls: waits ? 'blocked' : ca.status, text: ca.name, tip: `coordinator ${ca.name} · ${waits ? 'waits for you' : `${ca.status} ${ago(ca.since)}`}` };
+  if (p.coordinator?.away) return { cls: 'idle', text: `${p.coordinator.id} elsewhere`, tip: `coordinator ${p.coordinator.id} runs elsewhere (herdr, another machine)` };
+  return { cls: 'off', text: 'no coordinator', tip: 'no coordinator runs this plan: open its place in the terminal to start one' };
+}
+function openCoordinator(p) {
+  const c = coordState(p);
+  if (p.coordinator?.away && !c.ca) return toast(c.tip, true);
+  showTerminal(c.ca ? c.ca.handle : `ph#${p.key}`, !!c.ca);
+}
+function coordChip(p) {
+  const c = coordState(p);
+  // none running: the dot alone (the plan's name keeps the room; the tooltip says it)
+  return h('span', { class: `cchip${c.ca ? '' : ' off'}${c.cls === 'blocked' ? ' waits' : ''}`, title: `${c.tip} (C)`, onclick: (e) => (e.stopPropagation(), openCoordinator(p)) }, h('span', { class: `dot ${c.cls}` }), c.ca ? c.text : '');
+}
+/** The plan you are at: the details', else the shown terminal's, else the first that needs you. */
+function currentPlan() {
+  const v = drawer.current();
+  if (v) return planByKey(v.pk);
+  const x = termGroups().find((g) => g.p && g.items.some((i) => i.id === S.pane));
+  return x?.p ?? planOrder()[0] ?? null;
 }
 /** Draw a panel's body again, keeping its scroll and what is being typed in it. */
 function redraw(body, kids) {
@@ -594,7 +628,7 @@ function actionsOfNeed(it, p, { inDetails = false } = {}) {
   const open = inDetails ? () => (it.task ? openTask(p, it.task) : openPlan(p)) : () => openItem(it, p);
   switch (it.kind) {
     case 'your-review':
-      return [b('Approve', () => act('approve', p, it.task), true), b('Request changes', inline(it, p, 'changes', `What should change in ${it.task}?`, 'Send change request')), b('Open', open)];
+      return [b('Approve', () => act('approve', p, it.task).then((ok) => ok && settled(it)), true), b('Request changes', inline(it, p, 'changes', `What should change in ${it.task}?`, 'Send change request')), b('Open', open)];
     case 'your-task':
       return [b('Done', inline(it, p, 'finish', `${it.task} done: anything to say? (optional)`, 'Mark done', true), true), b('Open', open)];
     case 'question':
@@ -602,7 +636,7 @@ function actionsOfNeed(it, p, { inDetails = false } = {}) {
     case 'plan-question':
       return [b('Answer', inline(it, p, 'plan-note', 'Your answer, for the coordinator', 'Send answer'), true), b('Open the plan', open)];
     case 'no-coordinator':
-      return [b('Start coordinator', () => coordinator(p, false), true)];
+      return [b('Start coordinator', () => coordinator(p, false).then((ok) => ok && settled(it)), true)];
     case 'coordinator':
     case 'prompt':
       return [b('Terminal', () => showTerminal(it.pane, true), true), ...(it.task ? [b('Open', () => openTask(p, it.task))] : [])];
@@ -615,7 +649,7 @@ function actionsOfNeed(it, p, { inDetails = false } = {}) {
       return [...(a ? [b('Terminal', () => showTerminal(a.handle, true), true)] : []), b('Live', () => openLive(p, it.task)), b('Open', open)];
     }
     case 'orphan':
-      return [b('Tell the coordinator', () => act('note', p, it.task, `No agent is running ${it.task} any more (${it.actor}'s session is gone): restart or reassign it.`), true), b('Open', open)];
+      return [b('Tell the coordinator', () => act('note', p, it.task, `No agent is running ${it.task} any more (${it.actor}'s session is gone): restart or reassign it.`).then((ok) => ok && settled(it)), true), b('Open', open)];
     case 'stale': {
       const a = agentOf(p, it.actor);
       return [...(a ? [b('Terminal', () => showTerminal(a.handle, true), true)] : []), b('Open', open)];
@@ -715,12 +749,16 @@ function needItem(it, p) {
     c ? composerFor(it, c) : '',
   );
 }
+/** An item answered or acted on: its details (if shown) close; the list shows what is left. */
+function settled(it) {
+  if (drawer.shows(`need#${it.nkey}`)) drawer.close();
+}
 function composerFor(it, c) {
   const close = () => ((S.compose = null), renderNeeds(), drawer.refresh((v) => v.kind === 'need'));
   const send = () => {
     const text = S.drafts.get(it.nkey) ?? '';
     if (!c.optional && !text.trim()) return toast('nothing to send', true);
-    act(c.action, c.p, c.task, text).then((ok) => ok && (S.drafts.delete(it.nkey), S.compose?.nkey === it.nkey && close()));
+    act(c.action, c.p, c.task, text).then((ok) => ok && (S.drafts.delete(it.nkey), S.compose?.nkey === it.nkey && close(), settled(it)));
   };
   const ta = h('textarea', {
     'data-k': it.nkey,
@@ -1166,6 +1204,10 @@ function paletteItems() {
     if (p.open) for (const a of actionsFor({ p }).filter((x) => !['N', 'c'].includes(x.key))) out.push({ icon: '›', label: `${a.label}: ${planTitle(p)}`, detail: 'command', run: a.run });
   }
   for (const x of PANELS) out.push({ icon: '›', label: `Show / hide ${x.label}`, detail: 'command', run: () => togglePanel(x.id) });
+  for (const p of openPlans()) {
+    const c = coordState(p);
+    out.push({ icon: h('span', { class: `dot ${c.cls}` }), label: `Coordinator of ${planTitle(p)}`, detail: c.tip, run: () => openCoordinator(p) });
+  }
   out.push({ icon: '›', label: 'New shell', detail: 'in your home folder · ctrl+shift+`', run: () => newShell() });
   for (const p of openPlans()) out.push({ icon: '›', label: `New shell in ${p.project.name}`, detail: `${shortPath(p.project.dir)} · ${planTitle(p)}`, run: () => newShell(p) });
   for (const sh of shells()) out.push({ icon: '▭', label: `${sh.name} · ${shortPath(sh.cwd)}`, detail: sh.exited ? 'shell, exited' : 'shell', run: () => showTerminal(sh.id, !sh.exited) });
@@ -1339,6 +1381,7 @@ const HELP = [
   ['Everywhere', [
     ['⌘K / ctrl+K', 'search: plans, tasks, documents, agents, commands'],
     ['alt+1 … 9', 'the coordinators’ terminals, in the order of the plans'],
+    ['C', 'the coordinator of the plan you are at (the details’, else the terminal’s)'],
     ['ctrl+`', 'hide / show the terminal'],
     ['ctrl+shift+`', 'a new shell (in the shown plan’s project, else your home folder)'],
     ['alt+shift+1 … 4', 'show / hide Plans, Needs you, Your tasks, the terminal (or the rail on the left)'],
@@ -1398,6 +1441,10 @@ document.addEventListener('keydown', (e) => {
   }
   if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT' || e.target.closest?.('.xterm') || e.metaKey || e.ctrlKey || e.altKey || !$('#palette').hidden) return;
   if (e.key === '?') return help();
+  if (e.key === 'C') {
+    const p = currentPlan();
+    return p ? openCoordinator(p) : toast('no open plan', true);
+  }
   const v = drawer.current();
   if (!v) return;
   const p = planByKey(v.pk);

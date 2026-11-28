@@ -457,3 +457,11 @@ li.step.s-done .si { color: var(--ok); }
 .tl-empty a { cursor: pointer; color: var(--subtext1); }
 #term-title .path { font-weight: var(--content-weight); color: var(--subtext1); }
 .tl-item .who .fg { font-family: var(--mono); font-weight: var(--content-weight); font-size: 11.5px; margin-right: 4px; color: var(--ok); }
+
+/* the coordinator, on every plan header and in the details: a click opens its terminal */
+.cchip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px 1px 6px; border-radius: 10px; font-size: 11.5px; color: var(--subtext1); background: color-mix(in srgb, var(--surface1) 60%, transparent); cursor: pointer; white-space: nowrap; }
+.cchip:hover { background: var(--surface2); color: var(--fg); }
+.cchip.off { color: var(--fg-dim); background: none; padding: 1px 4px; }
+.cchip.off:hover { background: var(--surface1); }
+.cchip.waits, .coord-btn.waits { color: var(--yellow); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--yellow) 55%, transparent); }
+.grp-h .cchip { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; max-width: 12ch; }

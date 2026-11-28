@@ -80,7 +80,8 @@ export function attentionOf(lv, p) {
   }
   const handles = (!!coord.live && coord.live.status !== 'blocked') || coord.away;
   // nobody decides or starts anything for this plan: the human must start a coordinator
-  const openWork = st.order.some((id) => !st.tasks[id].children.length && !TERMINAL.has(st.tasks[id].status));
+  // (a plan without tasks yet has work too: its coordinator is to plan it)
+  const openWork = !st.order.length || st.order.some((id) => !st.tasks[id].children.length && !TERMINAL.has(st.tasks[id].status));
   if (lv.known && st.status === 'active' && openWork && !coord.live && !coord.away) mine.push(at({ kind: 'no-coordinator', actor: null, task: null, ts: st.updated_at }));
   const finished = st.order.some((id) => !st.tasks[id].children.length) && st.order.every((id) => st.tasks[id].children.length || TERMINAL.has(st.tasks[id].status));
   // an idle coordinator waits for the human, unless its harness wakes it (a live `atf wait

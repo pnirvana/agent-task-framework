@@ -29,6 +29,20 @@ restart `atf-web`. Pick the agent kind in `~/.config/atf/config.toml`:
 agent_kind = "copilot"   # pi | copilot | opencode | claude | codex
 ```
 
+## Demos
+
+```sh
+node examples/live-views.mjs     # simulated agents: every live view, steps, a task tree, your tasks
+node examples/real-demo.mjs      # a real coordinator and agents (agent_kind above), a small project
+```
+
+The real demo sets up `~/Dev/atf-real-demo`: a small Node library and a plan, "Coupons and
+receipts", with a brief and no tasks. Start its coordinator in the cockpit (Needs you): it
+plans the work, starts agents on it in parallel, asks you whether coupons may be combined
+(left open on purpose) and sends you the receipt's layout to review. Real models, real
+tokens; `--fresh` starts over. With Copilot, `atf-copilot install` once, so an idle
+coordinator is woken when something needs it.
+
 ## The layout: a cockpit
 
 ```
@@ -56,6 +70,10 @@ Plans that need you come first, then those at work, then the quiet ones.
   Your tasks, Terminal), lit when it shows; a click (or `alt+shift+1` … `4`) shows or
   hides it, and `–` in a panel's header hides it too. A hidden panel's icon keeps a badge:
   how many need you, your tasks, a dot when a coordinator waits. In flight always stays.
+- **The coordinator, from anywhere:** every plan's header (in every panel) has a chip with
+  its coordinator's dot and name: a click opens its terminal (none running: its place,
+  with Start). The details have a Coordinator button; `C` opens the coordinator of the plan
+  you are at; the search lists them.
 - **Plans** (left; shown on wide windows): every open plan with
   its task tree (subtasks under their parents, the done ones dimmed); closed plans below.
   A dot by the owner says whether a task in progress is being worked on right now: green
@@ -106,6 +124,7 @@ shown and the terminal.
 |---|---|
 | `⌘K` / `ctrl+K` | search: plans, tasks, documents, agents, commands |
 | `alt+1` … `alt+9` | the coordinators' terminals, in the order of the plans |
+| `C` | the coordinator of the plan you are at (the details', else the terminal's) |
 | `ctrl+\`` | hide / show the terminal |
 | `ctrl+shift+\`` | a new shell (in the shown plan's project, else your home folder) |
 | `alt+shift+1` … `4` | show / hide Plans, Needs you, Your tasks, the terminal |

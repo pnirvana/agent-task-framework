@@ -2534,6 +2534,10 @@ test('attention: what needs the human, from any liveness source (src/attention.m
   const fake = (agents, local = () => true) => ({ known: true, local, agent: (_st, id) => agents[id] || null });
   a = attentionOf(fake({}), p);
   assert.ok(a.mine.some((x) => x.kind === 'no-coordinator'));
+  // a plan without tasks yet too: its coordinator is to plan it
+  const empty = fold([e(1, 'plan.created', null, { title: 'new', coordinator: 'lead' })]);
+  empty.root = st.root;
+  assert.ok(attentionOf(fake({}), { root: st.root, id: 'q', st: empty, key: 'k2' }).mine.some((x) => x.kind === 'no-coordinator'), 'an empty plan needs its coordinator');
 
   // a working coordinator handles the subagent's question; the human's stays the human's
   const working = { status: 'working', since: Date.now(), handle: 's-lead' };
