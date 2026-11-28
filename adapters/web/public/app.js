@@ -391,6 +391,8 @@ const sessionExists = (handle) => allAgents().some((a) => a.handle === handle &&
  */
 const shells = () => S.ov?.shells ?? [];
 const shellItem = (sh) => ({ id: sh.id, sh, a: { name: sh.name, handle: sh.id, status: sh.status, since: sh.since, exited: sh.exited, kind: 'shell' } });
+/** A shell's state in words: the command running in it, or at its prompt. */
+const shellState = (sh) => (sh.exited ? `exited${sh.code != null ? ` (${sh.code})` : ''}` : sh.fg ? `running ${sh.fg} · ${ago(sh.since)}` : `at its prompt · ${ago(sh.since)}`);
 function termGroups() {
   const groups = planOrder().map((p) => {
     const agents = (p.agents || []).filter((a) => !a.exited);
@@ -442,10 +444,10 @@ function renderTerminals() {
         g.items.map((x) =>
           h(
             'div',
-            { class: `tl-item${x.id === S.pane ? ' on' : ''}${x.a ? '' : ' off'}${x.sh ? ' sh' : ''}`, title: x.sh ? `${x.sh.name} · ${x.sh.cwd} · ${x.sh.status}` : x.a ? `${x.a.name} · ${x.a.kind ?? ''} · ${x.a.status} ${ago(x.a.since)}` : 'no coordinator runs this plan', onclick: () => showTerminal(x.id, !!x.a && !x.a.exited) },
+            { class: `tl-item${x.id === S.pane ? ' on' : ''}${x.a ? '' : ' off'}${x.sh ? ' sh' : ''}`, title: x.sh ? `${x.sh.name} · ${x.sh.cwd} · ${shellState(x.sh)}` : x.a ? `${x.a.name} · ${x.a.kind ?? ''} · ${x.a.status} ${ago(x.a.since)}` : 'no coordinator runs this plan', onclick: () => showTerminal(x.id, !!x.a && !x.a.exited) },
             h('span', { class: `dot ${x.a?.status ?? 'off'}` }),
             h('span', { class: 'l' }, termLabel(x, g.p)),
-            x.sh ? h('span', { class: 'who' }, h('button', { class: 'icon tl-x', title: x.sh.exited ? 'remove it' : 'end this shell', onclick: (e) => (e.stopPropagation(), closeShell(x.sh)) }, '×')) : h('span', { class: 'who' }, x.a ? x.a.name : g.p.coordinator?.away ? 'elsewhere' : 'not running'),
+            x.sh ? h('span', { class: 'who' }, x.sh.fg ? h('span', { class: 'fg' }, x.sh.fg) : '', h('button', { class: 'icon tl-x', title: x.sh.exited ? 'remove it' : 'end this shell', onclick: (e) => (e.stopPropagation(), closeShell(x.sh)) }, '×')) : h('span', { class: 'who' }, x.a ? x.a.name : g.p.coordinator?.away ? 'elsewhere' : 'not running'),
           ),
         ),
         !g.p && !g.items.length ? h('div', { class: 'tl-empty' }, h('a', { onclick: () => newShell() }, '+ new shell'), ' in your home folder') : '',
@@ -481,7 +483,7 @@ function renderTerminals() {
       h('span', { class: 'mono path', title: x.sh.cwd }, `  ${shortPath(x.sh.cwd)}`),
       h('span', { class: 'dim' }, `   ${x.sh.name} · `),
       h('span', { class: `dot ${x.sh.status}` }),
-      h('span', { class: 'dim' }, x.sh.exited ? ` exited${x.sh.code != null ? ` (${x.sh.code})` : ''}` : ` ${x.sh.status} ${ago(x.sh.since)}`),
+      h('span', { class: 'dim' }, ` ${shellState(x.sh)}`),
     );
     return terms.place(x.id, body);
   }

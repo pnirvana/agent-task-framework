@@ -349,8 +349,42 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
   // ---------- shells: the user's own terminals on this machine, in the daemon too ----------
   // (role 'shell' in their meta: not an agent, never found as one, left alone by the supervisor)
   const isShell = (x) => x.meta?.role === 'shell';
+  /**
+   * A shell's state: a command running (its terminal's foreground process is not the shell:
+   * `working`, with the command's name) or the shell at its prompt (`idle`); `since` when
+   * that last changed. Its output says nothing here: typing echoes, prompts redraw.
+   */
   const shellsOf = () =>
-    sessions.filter(isShell).map((x) => ({ id: x.id, name: x.meta.name, cwd: x.cwd, pk: x.meta.pk ?? null, project: x.meta.project ?? null, started: x.started, exited: !!x.exited, code: x.code ?? null, status: x.exited ? 'exited' : sessionAgent(x).status, since: sessionAgent(x).since }));
+    sessions.filter(isShell).map((x) => {
+      const f = shellFg.get(x.id);
+      return { id: x.id, name: x.meta.name, cwd: x.cwd, pk: x.meta.pk ?? null, project: x.meta.project ?? null, started: x.started, exited: !!x.exited, code: x.code ?? null, status: x.exited ? 'exited' : f?.fg ? 'working' : 'idle', fg: x.exited ? null : f?.fg ?? null, since: x.exited ? x.lastOutput : f?.since ?? x.started };
+    });
+  // per shell: what runs in its foreground ({fg: command name | null, since}), every poll
+  const shellFg = new Map();
+  const ps = (args) => new Promise((resolve) => execFile('ps', args, { timeout: 2000 }, (err, out) => resolve(err ? '' : out)));
+  async function pollShells() {
+    const live = sessions.filter((x) => isShell(x) && !x.exited && x.pid);
+    for (const id of shellFg.keys()) if (!live.some((x) => x.id === id)) shellFg.delete(id);
+    if (!live.length) return;
+    const tp = new Map();
+    for (const l of (await ps(['-o', 'pid=,tpgid=', '-p', live.map((x) => x.pid).join(',')])).split('\n')) {
+      const [pid, tpgid] = l.trim().split(/\s+/).map(Number);
+      if (pid) tp.set(pid, tpgid);
+    }
+    const fgPids = [...new Set(live.map((x) => tp.get(x.pid)).filter((g) => g > 0 && !live.some((x) => x.pid === g)))];
+    const names = new Map();
+    if (fgPids.length)
+      for (const l of (await ps(['-o', 'pid=,comm=', '-p', fgPids.join(',')])).split('\n')) {
+        const m = l.trim().match(/^(\d+)\s+(.*)$/);
+        if (m) names.set(Number(m[1]), path.basename(m[2]).replace(/^-/, ''));
+      }
+    for (const x of live) {
+      const g = tp.get(x.pid);
+      const fg = g > 0 && g !== x.pid ? names.get(g) ?? 'a command' : null;
+      const prev = shellFg.get(x.id);
+      if (!prev || prev.fg !== fg) shellFg.set(x.id, { fg, since: Date.now() });
+    }
+  }
   /** A new shell: the user's login shell, in a plan's project folder (or home). */
   async function newShell({ root, plan, cols, rows }) {
     const r = root ? known(root, plan) : null;
@@ -444,7 +478,9 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
         if (lastSigs.get(key) !== sig) changed.push(key);
       }
     // sessions: which exist, and what their agents do
-    const sSig = sessions.map((x) => `${x.id}:${x.exited}:${sessionAgent(x).status}`).join(',');
+    await pollShells();
+    // (a shell: whether a command runs, not its output)
+    const sSig = sessions.map((x) => `${x.id}:${x.exited}:${isShell(x) ? shellFg.get(x.id)?.fg ?? '' : sessionAgent(x).status}`).join(',');
     const sChanged = sSig !== lastSessions;
     lastSessions = sSig;
     const first = !lastSigs.size;

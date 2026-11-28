@@ -513,7 +513,9 @@ runs: no task in progress that nobody works on.
   login shell on the server's machine, run by the session daemon (`meta.role: 'shell'`:
   never taken for an agent, left alone by the supervisor). Opened in a plan's project folder
   (listed under that plan) or in home (the "Shells" group); `POST /api/shell`,
-  `/api/shell/close` (only shells). The browser still cannot start commands over the
+  `/api/shell/close` (only shells). Its state is whether a command runs: the terminal's
+  foreground process group (`ps -o tpgid`) is not the shell's (`working`, with the command's
+  name) or is (`idle`): not its output, which typing and prompts produce too. The browser still cannot start commands over the
   WebSocket: a shell is started by the server, in a known project or home.
 - **Details** slide in over In flight (one at a time, tabs per kind, `‹` / the browser's
   back / `esc`). A task's state sits on the tabs' row: the Plans view's dot, in words. Files and diffs open there too.
