@@ -171,13 +171,23 @@ async function load(plans = null) {
       const want = pending;
       pending = { all: false, plans: new Set() };
       const partial = S.ov && !want.all;
-      const ov = await api(partial ? `overview?${q({ only: [...want.plans].join('\n') || '\n' })}` : 'overview');
-      if (partial) {
-        const prev = new Map(allPlans().map((p) => [p.key, p]));
-        let missing = false;
-        for (const pr of ov.projects) pr.plans = pr.plans.map((p) => (p.same ? prev.get(p.key) ?? ((missing = true), p) : p));
-        if (missing) pending.all = true, (again = true); // a plan the page did not have yet
-      }
+      const prev = new Map(allPlans().map((p) => [p.key, p]));
+      // each plan with the version the page has: the server sends the tasks changed since
+      const only = [...want.plans].map((k) => (prev.get(k)?.st ? `${k}\t${prev.get(k).st.last_seq}` : k)).join('\n') || '\n';
+      const ov = await api(partial ? `overview?${q({ only })}` : 'overview');
+      let missing = false;
+      for (const pr of ov.projects)
+        pr.plans = pr.plans.map((p) => {
+          if (p.same) return prev.get(p.key) ?? ((missing = true), p);
+          if (p.delta == null) return p;
+          // the changed tasks, onto the version the page has
+          const old = prev.get(p.key);
+          if (!old?.st || old.st.last_seq !== p.delta) return (missing = true), old ?? p;
+          const tasks = { ...old.st.tasks, ...p.st.tasks };
+          for (const tid of p.removed) delete tasks[tid];
+          return { ...p, st: { ...p.st, tasks } };
+        });
+      if (missing) (pending.all = true), (again = true); // a plan the page lacked or had another version of
       S.ov = ov;
       const v = drawer.current();
       const p = v && allPlans().find((x) => x.key === v.pk);

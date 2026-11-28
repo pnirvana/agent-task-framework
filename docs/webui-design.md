@@ -496,7 +496,12 @@ runs: no task in progress that nobody works on.
   works. Orphans are in Needs you, with "Tell the coordinator".
 - **Refreshing**: the stream says which plans changed; the page asks for those only
   (`/api/overview?only=`), the rest come as `{key, same}` and it keeps its own. Everything
-  again when sessions change, and every 30 s (what depends on time). The overview carries
+  again when sessions change, and every 30 s (what depends on time). Of a changed plan, only
+  its tasks that changed: the page names the version it has (`last_seq`), the server keeps
+  each plan's last 30 versions as sent (a JSON string per task) and sends the tasks that
+  differ (`delta`, `removed`; side effects such as a parent's rollup or a task turning ready
+  included, since whole tasks are compared), else the whole plan. A plan of 160 tasks with
+  an agent at work: 6 KB per refresh instead of 150 KB. The overview carries
   per task what the panels show; a task's history, notes, artifacts and whole description
   come with its page (`/api/task`). A big, quiet plan costs almost nothing per refresh.
 - **Shells** (the terminal panel's third kind, after coordinators and agents): the user's

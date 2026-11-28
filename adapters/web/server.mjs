@@ -16,7 +16,8 @@
 //   POST /api/action        {root, plan, action, task?, message?, status?}  as the human
 //   POST /api/coordinator   {root, plan, fresh?, kind?}  start / resume / replace it
 //   GET  /api/stream        server-sent events: {plans: [key], sessions: bool} on changes
-//   GET  /api/overview?only=<keys, newline-separated>   only those plans in full (the rest {key, same})
+//   GET  /api/overview?only=<key>\t<seq>\n…   only those plans (the rest {key, same}); of each,
+//                          the tasks changed since the version (seq) the page has (`delta`)
 //   GET  /api/task         one task in full (history, notes, artifacts), for its page
 //   POST /api/shell        a new shell (in a plan's project, or home); /api/shell/close ends one
 //   WS   /ws                the agents' terminals and the shells, relayed to atf-sessiond
@@ -237,8 +238,29 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
       const plan = {};
       for (const [k, v] of Object.entries(e.st)) if (!PLAN_DROP.has(k)) plan[k] = v;
       e.slim = { ...plan, notes: (e.st.notes || []).slice(-15), tasks };
+      // this version's tasks as sent, to send a page that has it only what changed since
+      const v = versionsOf(`${root}#${id}`);
+      v.set(e.st.last_seq, Object.fromEntries(Object.entries(tasks).map(([tid, x]) => [tid, JSON.stringify(x)])));
+      while (v.size > VERSIONS) v.delete(v.keys().next().value);
     }
     return e.slim;
+  }
+  // per plan, its last versions' tasks (seq -> {task id: JSON}); a page names the version it has
+  const VERSIONS = 30;
+  const versions = new Map();
+  const versionsOf = (key) => (versions.has(key) || versions.set(key, new Map()), versions.get(key));
+  /**
+   * The plan for a page that has version `seq`: its tasks that differ from that version
+   * (`delta`: seq, `removed`: ids gone); everything when that version is not kept.
+   */
+  function planSince(root, id, seq) {
+    const st = slimPlan(root, id);
+    const old = seq != null ? versionsOf(`${root}#${id}`).get(seq) : null;
+    if (!old || seq === st.last_seq) return old ? { st: { ...st, tasks: {} }, delta: seq, removed: [] } : { st };
+    const now = versionsOf(`${root}#${id}`).get(st.last_seq);
+    const tasks = {};
+    for (const [tid, j] of Object.entries(now)) if (old[tid] !== j) tasks[tid] = st.tasks[tid];
+    return { st: { ...st, tasks }, delta: seq, removed: Object.keys(old).filter((tid) => !(tid in now)) };
   }
   /** One task in full, for its page: the last of its history and artifacts (runs: /api/live). */
   function fullTask(root, id, tid) {
@@ -281,7 +303,7 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
   }
 
   /** One plan for the client: its state, attention, agents. Closed plans: no attention. */
-  function planView(root, id, lv = sessionsLiveness(sessions, socket)) {
+  function planView(root, id, lv = sessionsLiveness(sessions, socket), seq = null) {
     const st = plan(root, id);
     const key = `${root}#${id}`;
     const open = ['active', 'paused'].includes(st.status);
@@ -292,7 +314,7 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
       key,
       root,
       id,
-      st: slimPlan(root, id),
+      ...(open ? planSince(root, id, seq) : { st: slimPlan(root, id) }),
       open,
       attention: { mine: att.mine.map(said), queued: att.queued.map(strip), todos: att.todos.map(said) },
       live: open ? liveBadges(root, id, st, runs, lives) : {},
@@ -313,7 +335,7 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
           const st = plan(root, id);
           if (['active', 'paused'].includes(st.status)) return { key, root, id, open: true, same: true };
         }
-        const v = planView(root, id, lv);
+        const v = planView(root, id, lv, only?.get(key) ?? null);
         if (v.open) return v;
         // a closed plan: enough to list it
         const { st } = v;
@@ -493,8 +515,10 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
     if (req.method === 'POST' && !/^application\/json\b/.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'JSON only' });
     switch (route) {
       case 'GET /api/overview': {
+        // only=<key>\t<the version the page has>, a line per plan
         const only = url.searchParams.get('only');
-        return json(res, 200, overview(only != null ? new Set(only.split('\n').filter(Boolean)) : null));
+        const want = only == null ? null : new Map(only.split('\n').filter(Boolean).map((l) => { const [k, v] = l.split('\t'); return [k, v ? Number(v) : null]; }));
+        return json(res, 200, overview(want));
       }
       case 'GET /api/task': {
         const root = known(url.searchParams.get('root'), url.searchParams.get('plan'));

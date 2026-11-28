@@ -2899,6 +2899,15 @@ test('atf-web: live runs, changes without .atf, the file viewer stays in the pro
     // a refresh of some plans: the others are the page's ({key, same})
     const part = (await get(`/api/overview?only=${encodeURIComponent('nothing#here')}`)).body.projects.find((p) => p.dir === fs.realpathSync(dir)).plans[0];
     assert.deepEqual(part, { key: plan.key, root: plan.root, id: plan.id, open: true, same: true });
+    // a plan the page has: only the tasks changed since its version
+    run(['add', 'another task']);
+    const since = (await get(`/api/overview?only=${encodeURIComponent(`${plan.key}\t${plan.st.last_seq}`)}`)).body.projects.find((p) => p.dir === fs.realpathSync(dir)).plans[0];
+    assert.equal(since.delta, plan.st.last_seq);
+    assert.deepEqual(Object.keys(since.st.tasks), ['T2'], 'T1 did not change: not sent again');
+    assert.deepEqual(since.st.order, ['T1', 'T2']);
+    const unknown = (await get(`/api/overview?only=${encodeURIComponent(`${plan.key}\t999999`)}`)).body.projects.find((p) => p.dir === fs.realpathSync(dir)).plans[0];
+    assert.equal(unknown.delta, undefined, 'a version not kept: the whole plan');
+    assert.deepEqual(Object.keys(unknown.st.tasks), ['T1', 'T2']);
 
     // live: the task's recorded runs; a run's output; only the task's own files
     const live = (await get(`/api/live?${R}&task=T1`)).body;
