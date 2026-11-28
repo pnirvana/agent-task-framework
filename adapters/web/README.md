@@ -89,6 +89,11 @@ Plans that need you come first, then those at work, then the quiet ones.
   plan, its coordinator first (or "not running"). Big enough to follow a conversation and
   answer (40% of the window; dragged smaller it keeps about ten rows). `⤢` taller,
   `–` (or `ctrl+\``) hides it; its icon on the rail brings it back.
+- **Shells**: your own terminals on the machine `atf-web` runs on (the devpod), beside the
+  coordinators and agents: `+` on a plan in the terminal list opens your login shell in
+  its project's folder, listed under the plan; `+` on "Shells" (or `ctrl+shift+\``) one
+  in your home folder. They run in the session daemon too, so they outlive the page and
+  `atf-web`; `×` ends one. Prompt icons (Nerd Font symbols) are drawn.
 
 Panel sizes are dragged on the lines between them and remembered, as are the details
 shown and the terminal.
@@ -100,6 +105,7 @@ shown and the terminal.
 | `⌘K` / `ctrl+K` | search: plans, tasks, documents, agents, commands |
 | `alt+1` … `alt+9` | the coordinators' terminals, in the order of the plans |
 | `ctrl+\`` | hide / show the terminal |
+| `ctrl+shift+\`` | a new shell (in the shown plan's project, else your home folder) |
 | `alt+shift+1` … `4` | show / hide Plans, Needs you, Your tasks, the terminal |
 | `ctrl+]` | leave a terminal |
 | `esc` | close the details · cancel what you write |
@@ -116,5 +122,5 @@ what needs you while the page is in the background; the tab title counts it.
 
 ## Not yet
 
-Starting a new plan from the browser, project setup, shell tabs, settings and themes
+Starting a new plan from the browser, project setup, settings and themes
 (docs/webui-design.md §12, phase 5); the file browser, reviews on diffs, several users.

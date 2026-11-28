@@ -50,13 +50,14 @@ export function createTerms({ onLeave = () => {}, onState = () => {}, onFocus = 
     else if (m.ev === 'exit') t.term.write(`\r\n\x1b[2m[session ended: exit ${m.code}]\x1b[0m\r\n`);
   }
 
-  const FONT = "'JetBrains Mono', monospace";
+  // the symbols of shell prompts (Nerd Font icons) come from a font of their own, after it
+  const FONT = "'JetBrains Mono', 'Symbols Nerd Font Mono', monospace";
   // weight and size from the stylesheet (--term-font-weight, --term-font-weight-bold, --term-font-size)
   const css = (name, dflt) => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || dflt;
   const fontOpts = () => ({ fontFamily: FONT, fontWeight: css('--term-font-weight', '400'), fontWeightBold: css('--term-font-weight-bold', '700'), fontSize: Number(css('--term-font-size', '13')) });
   const fontReady = (() => {
     const o = fontOpts();
-    return Promise.all([`${o.fontWeight} ${o.fontSize}px`, `${o.fontWeightBold} ${o.fontSize}px`, `italic ${o.fontWeight} ${o.fontSize}px`].map((f) => document.fonts.load(`${f} 'JetBrains Mono'`))).catch(() => {});
+    return Promise.all([...[`${o.fontWeight} ${o.fontSize}px`, `${o.fontWeightBold} ${o.fontSize}px`, `italic ${o.fontWeight} ${o.fontSize}px`].map((f) => document.fonts.load(`${f} 'JetBrains Mono'`)), document.fonts.load(`${o.fontSize}px 'Symbols Nerd Font Mono'`, '\ue0b0')]).catch(() => {});
   })();
 
   function ensure(id) {

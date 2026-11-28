@@ -494,6 +494,12 @@ runs: no task in progress that nobody works on.
   in addition nothing happened on it for 10 minutes (no command running, no update): an
   agent ATF did not start (a subagent of the human's own harness) is not flagged while it
   works. Orphans are in Needs you, with "Tell the coordinator".
+- **Shells** (the terminal panel's third kind, after coordinators and agents): the user's
+  login shell on the server's machine, run by the session daemon (`meta.role: 'shell'`:
+  never taken for an agent, left alone by the supervisor). Opened in a plan's project folder
+  (listed under that plan) or in home (the "Shells" group); `POST /api/shell`,
+  `/api/shell/close` (only shells). The browser still cannot start commands over the
+  WebSocket: a shell is started by the server, in a known project or home.
 - **Details** slide in over In flight (one at a time, tabs per kind, `‹` / the browser's
   back / `esc`). A task's state sits on the tabs' row: the Plans view's dot, in words. Files and diffs open there too.
 - **Terminal** across the bottom: the one shown, titled plan › Coordinator (or plan ›

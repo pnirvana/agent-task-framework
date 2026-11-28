@@ -2822,6 +2822,20 @@ test('atf-web: sign-in, overview with what needs you, actions as the human, live
     assert.match(msgs.find((m) => m.ev === 'error' && m.rid === 9)?.message ?? '', /not allowed from the browser: create/);
     assert.match(msgs.filter((m) => m.id === id && (m.ev === 'replay' || m.ev === 'out')).map((m) => m.data).join(''), /got hi/);
     ws.close();
+
+    // shells: the user's own terminals, in a plan's project (or home); never an agent of a plan
+    const sh = await (await post('/api/shell', { root: plan.root, plan: plan.id, cols: 80, rows: 24 })).json();
+    assert.equal(sh.ok, true);
+    assert.equal(sh.cwd, path.dirname(plan.root), 'in the plan’s project');
+    let sov = await get('/api/overview');
+    assert.equal(sov.shells.find((x) => x.id === sh.id)?.pk, plan.key, 'listed with its plan');
+    assert.ok(!sov.projects.flatMap((p) => p.plans).some((p) => (p.agents || []).some((a) => a.handle === sh.id)), 'not one of the plan’s agents');
+    assert.equal((await post('/api/shell', {}, { origin: 'http://evil.example' })).status, 403, 'not from another site');
+    assert.equal((await post('/api/shell', { root: '/nowhere/.atf' })).status, 404, 'only in a known project');
+    assert.equal((await post('/api/shell/close', { id })).status, 404, 'an agent’s session is not a shell to end');
+    assert.equal((await (await post('/api/shell/close', { id: sh.id })).json()).ok, true);
+    sov = await get('/api/overview');
+    assert.ok(!sov.shells.some((x) => x.id === sh.id), 'ended and gone');
   } finally {
     await w.close();
     try {

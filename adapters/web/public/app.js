@@ -126,7 +126,7 @@ function liveListOf(p, task) {
   const key = `${p.key}#${task}`;
   const c = S.liveLists.get(key);
   const t = p.st.tasks[task];
-  const worth = t && !t.children.length && (t.status !== 'todo' || t.artifacts.length);
+  const worth = t && !t.children.length && (t.status !== 'todo' || (t.artifacts_total ?? t.artifacts.length));
   if (worth && (!c || (Date.now() - c.at > 4000 && !c.loading))) {
     S.liveLists.set(key, { runs: [], ...(c || {}), loading: true, at: c?.at ?? 0 });
     api(`live?${q({ root: p.root, plan: p.id, task })}`)
@@ -139,6 +139,11 @@ function liveListOf(p, task) {
 // ---------------------------------------------------------------- loading, live updates
 let loading = null;
 let again = false;
+/** A load that starts after now (one in flight may predate what just changed). */
+async function freshLoad() {
+  await (loading ?? Promise.resolve()).catch(() => {});
+  await load();
+}
 async function load() {
   if (loading) return (again = true), loading;
   loading = (async () => {
@@ -327,17 +332,42 @@ const agentStatus = (handle) => allAgents().find((a) => a.handle === handle)?.st
 const sessionExists = (handle) => allAgents().some((a) => a.handle === handle && !a.exited);
 
 /** The terminals, per plan (in the cockpit's order): its coordinator first (or a placeholder), then its agents. */
+/**
+ * The terminals, per plan: its coordinator (or a placeholder), its agents, the shells opened
+ * in its project; then the shells of no plan. A shell is an item {id, a, sh}: `a` the
+ * agent-like part the panel draws (name, status), `sh` the shell.
+ */
+const shells = () => S.ov?.shells ?? [];
+const shellItem = (sh) => ({ id: sh.id, sh, a: { name: sh.name, handle: sh.id, status: sh.status, since: sh.since, exited: sh.exited, kind: 'shell' } });
 function termGroups() {
-  return planOrder().map((p) => {
+  const groups = planOrder().map((p) => {
     const agents = (p.agents || []).filter((a) => !a.exited);
     const coord = agents.find((a) => a.role === 'coordinator');
     const items = [coord ? { id: coord.handle, a: coord } : { id: `ph#${p.key}`, a: null }];
     for (const a of agents.filter((x) => x.role !== 'coordinator')) items.push({ id: a.handle, a });
+    for (const sh of shells().filter((x) => x.pk === p.key)) items.push(shellItem(sh));
     return { p, items };
   });
+  const keys = new Set(groups.map((g) => g.p.key));
+  const own = shells().filter((x) => !x.pk || !keys.has(x.pk));
+  groups.push({ p: null, items: own.map(shellItem) });
+  return groups;
 }
-/** What a terminal is, in words: the coordinator, or the task its agent works on. */
-const termLabel = (x, p) => (!x.a || x.a.role === 'coordinator' ? 'Coordinator' : x.a.task ? `${x.a.task} ${p.st.tasks[x.a.task]?.title ?? ''}` : x.a.name);
+/** What a terminal is, in words: the coordinator, the task its agent works on, or a shell and its folder. */
+const termLabel = (x, p) => (x.sh ? `${x.sh.name[0].toUpperCase()}${x.sh.name.slice(1)} · ${p ? x.sh.cwd.split('/').pop() : shortPath(x.sh.cwd)}` : !x.a || x.a.role === 'coordinator' ? 'Coordinator' : x.a.task ? `${x.a.task} ${p.st.tasks[x.a.task]?.title ?? ''}` : x.a.name);
+/** A new shell on this machine: in the plan's project folder, or home. */
+async function newShell(p = null) {
+  const r = await api('shell', p ? { root: p.root, plan: p.id } : {}).catch((e) => ({ ok: false, message: e.message }));
+  if (!r.ok) return toast(r.message || 'could not open a shell', true);
+  await freshLoad();
+  showTerminal(r.id, true);
+}
+async function closeShell(sh) {
+  if (!sh.exited && !confirm(`End ${sh.name} (${shortPath(sh.cwd)})? What runs in it stops.`)) return;
+  const r = await api('shell/close', { id: sh.id }).catch((e) => ({ ok: false, message: e.message }));
+  if (!r.ok) return toast(r.message || 'could not end the shell', true);
+  await freshLoad();
+}
 /**
  * The terminal panel: the terminal shown, under a title saying whose it is (plan ›
  * coordinator or task · agent); beside it the list of all terminals, per plan.
@@ -345,27 +375,30 @@ const termLabel = (x, p) => (!x.a || x.a.role === 'coordinator' ? 'Coordinator' 
 function renderTerminals() {
   const groups = termGroups();
   const items = groups.flatMap((g) => g.items.map((x) => ({ ...x, p: g.p })));
-  terms.keep(new Set(allAgents().filter((a) => !a.exited).map((a) => a.handle)));
+  terms.keep(new Set([...allAgents().filter((a) => !a.exited).map((a) => a.handle), ...shells().map((x) => x.id)]));
   if (!items.some((x) => x.id === S.pane)) S.pane = (items.find((x) => x.a) || items[0])?.id ?? null;
   store.set('pane', S.pane);
+  const plus = (title, run) => h('button', { class: 'icon tl-add', title, onclick: (e) => (e.stopPropagation(), run()) }, '+');
   $('#term-list').replaceChildren(
     ...groups.map((g) =>
       h(
         'div',
-        { class: 'tl-grp', style: `--pc:${colourOf(g.p)}` },
-        h('div', { class: 'tl-h', title: `${planTitle(g.p)} · ${g.p.project.name} · open the plan`, onclick: () => openPlan(g.p) }, h('span', { class: 'mk' }), h('span', { class: 'pname' }, planTitle(g.p))),
+        { class: `tl-grp${g.p ? '' : ' shells'}`, style: g.p ? `--pc:${colourOf(g.p)}` : '' },
+        g.p
+          ? h('div', { class: 'tl-h', title: `${planTitle(g.p)} · ${g.p.project.name} · open the plan`, onclick: () => openPlan(g.p) }, h('span', { class: 'mk' }), h('span', { class: 'pname' }, planTitle(g.p)), plus(`a new shell in ${shortPath(g.p.project.dir)}`, () => newShell(g.p)))
+          : h('div', { class: 'tl-h', title: 'shells of no plan' }, h('span', { class: 'pname' }, 'Shells'), plus('a new shell in your home folder (ctrl+shift+`)', () => newShell())),
         g.items.map((x) =>
           h(
             'div',
-            { class: `tl-item${x.id === S.pane ? ' on' : ''}${x.a ? '' : ' off'}`, title: x.a ? `${x.a.name} · ${x.a.kind ?? ''} · ${x.a.status} ${ago(x.a.since)}` : 'no coordinator runs this plan', onclick: () => showTerminal(x.id, !!x.a) },
+            { class: `tl-item${x.id === S.pane ? ' on' : ''}${x.a ? '' : ' off'}${x.sh ? ' sh' : ''}`, title: x.sh ? `${x.sh.name} · ${x.sh.cwd} · ${x.sh.status}` : x.a ? `${x.a.name} · ${x.a.kind ?? ''} · ${x.a.status} ${ago(x.a.since)}` : 'no coordinator runs this plan', onclick: () => showTerminal(x.id, !!x.a && !x.a.exited) },
             h('span', { class: `dot ${x.a?.status ?? 'off'}` }),
             h('span', { class: 'l' }, termLabel(x, g.p)),
-            h('span', { class: 'who' }, x.a ? x.a.name : g.p.coordinator?.away ? 'elsewhere' : 'not running'),
+            x.sh ? h('span', { class: 'who' }, h('button', { class: 'icon tl-x', title: x.sh.exited ? 'remove it' : 'end this shell', onclick: (e) => (e.stopPropagation(), closeShell(x.sh)) }, '×')) : h('span', { class: 'who' }, x.a ? x.a.name : g.p.coordinator?.away ? 'elsewhere' : 'not running'),
           ),
         ),
+        !g.p && !g.items.length ? h('div', { class: 'tl-empty' }, h('a', { onclick: () => newShell() }, '+ new shell'), ' in your home folder') : '',
       ),
     ),
-    groups.length ? '' : h('div', { class: 'empty' }, 'No open plans.'),
   );
   const x = items.find((y) => y.id === S.pane);
   const head = $('#term-title');
@@ -389,6 +422,17 @@ function renderTerminals() {
   }
   if (ph) ph.style.display = 'none';
   setTermPlan(x.p);
+  if (x.sh) {
+    head.replaceChildren(
+      ...(x.p ? [h('span', { class: 'pchip click', title: `the plan ${planTitle(x.p)} · ${x.p.project?.name ?? ''} · open it`, onclick: () => openPlan(x.p) }, planTitle(x.p)), sep()] : []),
+      h('b', {}, 'Shell'),
+      h('span', { class: 'mono path', title: x.sh.cwd }, `  ${shortPath(x.sh.cwd)}`),
+      h('span', { class: 'dim' }, `   ${x.sh.name} · `),
+      h('span', { class: `dot ${x.sh.status}` }),
+      h('span', { class: 'dim' }, x.sh.exited ? ` exited${x.sh.code != null ? ` (${x.sh.code})` : ''}` : ` ${x.sh.status} ${ago(x.sh.since)}`),
+    );
+    return terms.place(x.id, body);
+  }
   head.replaceChildren(
     h('span', { class: 'pchip click', title: `the plan ${planTitle(x.p)} · ${x.p.project?.name ?? ''} · open it`, onclick: () => openPlan(x.p) }, planTitle(x.p)),
     sep(),
@@ -1068,6 +1112,9 @@ function paletteItems() {
     if (p.open) for (const a of actionsFor({ p }).filter((x) => !['N', 'c'].includes(x.key))) out.push({ icon: '›', label: `${a.label}: ${planTitle(p)}`, detail: 'command', run: a.run });
   }
   for (const x of PANELS) out.push({ icon: '›', label: `Show / hide ${x.label}`, detail: 'command', run: () => togglePanel(x.id) });
+  out.push({ icon: '›', label: 'New shell', detail: 'in your home folder · ctrl+shift+`', run: () => newShell() });
+  for (const p of openPlans()) out.push({ icon: '›', label: `New shell in ${p.project.name}`, detail: `${shortPath(p.project.dir)} · ${planTitle(p)}`, run: () => newShell(p) });
+  for (const sh of shells()) out.push({ icon: '▭', label: `${sh.name} · ${shortPath(sh.cwd)}`, detail: sh.exited ? 'shell, exited' : 'shell', run: () => showTerminal(sh.id, !sh.exited) });
   out.push({ icon: '›', label: 'Turn on notifications', detail: 'command', run: () => $('#bell').click() });
   return out;
 }
@@ -1239,6 +1286,7 @@ const HELP = [
     ['⌘K / ctrl+K', 'search: plans, tasks, documents, agents, commands'],
     ['alt+1 … 9', 'the coordinators’ terminals, in the order of the plans'],
     ['ctrl+`', 'hide / show the terminal'],
+    ['ctrl+shift+`', 'a new shell (in the shown plan’s project, else your home folder)'],
     ['alt+shift+1 … 4', 'show / hide Plans, Needs you, Your tasks, the terminal (or the rail on the left)'],
     ['ctrl+]', 'leave a terminal (the page has the keys again)'],
     ['esc', 'close the details · cancel what you write'],
@@ -1281,10 +1329,11 @@ function help() {
 $('#help-open').onclick = help;
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') return e.preventDefault(), palette();
+  if (e.ctrlKey && e.shiftKey && e.code === 'Backquote') return e.preventDefault(), newShell(drawer.current() ? planByKey(drawer.current().pk) : null);
   if (e.ctrlKey && (e.key === '`' || e.code === 'Backquote')) return e.preventDefault(), toggleTerminals();
   if (e.altKey && e.shiftKey && /^Digit[1-4]$/.test(e.code)) return e.preventDefault(), togglePanel(PANELS[Number(e.code.slice(5)) - 1].id);
   if (e.altKey && /^Digit[1-9]$/.test(e.code)) {
-    const g = termGroups()[Number(e.code.slice(5)) - 1];
+    const g = termGroups().filter((x) => x.p)[Number(e.code.slice(5)) - 1];
     if (g) (e.preventDefault(), showTerminal(g.items[0].id, true));
     return;
   }

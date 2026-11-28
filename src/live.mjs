@@ -778,7 +778,16 @@ export function taskLive(task, runs = []) {
     (seen.has(k) || (att && a.cmd && a.since && a.since < att) ? earlier : recorded).push(a);
     seen.add(k);
   }
-  const withSummary = (list, extra = {}) => list.map((a) => ({ ...a, active: false, ...extra, summary: summarize(a) }));
+  // a run's summary reads its output (and a Maven run its reports): done when something
+  // reads it, once. A task that ran for long has thousands of runs replaced by newer ones,
+  // which a list or a badge never looks at.
+  const withSummary = (list, extra = {}) =>
+    list.map((a) => {
+      const o = { ...a, active: false, ...extra };
+      let s;
+      Object.defineProperty(o, 'summary', { enumerable: true, configurable: true, get: () => (s ??= summarize(a)), set: (v) => (s = v) });
+      return o;
+    });
   const cur = withSummary(recorded);
   // a run in progress replaces the recorded one it repeats
   const nowKeys = new Set(now.map((r) => supersedeKey({ ...r, kind: artifactKind(r.kind) })));

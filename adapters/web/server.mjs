@@ -16,7 +16,8 @@
 //   POST /api/action        {root, plan, action, task?, message?, status?}  as the human
 //   POST /api/coordinator   {root, plan, fresh?, kind?}  start / resume / replace it
 //   GET  /api/stream        server-sent events: {plans: [key], sessions: bool} on changes
-//   WS   /ws                the agents' terminals, relayed to atf-sessiond
+//   POST /api/shell        a new shell (in a plan's project, or home); /api/shell/close ends one
+//   WS   /ws                the agents' terminals and the shells, relayed to atf-sessiond
 //
 // Reads go through store/core, writes through src/actions.mjs (the same events as the
 // board and the CLI). The server also runs the supervisor (src/supervisor.mjs).
@@ -70,13 +71,12 @@ const strip = ({ st, ...rest }) => rest; // attention items carry their plan; th
 const said = (it) => ({ ...strip(it), text: describe(it), nkey: keyOf(it) });
 
 /** Per task with something live: what runs or waits now, else a failed run ({glyph, text, color}). */
-function liveBadges(root, id, st) {
-  const runs = activeRuns(root, id);
+function liveBadges(root, id, st, runs = activeRuns(root, id), lives = new Map()) {
   const out = {};
   for (const tid of st.order) {
     const t = st.tasks[tid];
     if (t.children.length || ['todo', 'cancelled'].includes(t.status)) continue;
-    const b = liveBadge(taskLive(t, runs));
+    const b = liveBadge(liveOf(lives, t, runs));
     if (b) out[tid] = b;
   }
   return out;
@@ -87,13 +87,17 @@ function liveBadges(root, id, st) {
  * cockpit: the run running or waiting now, else its latest current one; the kind's compact
  * view (what the board shows below a task), at most 7 lines of [text, style] segments.
  */
-function liveGlances(root, id, st) {
-  const runs = activeRuns(root, id);
+/** A task's live runs, once per overview (badges and glances share them). */
+const liveOf = (lives, t, runs) => {
+  if (!lives.has(t.id)) lives.set(t.id, taskLive(t, runs));
+  return lives.get(t.id);
+};
+function liveGlances(root, id, st, runs = activeRuns(root, id), lives = new Map()) {
   const out = {};
   for (const tid of st.order) {
     const t = st.tasks[tid];
     if (t.children.length || !['in_progress', 'blocked', 'review'].includes(t.status)) continue;
-    const live = taskLive(t, runs);
+    const live = liveOf(lives, t, runs);
     const r = live.now.find((x) => x.waiting) || live.now[0] || live.recorded[0];
     if (!r) continue;
     let lines = [];
@@ -194,14 +198,35 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
     }
   };
   function plan(root, id) {
+    return entry(root, id).st;
+  }
+  function entry(root, id) {
     const key = `${root}#${id}`;
     const sig = sigOf(root, id);
     const hit = planCache.get(key);
-    if (hit?.sig === sig) return hit.st;
+    if (hit?.sig === sig) return hit;
     const st = fold(readEvents(root, id));
     st.root = root;
-    planCache.set(key, { sig, st });
-    return st;
+    const e = { sig, st, slim: null };
+    planCache.set(key, e);
+    return e;
+  }
+  /**
+   * A plan as the browser gets it: each task's history and artifacts trimmed to what the
+   * pages show (the last ones; runs are read through /api/live), with their totals. A plan
+   * that ran for long holds thousands of runs: sent whole, every refresh was megabytes.
+   */
+  const KEEP = 40;
+  const RUN_KINDS = new Set(['maven', 'tests', 'pipeline', 'build', 'deploy', 'wait']);
+  function slimPlan(root, id) {
+    const e = entry(root, id);
+    if (!e.slim) {
+      const tasks = {};
+      for (const [tid, t] of Object.entries(e.st.tasks))
+        tasks[tid] = { ...t, history: t.history.slice(-KEEP), history_total: t.history.length, artifacts: t.artifacts.filter((a) => !a.live && !a.cmd && !RUN_KINDS.has(a.kind)).slice(-KEEP), artifacts_total: t.artifacts.length };
+      e.slim = { ...e.st, tasks };
+    }
+    return e.slim;
   }
   function repoOf(root) {
     if (!repoCache.has(root)) {
@@ -243,15 +268,17 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
     const key = `${root}#${id}`;
     const open = ['active', 'paused'].includes(st.status);
     const att = open ? attentionOf(lv, { root, id, st, key }) : { mine: [], queued: [], todos: [], coord: { id: st.coordinator || null, live: null, away: false } };
+    const runs = open ? activeRuns(root, id) : [];
+    const lives = new Map();
     return {
       key,
       root,
       id,
-      st,
+      st: slimPlan(root, id),
       open,
       attention: { mine: att.mine.map(said), queued: att.queued.map(strip), todos: att.todos.map(said) },
-      live: open ? liveBadges(root, id, st) : {},
-      glance: open ? liveGlances(root, id, st) : {},
+      live: open ? liveBadges(root, id, st, runs, lives) : {},
+      glance: open ? liveGlances(root, id, st, runs, lives) : {},
       health: open ? healthOf(lv, root, id, st) : {},
       coordinator: { id: att.coord.id, live: att.coord.live, away: att.coord.away },
       agents: agentsOf(root, id),
@@ -270,7 +297,27 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
       });
       return { root, dir: path.dirname(root), name: path.basename(path.dirname(root)), repo: repoOf(root), plans };
     });
-    return { human: HUMAN, now: Date.now(), home: os.homedir(), projects, sessions: sessions.length };
+    return { human: HUMAN, now: Date.now(), home: os.homedir(), projects, shells: shellsOf(), sessions: sessions.length };
+  }
+
+  // ---------- shells: the user's own terminals on this machine, in the daemon too ----------
+  // (role 'shell' in their meta: not an agent, never found as one, left alone by the supervisor)
+  const isShell = (x) => x.meta?.role === 'shell';
+  const shellsOf = () =>
+    sessions.filter(isShell).map((x) => ({ id: x.id, name: x.meta.name, cwd: x.cwd, pk: x.meta.pk ?? null, project: x.meta.project ?? null, started: x.started, exited: !!x.exited, code: x.code ?? null, status: x.exited ? 'exited' : sessionAgent(x).status, since: sessionAgent(x).since }));
+  /** A new shell: the user's login shell, in a plan's project folder (or home). */
+  async function newShell({ root, plan, cols, rows }) {
+    const r = root ? known(root, plan) : null;
+    const cwd = r ? path.dirname(r) : os.homedir();
+    const n = sessions.filter(isShell).length + 1;
+    const id = `sh-${crypto.randomBytes(3).toString('hex')}`;
+    const name = `shell ${n}`;
+    const env = { ...process.env };
+    for (const k of Object.keys(env)) if (/^ATF_(PLAN|ACTOR|ROLE|DIR)$/.test(k)) delete env[k]; // not an agent of a plan
+    const shell = process.env.SHELL || '/bin/sh';
+    await daemon.request({ op: 'create', id, name, argv: [shell, '-l'], cwd, env, cols: cols || 120, rows: rows || 32, meta: { role: 'shell', name, actor: `shell:${id}`, pk: r && plan ? `${r}#${plan}` : null, project: r ? path.basename(cwd) : null } });
+    await refreshSessions();
+    return { ok: true, id, name, cwd };
   }
 
   const known = (root, id) => {
@@ -492,6 +539,25 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
         const r = humanAction(root, b.plan, b.action, { task: b.task, message: b.message, status: b.status });
         poll().catch(() => {});
         return json(res, r.ok ? 200 : 409, r);
+      }
+      case 'POST /api/shell': {
+        const b = await readBody(req);
+        try {
+          const r = await newShell(b);
+          poll().catch(() => {});
+          return json(res, 200, r);
+        } catch (e) {
+          return json(res, e.status || 500, { ok: false, message: e.message });
+        }
+      }
+      case 'POST /api/shell/close': {
+        const b = await readBody(req);
+        const x = sessions.find((y) => y.id === b.id);
+        if (!x || !isShell(x)) return json(res, 404, { ok: false, message: 'no such shell' });
+        await daemon.request({ op: 'remove', id: x.id });
+        await refreshSessions();
+        poll().catch(() => {});
+        return json(res, 200, { ok: true });
       }
       case 'POST /api/coordinator': {
         const b = await readBody(req);
