@@ -2573,6 +2573,50 @@ test('atf spawn / coordinate: started by the backend that runs agents here, argu
   assert.throws(() => atf(['spawn', 'T1'], { ATF_BACKEND: 'nope' }), (e) => /unknown backend "nope"/.test(e.stderr.toString()));
 });
 
+test('harness settings: the plan’s harness and its model / thinking, else the config; per harness', async () => {
+  const { dir, run } = sandbox(); // coordinator "lead"
+  run(['add', 'api']);
+  const root = path.join(dir, '.atf');
+  const planId = fs.readFileSync(path.join(root, 'current'), 'utf8').trim();
+  const { launchCoordinator, launchAgent, harnessArgs, AGENT_KINDS } = await import('../src/launch.mjs');
+  const opened = [];
+  let cfg = {};
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'atf-hb-'));
+  const backend = {
+    name: 'fake', config: () => cfg, stateDir: () => state, socket: () => null, agents: () => new Map(), local: () => true, find: () => null,
+    nameTaken: () => false, sessionRef: () => null, begin: () => true, prompt: () => true, close: () => {}, interrupt: () => {},
+    open: (o) => (opened.push(o), { handle: `h${opened.length}` }),
+  };
+  const saved = { ...process.env };
+  Object.assign(process.env, { ATF_ACTOR: 'lead', ATF_ROLE: 'coordinator', ATF_AGENT_KIND: '' });
+  try {
+    // the plan names its harness and settings: they decide, whatever the launcher's default
+    run(['plan', 'update', '--harness', 'copilot', '--coordinator-model', 'claude-sonnet-5.5', '--coordinator-thinking', 'high', '--agent-model', 'gpt-5-mini']);
+    cfg = { agent_kind: 'pi', pi: { coordinator: { model: 'anthropic/claude-opus-5.5' } }, copilot: { agent: { thinking: 'low' } } };
+    launchCoordinator({ backend, root, planId });
+    let o = opened.at(-1);
+    assert.equal(o.kind, 'copilot');
+    assert.ok(o.args.join(' ').includes('--model claude-sonnet-5.5 --reasoning-effort high'), o.args.join(' '));
+    launchAgent({ backend, root, planId, taskId: 'T1', name: 'be' });
+    o = opened.at(-1);
+    assert.equal(o.kind, 'copilot');
+    assert.ok(o.args.join(' ').includes('--model gpt-5-mini --reasoning-effort low'), 'the plan’s model, the config’s thinking (copilot’s)');
+    // no plan harness: the launcher's default kind and its config; never another harness's ids
+    run(['plan', 'update', '--harness', '-']);
+    launchAgent({ backend, root, planId, taskId: 'T1', name: 'be2' });
+    o = opened.at(-1);
+    assert.equal(o.kind, 'pi');
+    assert.ok(!o.args.includes('gpt-5-mini') && !o.args.includes('--reasoning-effort'));
+    // a level the harness does not take is refused; a harness without a flag gets a note
+    assert.throws(() => harnessArgs(AGENT_KINDS.pi, 'pi', { thinking: 'none' }), /not one pi takes/);
+    const notes = [];
+    assert.deepEqual(harnessArgs(AGENT_KINDS.opencode, 'opencode', { model: 'm', thinking: 'high' }, (m) => notes.push(m)), ['--model', 'm']);
+    assert.match(notes[0], /opencode takes no thinking level/);
+  } finally {
+    process.env = saved;
+  }
+});
+
 test('backendName: $ATF_BACKEND, then herdr, then a running session daemon', async () => {
   const { backendName } = await import('../src/launch.mjs');
   const up = () => true;

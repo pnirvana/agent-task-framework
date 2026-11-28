@@ -30,7 +30,8 @@ export const AtfLivePlugin = async (ctx = {}) => {
   const asked = new Map(); // permission request id -> tool call id
   const agentOf = (sessionID) => (children.has(sessionID) ? sessionID : null);
   const dir = ctx.directory || process.cwd();
-  const env = process.env;
+  // who this agent is, as it was started (read once: not whatever the environment holds at exit)
+  const env = { ATF_DIR: process.env.ATF_DIR, ATF_PLAN: process.env.ATF_PLAN, ATF_ACTOR: process.env.ATF_ACTOR };
   let waiting = 0;
   const status = (st) => env.ATF_ACTOR && writeAgentStatus(env.ATF_DIR, env.ATF_PLAN, env.ATF_ACTOR, st === 'working' && waiting > 0 ? 'blocked' : st);
   process.once('exit', () => status(null));

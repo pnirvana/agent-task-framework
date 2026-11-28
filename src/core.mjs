@@ -42,7 +42,7 @@ export function canTransition(from, to) {
 }
 
 const TASK_FIELDS = ['title', 'description', 'acceptance', 'deps', 'parent', 'labels', 'priority', 'meta', 'resume', 'agent', 'origin', 'reviewer', 'review'];
-const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume', 'coordinator', 'docs', 'parent_review', 'outline_ids'];
+const PLAN_FIELDS = ['title', 'goal', 'description', 'labels', 'meta', 'resume', 'coordinator', 'docs', 'parent_review', 'outline_ids', 'harness'];
 /** Who a question-block is for: the coordinator (default) or the human (an escalation). */
 export const BLOCK_FOR = ['coordinator', 'human'];
 

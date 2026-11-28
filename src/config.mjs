@@ -38,6 +38,18 @@ export const USER_TEMPLATE = `# ATF: your own settings (atf config shows the fil
 #                                            # progress = OSC 9;4 tab/taskbar mark (default: none)
 # command = 'curl -d "$ATF_NOTIFY_BODY" ntfy.sh/<topic>'   # also $ATF_NOTIFY_TITLE, $ATF_NOTIFY_COUNT
 # settle_seconds = 5                         # an agent waiting / no coordinator must hold this long
+
+[sessions]
+# Agents started by ATF's session daemon (atf-web, atf spawn outside herdr).
+# agent_kind = "copilot"                     # pi | copilot | claude | codex | opencode (a plan's
+#                                            # --harness overrides it for that plan)
+# Model and thinking level per harness (model ids are each harness's own); a plan's
+# --coordinator-model / --agent-thinking … override them for that plan.
+# [sessions.copilot]
+# coordinator = { model = "claude-sonnet-5.5", thinking = "high" }
+# agent = { model = "gpt-5-mini", thinking = "low" }
+# [sessions.pi]
+# coordinator = { model = "anthropic/claude-opus-5.5", thinking = "high" }
 `;
 
 export const PLUGIN_TEMPLATE = `# ATF herdr plugin settings (atf config shows the files in use).

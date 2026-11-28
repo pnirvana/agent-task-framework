@@ -72,22 +72,58 @@ export const AGENT_KINDS = {
   // coordinator: extra args for the plan's coordinator only (the wake extension: it waits
   // for the plan in the background, so pi is idle and promptable while nothing needs it)
   // agent: extra args for subagents only (the live extension: what they run and wait for, §14)
-  pi: { start: ['--skill', '{skill}'], resume: ['--session', '{session}', '--skill', '{skill}'], coordinator: ['-e', '{wake}'], agent: ['-e', '{live}'], prompt: ['{prompt}'], nativeSkill: true },
-  claude: { start: [], resume: ['--resume', '{session}'], prompt: ['{prompt}'] },
+  // model / thinking: the flags for the plan's or the config's model and thinking level
+  // (docs/harness-settings-design.md); levels: the thinking levels the harness takes
+  pi: { start: ['--skill', '{skill}'], resume: ['--session', '{session}', '--skill', '{skill}'], coordinator: ['-e', '{wake}'], agent: ['-e', '{live}'], prompt: ['{prompt}'], nativeSkill: true, model: ['--model', '{model}'], thinking: ['--thinking', '{thinking}'], levels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] },
+  claude: { start: [], resume: ['--resume', '{session}'], prompt: ['{prompt}'], model: ['--model', '{model}'], thinking: ['--effort', '{thinking}'], levels: ['low', 'medium', 'high', 'xhigh', 'max'] },
   // GitHub Copilot CLI: ATF picks the session id ({newsession}) and records it. The
   // coordinator is woken by the ATF Copilot extension (atf-copilot install), which reads
   // ATF_WAKE from the environment (wakeEnv): an extension cannot set the agent's env.
-  copilot: { start: ['--experimental', '--session-id', '{newsession}'], resume: ['--experimental', '--resume', '{session}'], prompt: ['-i', '{prompt}'], wakeEnv: true, nativeSkill: true },
-  codex: { start: [], resume: ['resume', '{session}'], prompt: ['{prompt}'] },
+  copilot: { start: ['--experimental', '--session-id', '{newsession}'], resume: ['--experimental', '--resume', '{session}'], prompt: ['-i', '{prompt}'], wakeEnv: true, nativeSkill: true, model: ['--model', '{model}'], thinking: ['--reasoning-effort', '{thinking}'], levels: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] },
+  codex: { start: [], resume: ['resume', '{session}'], prompt: ['{prompt}'], model: ['-m', '{model}'], thinking: ['-c', 'model_reasoning_effort={thinking}'], levels: ['minimal', 'low', 'medium', 'high'] },
   // opencode: the ATF plugin (live view) through its config env; sessions are opencode's
   // own ids (not known at start): agents start fresh from the task's checkpoint
-  opencode: { start: [], env: { OPENCODE_CONFIG_CONTENT: '{opencodeConfig}' }, prompt: ['--prompt', '{prompt}'], nativeSkill: true },
+  opencode: { start: [], env: { OPENCODE_CONFIG_CONTENT: '{opencodeConfig}' }, prompt: ['--prompt', '{prompt}'], nativeSkill: true, model: ['--model', '{model}'] },
 };
 
 export function agentKinds(backend) {
   return { ...AGENT_KINDS, ...(backend.config().agents || {}) };
 }
 const defaultKind = (backend) => process.env.ATF_AGENT_KIND || backend.config().agent_kind || 'pi';
+
+// ---------- harness settings: model and thinking level (docs/harness-settings-design.md) ----------
+/**
+ * The model and thinking level for `role` ('coordinator' | 'agent') when `kind` runs a
+ * plan's agent: `over` (a task's choice), else the plan's (`s.harness`, for that kind only:
+ * model ids are a harness's own), else the launcher's config ([sessions.<kind>], herdr:
+ * [<kind>]). Returns {model, thinking, from}.
+ */
+export function harnessSettings(backend, s, kind, role, over = {}) {
+  const plan = s?.harness?.kind === kind ? s.harness[role] || {} : {};
+  const cfg = (backend.config()?.[kind] || {})[role] || {};
+  const pick = (k) => (over[k] ? [over[k], 'task'] : plan[k] ? [plan[k], 'plan'] : cfg[k] ? [cfg[k], 'config'] : [null, null]);
+  const [model, mFrom] = pick('model');
+  const [thinking, tFrom] = pick('thinking');
+  return { model, thinking, from: { model: mFrom, thinking: tFrom } };
+}
+
+/** A harness's arguments for a model and thinking level (none set: none); `say` gets notes. */
+export function harnessArgs(kindCfg, kind, { model, thinking }, say = (m) => process.stderr.write(`atf: note: ${m}\n`)) {
+  const out = [];
+  if (model) {
+    if (kindCfg.model) out.push(...kindCfg.model.map((a) => a.replace('{model}', model)));
+    else say(`${kind} takes no model setting: "${model}" is not passed`);
+  }
+  if (thinking) {
+    if (kindCfg.levels && !kindCfg.levels.includes(thinking)) throw new Error(`thinking level "${thinking}" is not one ${kind} takes (${kindCfg.levels.join(', ')})`);
+    if (kindCfg.thinking) out.push(...kindCfg.thinking.map((a) => a.replace('{thinking}', thinking)));
+    else say(`${kind} takes no thinking level: "${thinking}" is not passed`);
+  }
+  return out;
+}
+
+/** The plan's harness, if it names one: what starts its coordinator and agents. */
+const planKind = (s) => s?.harness?.kind || null;
 
 export const lifecycle = (backend) => process.env.ATF_LIFECYCLE_MODE || backend.config().lifecycle || 'ephemeral';
 const GRACE_MS = 15_000; // idle this long (with nothing in progress) before an agent ATF launched is closed
@@ -223,7 +259,7 @@ export function launchAgent({ backend, root, planId, taskId, name, kind, agent, 
   // then the coordinator starts the next)
   const running = backend.agents(root).get(name);
   if (running) throw new Error(`agent "${name}" is still running (${running.handle}, ${running.status}); wait until it ends, or pass another --name`);
-  kind = kind || defaultKind(backend);
+  kind = kind || planKind(s) || defaultKind(backend);
   const kindCfg = agentKinds(backend)[kind] || { start: [] };
   const isPackage = target.children.length > 0;
   // the leaf the agent starts on: the task itself, or the next ready leaf of the package
@@ -238,12 +274,14 @@ export function launchAgent({ backend, root, planId, taskId, name, kind, agent, 
   if (mode === 'resume' && !lp.session && !force) mode = 'fresh';
   const session = lp.session?.ref;
   if (mode === 'resume' && (!kindCfg.resume || !session)) mode = 'fresh'; // agent kind can't resume: fresh + checkpoint
+  if (mode === 'resume' && lp.session?.kind && lp.session.kind !== kind && !force) mode = 'fresh'; // another harness's session
+  const setArgs = harnessArgs(kindCfg, kind, harnessSettings(backend, s, kind, 'agent'));
 
   const env = agentEnv(backend, root, { ATF_PLAN: planId, ATF_ACTOR: name, ATF_ROLE: 'subagent', ATF_LIFECYCLE: lifecycle(backend), ...kindEnv(kindCfg) });
   const newSession = crypto.randomUUID();
   const kindArgs = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []), ...(kindCfg.agent || [])];
   const known = mode === 'resume' ? session : kindArgs.includes('{newsession}') ? newSession : null;
-  const args = [...fill(kindArgs, { skill: SKILL_DIR, session, newsession: newSession, live: LIVE_EXT }), ...agentArgs, ...extraArgs];
+  const args = [...fill(kindArgs, { skill: SKILL_DIR, session, newsession: newSession, live: LIVE_EXT }), ...setArgs, ...agentArgs, ...extraArgs];
   const opened = backend.open({ role: 'subagent', name, label: name, kind, kindCfg, args, env, cwd: path.dirname(root), root, task: target.id, place });
   // register before anything writes to the plan: hooks fired by the assignment below
   // must already know this agent was just launched (no duplicate kickoff nudge)
@@ -284,7 +322,7 @@ export function launchCoordinator({ backend, root, planId, fresh = false, kind, 
   const s = loadPlan(root, planId);
   const name = s.coordinator || resolveActor().id;
   const prev = readRegistry(backend)[regKey(root, name)];
-  kind = kind || (prev?.plan === planId && prev?.kind) || defaultKind(backend);
+  kind = kind || planKind(s) || (prev?.plan === planId && prev?.kind) || defaultKind(backend);
   // the agent definition it ran with last time, unless another is asked for (none: '')
   agent = agent ?? (prev?.plan === planId ? prev.agent : null) ?? null;
   const kindCfg = agentKinds(backend)[kind] || { start: [] };
@@ -292,7 +330,9 @@ export function launchCoordinator({ backend, root, planId, fresh = false, kind, 
   // the backend decides where it goes (herdr: the plan's workspace, a pane left over)
   const where = backend.coordinatorPlace ? backend.coordinatorPlace({ root, planId, s, name, prev, running, place }) : { running };
   running = where.running;
-  const mode = !fresh && s.session?.ref && kindCfg.resume ? 'resume' : 'fresh';
+  // (a session of another harness is not resumed: fresh, from the checkpoint)
+  const mode = !fresh && s.session?.ref && kindCfg.resume && (!s.session.kind || s.session.kind === kind) ? 'resume' : 'fresh';
+  const setArgs = harnessArgs(kindCfg, kind, harnessSettings(backend, s, kind, 'coordinator'));
   if (dryRun) return { name, pane: running?.handle ?? null, mode: running && !fresh ? 'running' : mode, session: mode === 'resume' ? s.session.ref : null, leftover: where.leftover ?? null };
   if (running) {
     if (!fresh) return { name, pane: running.handle, mode: 'running' };
@@ -319,7 +359,7 @@ export function launchCoordinator({ backend, root, planId, fresh = false, kind, 
   const hname = backend.nameTaken(name) ? `${name}-${s.id.slice(-4)}` : name;
   const newSession = crypto.randomUUID();
   const kindArgs = [...withoutSkill(mode === 'resume' ? kindCfg.resume : kindCfg.start || []), ...(kindCfg.coordinator || [])];
-  const args = [...fill(kindArgs, { skill: SKILL_DIR, session: mode === 'resume' ? s.session.ref : '', newsession: newSession, wake: WAKE_EXT }), ...agentDefArgs(backend, agent, kind, path.dirname(root))];
+  const args = [...fill(kindArgs, { skill: SKILL_DIR, session: mode === 'resume' ? s.session.ref : '', newsession: newSession, wake: WAKE_EXT }), ...setArgs, ...agentDefArgs(backend, agent, kind, path.dirname(root))];
   const opened = backend.open({ role: 'coordinator', name: hname, actor: name, label: `plan: ${s.title}`, kind, kindCfg, args, env, cwd: path.dirname(root), root, place: where });
   updateRegistry(backend, (reg) => {
     reg[regKey(root, name)] = { name: hname, actor: name, role: 'coordinator', kind, agent: agent || null, root, plan: planId, pane: opened.handle, workspace: opened.workspace ?? null, socket: backend.socket(), launchedAt: Date.now() };
@@ -342,7 +382,7 @@ export function launchNewCoordinator({ backend, root, place = {}, kind, agent, p
   const kindCfg = agentKinds(backend)[kind] || { start: [] };
   const newSession = crypto.randomUUID();
   const kindArgs = withoutSkill([...(kindCfg.start || []), ...(kindCfg.coordinator || [])]);
-  const args = [...fill(kindArgs, { skill: SKILL_DIR, newsession: newSession, wake: WAKE_EXT }), ...agentDefArgs(backend, agent, kind, path.dirname(root))];
+  const args = [...fill(kindArgs, { skill: SKILL_DIR, newsession: newSession, wake: WAKE_EXT }), ...harnessArgs(kindCfg, kind, harnessSettings(backend, null, kind, 'coordinator')), ...agentDefArgs(backend, agent, kind, path.dirname(root))];
   const hname = backend.nameTaken(name) ? `${name}-${crypto.randomUUID().slice(0, 4)}` : name;
   const env = newCoordinatorEnv(backend, root, kind);
   const opened = backend.open({ role: 'new', name: hname, actor: name, label: 'new plan', kind, kindCfg, args, env, cwd: path.dirname(root), root, place });

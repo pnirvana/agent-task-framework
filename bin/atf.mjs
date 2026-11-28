@@ -24,7 +24,7 @@ import {
 } from '../src/core.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { backendName } from '../src/launch.mjs';
+import { backendName, AGENT_KINDS } from '../src/launch.mjs';
 import { daemonUp as sessionsDaemonUp } from '../src/sessions.mjs';
 import { buildPrompt } from '../src/prompts.mjs';
 import { planChanges, levelSets, totals, onlyFile, projectPath, viewerCommand, patchText, changeMode, diffTool, fileOrigin } from '../src/changes.mjs';
@@ -70,10 +70,17 @@ Setup / plans
   atf plan list | use <id>
   atf plan show [id]                    plan overview: structure, ownership, decisions, artifacts
   atf plan new <title> ... [--coordinator NAME]   (default: you become its coordinator)
+  atf plan new <title> ... [--harness KIND] [--coordinator-model M] …   as for plan update
   atf plan update [--title T] [--goal G] [--desc D] [--doc PATH]... [--resume fresh|auto|resume]
                   [--parent-review on|off]   parents with criteria are reviewed when their
                                         subtasks are done (new plans: on; older plans: off)
                   [--coordinator NAME]    (--doc replaces the list; --doc - clears it)
+                  [--harness KIND]        the agent kind that runs this plan's coordinator and
+                                        agents (pi, copilot, claude, codex, opencode), whoever
+                                        starts them; --harness - clears it (the launcher's default)
+                  [--coordinator-model M] [--coordinator-thinking L]   for that harness only
+                  [--agent-model M] [--agent-thinking L]               (- clears one); else the
+                                        launcher's config [sessions.<kind>] (herdr: [<kind>])
   atf plan checkpoint "<where the plan stands, what you wait for, what is next>"
                                         (coordinator) handoff to the next coordinator session
   atf plan ask "<question>"             (coordinator) a question for the human about the whole plan
@@ -508,6 +515,38 @@ function renderActorLine(a, state) {
   const pk = a.packages.length ? ` packages ${a.packages.join(',')}` : '';
   return `  ${cyan(a.id)} ${dim(a.role || '')}${pk} · ${done}/${owned.length} done${active.length ? ' · ' + active.join(' ') : ''} ${a.last_seen ? dim(`seen ${ago(a.last_seen)}`) : dim('not started')}`;
 }
+/**
+ * The plan's harness after --harness / --coordinator-model / --coordinator-thinking /
+ * --agent-model / --agent-thinking (docs/harness-settings-design.md), onto `cur`; '' or -
+ * clears a value (--harness -: all of it). Null: no such flag given.
+ */
+function harnessFromFlags(cur = null) {
+  const keys = ['harness', 'coordinator-model', 'coordinator-thinking', 'agent-model', 'agent-thinking'];
+  if (!keys.some((k) => FLAGS[k] !== undefined)) return null;
+  const clear = (v) => v === '-' || v === '' || v === true;
+  if (FLAGS.harness !== undefined && clear(FLAGS.harness)) return {};
+  const h = { kind: cur?.kind ?? null, coordinator: { ...(cur?.coordinator || {}) }, agent: { ...(cur?.agent || {}) } };
+  if (FLAGS.harness !== undefined) {
+    if (!/^[a-z][\w-]*$/.test(FLAGS.harness)) die(`--harness: an agent kind such as ${Object.keys(AGENT_KINDS).join(', ')}`);
+    // another harness: the model settings were the old one's (model ids are a harness's own)
+    if (h.kind && h.kind !== FLAGS.harness) (h.coordinator = {}), (h.agent = {});
+    h.kind = FLAGS.harness;
+  }
+  for (const [flag, role, key] of [['coordinator-model', 'coordinator', 'model'], ['coordinator-thinking', 'coordinator', 'thinking'], ['agent-model', 'agent', 'model'], ['agent-thinking', 'agent', 'thinking']]) {
+    if (FLAGS[flag] === undefined) continue;
+    if (clear(FLAGS[flag])) delete h[role][key];
+    else h[role][key] = String(FLAGS[flag]);
+  }
+  if ((Object.keys(h.coordinator).length || Object.keys(h.agent).length) && !h.kind) die('model and thinking settings belong to a harness: --harness <kind> (model ids are a harness\'s own)');
+  const levels = AGENT_KINDS[h.kind]?.levels;
+  for (const role of ['coordinator', 'agent']) if (levels && h[role].thinking && !levels.includes(h[role].thinking)) die(`--${role}-thinking: ${h.kind} takes ${levels.join(', ')}`);
+  return h;
+}
+const harnessText = (h) =>
+  !h?.kind
+    ? ''
+    : [h.kind, ...['coordinator', 'agent'].map((r) => (h[r] && Object.keys(h[r]).length ? `${r}: ${[h[r].model, h[r].thinking && `thinking ${h[r].thinking}`].filter(Boolean).join(', ')}` : null))].filter(Boolean).join(' · ');
+
 function renderPlan(state) {
   const L = [renderStatus(state).split('\n').slice(0, 3).join('\n')];
   L.push(dim(`created ${state.created_at?.slice(0, 16).replace('T', ' ')} by ${state.created_by ?? '?'} · updated ${ago(state.updated_at)} · ${state.parent_review ? 'parent_review: parents with criteria are reviewed when their subtasks are done' : 'parents are containers (atf plan update --parent-review on)'}`));
@@ -518,6 +557,7 @@ function renderPlan(state) {
   if (state.questions?.length) L.push('', bold('open questions for the human:'), ...state.questions.map((q) => `  ${q.message}`));
   const pnotes = state.notes.filter((n) => n.kind !== 'checkpoint' && !(state.questions ?? []).includes(n));
   if (pnotes.length) L.push('', bold('plan notes:'), ...pnotes.slice(-10).map((n) => `  ${n.kind !== 'info' ? yellow(`[${n.kind}] `) : ''}${cyan(n.actor ?? '?')}: ${n.message}`));
+  if (state.harness?.kind) L.push('', `${bold('harness:')} ${harnessText(state.harness)}`);
   if (state.session) L.push('', `${bold('coordinator session:')} ${cyan(state.session.actor ?? '?')} ${state.session.kind ?? ''} ${dim(state.session.ref)}`);
   L.push('', bold('structure:'), ...treeRows(state).map((r) => '  ' + renderTaskLine(state.tasks[r.id], state, r.prefix)));
   const actors = Object.values(state.actors).filter((a) => a.owned.length || a.packages.length);
@@ -884,6 +924,8 @@ const commands = {
       if (FLAGS.desc) data.description = FLAGS.desc;
       if (FLAGS.coordinator) data.coordinator = FLAGS.coordinator;
       if (FLAGS.doc) data.docs = FLAGS.doc;
+      const harness = harnessFromFlags();
+      if (harness?.kind) data.harness = harness;
       data.parent_review = true; // §5.2: parents with criteria of their own are reviewed against them
       // §5.3: a subtask's id is numbered under its parent (T6.2); --ids flat: T1, T2, … as before
       if (FLAGS.ids !== undefined && !['flat', 'outline'].includes(FLAGS.ids)) die('--ids must be flat or outline');
@@ -931,15 +973,17 @@ const commands = {
         if (!['on', 'off'].includes(FLAGS['parent-review'])) die('--parent-review must be on or off');
         data.parent_review = FLAGS['parent-review'] === 'on';
       }
-      if (!Object.keys(data).length) die('nothing to update');
+      const hasHarness = ['harness', 'coordinator-model', 'coordinator-thinking', 'agent-model', 'agent-thinking'].some((k) => FLAGS[k] !== undefined);
+      if (!Object.keys(data).length && !hasHarness) die('nothing to update');
       let before;
       const { state } = transact(root, planId, actor, (st) => {
         if (data.parent_review && st.status !== 'active' && !FLAGS.force) die(`the plan is ${st.status}: parent reviews are for a plan still running (use --force)`);
         before = st;
+        if (hasHarness) data.harness = harnessFromFlags(st.harness); // onto what the plan has
         return [{ type: 'plan.updated', data }];
       });
       const toReview = state.order.filter((id) => state.tasks[id].children.length && state.tasks[id].status === 'review' && before.tasks[id].status !== 'review');
-      return out({ ok: true, review: toReview }, `plan updated${toReview.length ? `; in review now (their subtasks are done): ${toReview.join(', ')}` : ''}`);
+      return out({ ok: true, review: toReview, ...(data.harness ? { harness: state.harness } : {}) }, `plan updated${data.harness ? ` · harness: ${harnessText(state.harness) || 'none (the launcher’s default)'}` : ''}${toReview.length ? `; in review now (their subtasks are done): ${toReview.join(', ')}` : ''}`);
     }
     if (sub === 'note' || sub === 'ask' || sub === 'checkpoint') {
       // plan-level notes: `ask` = a question for the human about the whole plan;
