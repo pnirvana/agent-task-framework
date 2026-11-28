@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // atf-web: ATF in the browser (docs/webui-design.md §4.4). One server per user, on
 // 127.0.0.1 only: reach it through one SSH tunnel (ssh -L 7420:localhost:7420 devpod).
 //

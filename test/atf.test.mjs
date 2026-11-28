@@ -2946,3 +2946,11 @@ test('atf-web: live runs, changes without .atf, the file viewer stays in the pro
     process.env = saved;
   }
 });
+
+test('every command of the package runs on its own (npm link: a #!/usr/bin/env node first line)', () => {
+  const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  for (const [name, file] of Object.entries(pkg.bin)) {
+    const text = fs.readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+    assert.ok(text.startsWith('#!/usr/bin/env node\n'), `${name} (${file}) starts with #!/usr/bin/env node`);
+  }
+});
