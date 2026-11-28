@@ -16,6 +16,8 @@
 //   POST /api/action        {root, plan, action, task?, message?, status?}  as the human
 //   POST /api/coordinator   {root, plan, fresh?, kind?}  start / resume / replace it
 //   GET  /api/stream        server-sent events: {plans: [key], sessions: bool} on changes
+//   GET  /api/overview?only=<keys, newline-separated>   only those plans in full (the rest {key, same})
+//   GET  /api/task         one task in full (history, notes, artifacts), for its page
 //   POST /api/shell        a new shell (in a plan's project, or home); /api/shell/close ends one
 //   WS   /ws                the agents' terminals and the shells, relayed to atf-sessiond
 //
@@ -212,21 +214,37 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
     return e;
   }
   /**
-   * A plan as the browser gets it: each task's history and artifacts trimmed to what the
-   * pages show (the last ones; runs are read through /api/live), with their totals. A plan
-   * that ran for long holds thousands of runs: sent whole, every refresh was megabytes.
+   * A plan as the cockpit gets it: per task what the panels show (state, owner, tree, steps,
+   * dependencies, acceptance), its long parts (history, notes, artifacts, attempts, the
+   * description beyond a line) left to /api/task when a task is opened; the plan's last
+   * notes. A big plan is a few KB per task less on every refresh.
    */
-  const KEEP = 40;
+  const LITE = ['id', 'title', 'status', 'rollup_status', 'owner', 'assignee', 'reviewer', 'agent', 'parent', 'depth', 'path', 'children', 'deps', 'waiting_on', 'blocked_on', 'blocked_for', 'ready', 'steps', 'percent', 'last_message', 'acceptance', 'priority', 'labels', 'changes_requested', 'created_at', 'started_at', 'updated_at', 'finished_at'];
   const RUN_KINDS = new Set(['maven', 'tests', 'pipeline', 'build', 'deploy', 'wait']);
+  const PLAN_DROP = new Set(['tasks', 'actors', 'reviews', 'questions', 'human_input', 'meta', 'session', 'notes']);
   function slimPlan(root, id) {
     const e = entry(root, id);
     if (!e.slim) {
       const tasks = {};
-      for (const [tid, t] of Object.entries(e.st.tasks))
-        tasks[tid] = { ...t, history: t.history.slice(-KEEP), history_total: t.history.length, artifacts: t.artifacts.filter((a) => !a.live && !a.cmd && !RUN_KINDS.has(a.kind)).slice(-KEEP), artifacts_total: t.artifacts.length };
-      e.slim = { ...e.st, tasks };
+      for (const [tid, t] of Object.entries(e.st.tasks)) {
+        const x = {};
+        for (const k of LITE) if (t[k] !== undefined) x[k] = t[k];
+        x.description = t.description && t.description.length > 300 ? t.description.slice(0, 300) + '…' : t.description;
+        x.artifacts_total = t.artifacts.length;
+        x.history_total = t.history.length;
+        tasks[tid] = x;
+      }
+      const plan = {};
+      for (const [k, v] of Object.entries(e.st)) if (!PLAN_DROP.has(k)) plan[k] = v;
+      e.slim = { ...plan, notes: (e.st.notes || []).slice(-15), tasks };
     }
     return e.slim;
+  }
+  /** One task in full, for its page: the last of its history and artifacts (runs: /api/live). */
+  function fullTask(root, id, tid) {
+    const t = plan(root, id).tasks[tid];
+    if (!t) return null;
+    return { ...t, history: t.history.slice(-200), history_total: t.history.length, artifacts: t.artifacts.filter((a) => !a.live && !a.cmd && !RUN_KINDS.has(a.kind)).slice(-100), artifacts_total: t.artifacts.length };
   }
   function repoOf(root) {
     if (!repoCache.has(root)) {
@@ -285,10 +303,16 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
     };
   }
 
-  function overview() {
+  /** `only`: the keys of the plans to send (the others the page has: {key, same: true}). */
+  function overview(only = null) {
     const lv = sessionsLiveness(sessions, socket);
     const projects = roots().map((root) => {
       const plans = listPlanIds(root).map((id) => {
+        const key = `${root}#${id}`;
+        if (only && !only.has(key)) {
+          const st = plan(root, id);
+          if (['active', 'paused'].includes(st.status)) return { key, root, id, open: true, same: true };
+        }
         const v = planView(root, id, lv);
         if (v.open) return v;
         // a closed plan: enough to list it
@@ -468,8 +492,15 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
     const route = `${req.method} ${url.pathname}`;
     if (req.method === 'POST' && !/^application\/json\b/.test(req.headers['content-type'] || '')) return json(res, 415, { error: 'JSON only' });
     switch (route) {
-      case 'GET /api/overview':
-        return json(res, 200, overview());
+      case 'GET /api/overview': {
+        const only = url.searchParams.get('only');
+        return json(res, 200, overview(only != null ? new Set(only.split('\n').filter(Boolean)) : null));
+      }
+      case 'GET /api/task': {
+        const root = known(url.searchParams.get('root'), url.searchParams.get('plan'));
+        const t = fullTask(root, url.searchParams.get('plan'), url.searchParams.get('task'));
+        return t ? json(res, 200, t) : json(res, 404, { error: 'no such task' });
+      }
       case 'GET /api/plan':
         return json(res, 200, planView(known(q.root, q.plan), q.plan));
       case 'GET /api/brief': {

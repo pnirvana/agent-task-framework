@@ -109,7 +109,7 @@ export function compose(t, action, p, task, label, extra = {}) {
 // ---------------------------------------------------------------- the task page
 function taskPage(tab, p) {
   const st = p.st;
-  const t = st.tasks[tab.task];
+  const t = ctx.taskFull(p, tab.task); // with its history, notes, artifacts
   if (!t) return h('div', { class: 'page' }, h('h1', {}, tab.task), h('p', { class: 'meta' }, 'This task is gone from the plan.'));
   const b = ctx.briefOf(p, t.id);
   const agent = ctx.agentOf(p, t.owner);
@@ -162,7 +162,7 @@ function taskPage(tab, p) {
   // artifacts (runs are under Live, as src/live.mjs taskLive picks them)
   const projDir = p.project?.dir;
   const inProject = (ref) => (ref.startsWith('/') ? (projDir && ref.startsWith(projDir + '/') ? ref.slice(projDir.length + 1) : null) : ref);
-  const arts = t.artifacts.filter((a) => !a.live && !a.cmd && !['maven', 'tests', 'pipeline', 'build', 'deploy', 'wait'].includes(a.kind));
+  const arts = (t.artifacts ?? []).filter((a) => !a.live && !a.cmd && !['maven', 'tests', 'pipeline', 'build', 'deploy', 'wait'].includes(a.kind));
   if (arts.length)
     out.push(
       sec(
@@ -174,8 +174,8 @@ function taskPage(tab, p) {
         })),
       ),
     );
-  if (t.notes.length) out.push(sec('Notes', ...notes(t.notes)));
-  const hist = [...t.history].reverse().slice(0, 15);
+  if (t.notes?.length) out.push(sec('Notes', ...notes(t.notes)));
+  const hist = [...(t.history ?? [])].reverse().slice(0, 15);
   if (hist.length)
     out.push(
       sec(

@@ -40,6 +40,7 @@ const S = {
   briefs: new Map(),
   changes: new Map(),
   liveLists: new Map(),
+  tasks: new Map(), // tasks in full, for their pages (see taskFull)
   logs: new Map(),
   plansFolded: new Set(store.get('plansFolded', [])),
   closedOpen: false,
@@ -119,6 +120,17 @@ function versioned(map, base, seq, url, onLoaded, onError = () => {}) {
 function briefOf(p, task) {
   return versioned(S.briefs, `${p.key}#${task ?? ''}`, p.st.last_seq, `brief?${q({ root: p.root, plan: p.id, task })}`, () => refreshIf((v) => v.pk === p.key && v.task === task));
 }
+/**
+ * A task with its long parts (history, notes, artifacts, the whole description), for its
+ * page: the overview carries only what the panels show. The current state stays the
+ * overview's (newer); until the full one arrives, the overview's alone.
+ */
+function taskFull(p, id) {
+  const lite = p.st.tasks[id];
+  if (!lite) return null;
+  const full = versioned(S.tasks, `${p.key}#${id}`, p.st.last_seq, `task?${q({ root: p.root, plan: p.id, task: id })}`, () => refreshIf((v) => v.pk === p.key && v.task === id));
+  return full ? { ...full, ...lite, description: full.description } : lite;
+}
 function changesOf(p) {
   return versioned(S.changes, p.key, p.st.last_seq, `changes?${q({ root: p.root, plan: p.id })}`, () => refreshIf((v) => v.pk === p.key), (e) => toast(e.message, true));
 }
@@ -126,7 +138,7 @@ function liveListOf(p, task) {
   const key = `${p.key}#${task}`;
   const c = S.liveLists.get(key);
   const t = p.st.tasks[task];
-  const worth = t && !t.children.length && (t.status !== 'todo' || (t.artifacts_total ?? t.artifacts.length));
+  const worth = t && !t.children.length && (t.status !== 'todo' || (t.artifacts_total ?? t.artifacts?.length ?? 0));
   if (worth && (!c || (Date.now() - c.at > 4000 && !c.loading))) {
     S.liveLists.set(key, { runs: [], ...(c || {}), loading: true, at: c?.at ?? 0 });
     api(`live?${q({ root: p.root, plan: p.id, task })}`)
@@ -144,11 +156,29 @@ async function freshLoad() {
   await (loading ?? Promise.resolve()).catch(() => {});
   await load();
 }
-async function load() {
+/**
+ * Load the overview. `plans`: the keys of the plans that changed (from the stream): only
+ * those come again, the others are kept. Without it (start, sessions changed, every half
+ * minute: what depends on time), all of them.
+ */
+let pending = { all: false, plans: new Set() };
+async function load(plans = null) {
+  if (plans) plans.forEach((k) => pending.plans.add(k));
+  else pending.all = true;
   if (loading) return (again = true), loading;
   loading = (async () => {
     try {
-      S.ov = await api('overview');
+      const want = pending;
+      pending = { all: false, plans: new Set() };
+      const partial = S.ov && !want.all;
+      const ov = await api(partial ? `overview?${q({ only: [...want.plans].join('\n') || '\n' })}` : 'overview');
+      if (partial) {
+        const prev = new Map(allPlans().map((p) => [p.key, p]));
+        let missing = false;
+        for (const pr of ov.projects) pr.plans = pr.plans.map((p) => (p.same ? prev.get(p.key) ?? ((missing = true), p) : p));
+        if (missing) pending.all = true, (again = true); // a plan the page did not have yet
+      }
+      S.ov = ov;
       const v = drawer.current();
       const p = v && allPlans().find((x) => x.key === v.pk);
       if (p && !p.open) S.closed.delete(p.key), loadClosed(p);
@@ -157,17 +187,29 @@ async function load() {
       toast(`could not load: ${e.message}`, true);
     } finally {
       loading = null;
-      if (again) (again = false), load();
+      if (again) (again = false), load(pending.all ? null : [...pending.plans]);
     }
   })();
   return loading;
 }
+setInterval(() => load(), 30_000); // what depends on time (ages, an orphan after 10 minutes)
 function stream() {
   const es = new EventSource('/api/stream');
   let t = null;
-  es.onmessage = () => {
+  let acc = { all: false, plans: new Set() };
+  es.onmessage = (e) => {
+    let m = {};
+    try {
+      m = JSON.parse(e.data);
+    } catch {}
+    if (m.sessions || !Array.isArray(m.plans)) acc.all = true;
+    else m.plans.forEach((k) => acc.plans.add(k));
     clearTimeout(t);
-    t = setTimeout(load, 150);
+    t = setTimeout(() => {
+      const a = acc;
+      acc = { all: false, plans: new Set() };
+      load(a.all ? null : [...a.plans]);
+    }, 150);
   };
   es.onopen = () => ($('#conn').classList.add('up'), load());
   es.onerror = () => $('#conn').classList.remove('up');
@@ -596,7 +638,7 @@ function needPage(v, el) {
   const p = planByKey(v.pk);
   const live = p?.st ? itemsOf(p).find((x) => x.nkey === v.nkey) : null;
   const it = live ?? v.snap;
-  const t = it.task ? p?.st?.tasks[it.task] : null;
+  const t = it.task && p?.st ? taskFull(p, it.task) : null;
   const b = t ? briefOf(p, t.id) : null;
   const out = [];
   const sec = (title, ...kids) => h('section', { class: 'sec' }, h('h3', {}, title), ...kids);
@@ -1366,6 +1408,7 @@ document.addEventListener('keydown', (e) => {
 initPages({
   treeRow,
   shortPath,
+  taskFull,
   get human() {
     return S.ov?.human ?? 'human';
   },

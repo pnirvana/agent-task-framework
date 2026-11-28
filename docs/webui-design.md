@@ -494,6 +494,11 @@ runs: no task in progress that nobody works on.
   in addition nothing happened on it for 10 minutes (no command running, no update): an
   agent ATF did not start (a subagent of the human's own harness) is not flagged while it
   works. Orphans are in Needs you, with "Tell the coordinator".
+- **Refreshing**: the stream says which plans changed; the page asks for those only
+  (`/api/overview?only=`), the rest come as `{key, same}` and it keeps its own. Everything
+  again when sessions change, and every 30 s (what depends on time). The overview carries
+  per task what the panels show; a task's history, notes, artifacts and whole description
+  come with its page (`/api/task`). A big, quiet plan costs almost nothing per refresh.
 - **Shells** (the terminal panel's third kind, after coordinators and agents): the user's
   login shell on the server's machine, run by the session daemon (`meta.role: 'shell'`:
   never taken for an agent, left alone by the supervisor). Opened in a plan's project folder

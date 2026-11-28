@@ -2891,6 +2891,14 @@ test('atf-web: live runs, changes without .atf, the file viewer stays in the pro
     assert.equal(plan.glance.T1.kind, 'tests');
     assert.ok(Array.isArray(plan.glance.T1.lines));
     assert.deepEqual(plan.health, {}, 'nothing in progress without an agent');
+    // the overview carries what the panels show; a task in full comes with its page
+    assert.equal(plan.st.tasks.T1.history, undefined, 'no history in the overview');
+    assert.ok(plan.st.tasks.T1.history_total > 0);
+    const full = (await get(`/api/task?${R}&task=T1`)).body;
+    assert.ok(full.history.length > 0 && full.artifacts.length === 0, 'history; runs are read through /api/live');
+    // a refresh of some plans: the others are the page's ({key, same})
+    const part = (await get(`/api/overview?only=${encodeURIComponent('nothing#here')}`)).body.projects.find((p) => p.dir === fs.realpathSync(dir)).plans[0];
+    assert.deepEqual(part, { key: plan.key, root: plan.root, id: plan.id, open: true, same: true });
 
     // live: the task's recorded runs; a run's output; only the task's own files
     const live = (await get(`/api/live?${R}&task=T1`)).body;
