@@ -42,13 +42,13 @@ import { userConfigDir } from '../../src/config.mjs';
 import { sessionsBackend, sessionsLiveness, sessionAgent, socketPath, ensureDaemon, connect } from '../../src/sessions.mjs';
 import { startSupervisor } from '../../src/supervisor.mjs';
 import { wsAccept } from './ws.mjs';
+import { relay } from './relay.mjs';
+import { fork } from 'node:child_process';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(HERE, 'public');
 const SESSIONS_CLI = path.resolve(HERE, '../../bin/atf-sessions.mjs');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.woff2': 'font/woff2', '.json': 'application/json', '.svg': 'image/svg+xml', '.txt': 'text/plain; charset=utf-8' };
-// what the browser may ask the daemon: watch and type into sessions, never start commands
-const WS_OPS = new Set(['list', 'attach', 'detach', 'input', 'resize']);
 
 /** The token in the URL atf-web prints: ~/.config/atf/web-token (0600), made once. */
 export function webToken(file = path.join(userConfigDir(), 'web-token')) {
@@ -666,25 +666,35 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
     });
   });
 
-  // the agents' terminals: each browser connection gets its own daemon connection
+  // ---------- the terminals: relayed in a process of their own (relay.mjs) ----------
+  // atf-web checks a connection, then hands it to the relay: typing and output never wait
+  // for this process (a refresh of the board). Without the relay (it ended): relayed here.
+  const relayStats = { handed: 0, here: 0 }; // connections relayed by the relay process / here
+  let relayProc = null;
+  let relayReady = false;
+  let closing = false;
+  const startRelay = () => {
+    relayReady = false;
+    relayProc = fork(path.join(HERE, 'relay.mjs'), [socket], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'], serialization: 'json' });
+    relayProc.on('message', (m) => m?.type === 'ready' && (relayReady = true));
+    relayProc.on('exit', (code) => {
+      relayReady = false;
+      relayProc = null;
+      if (closing) return;
+      log(`relay ended (${code}): restarting`);
+      setTimeout(() => !closing && startRelay(), 1000).unref();
+    });
+  };
+  startRelay();
   server.on('upgrade', (req, sock) => {
     if (!cookieOk(req) || !sameOrigin(req) || req.url !== '/ws') return sock.destroy();
-    const ws = wsAccept(req, sock);
-    const d = connect((m) => {
-      if (m.ev === 'closed') return ws.close();
-      ws.send(JSON.stringify(m));
-    }, socket);
-    ws.onmessage = (text) => {
-      let m;
-      try {
-        m = JSON.parse(text);
-      } catch {
-        return;
-      }
-      if (!WS_OPS.has(m.op)) return ws.send(JSON.stringify({ ev: 'error', rid: m.rid, message: `not allowed from the browser: ${m.op}` }));
-      d.send(m);
-    };
-    ws.onclose = () => d.close();
+    if (relayReady && relayProc?.connected) {
+      sock.pause();
+      relayStats.handed++;
+      return relayProc.send({ type: 'ws', headers: { 'sec-websocket-key': req.headers['sec-websocket-key'] } }, sock, (err) => err && sock.destroy());
+    }
+    relayStats.here++;
+    relay(wsAccept(req, sock), socket);
   });
 
   await new Promise((resolve, reject) => {
@@ -697,8 +707,11 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
     port: actual,
     url: `http://localhost:${actual}/?token=${token}`,
     overview,
+    relay: () => ({ ...relayStats, ready: relayReady, pid: relayProc?.pid ?? null }),
     close: () =>
       new Promise((resolve) => {
+        closing = true;
+        relayProc?.kill();
         clearInterval(pollTimer);
         clearInterval(keepAlive);
         stopSupervisor();

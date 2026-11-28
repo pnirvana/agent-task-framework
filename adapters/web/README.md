@@ -93,7 +93,8 @@ Plans that need you come first, then those at work, then the quiet ones.
   coordinators and agents: `+` on a plan in the terminal list opens your login shell in
   its project's folder, listed under the plan; `+` on "Shells" (or `ctrl+shift+\``) one
   in your home folder. They run in the session daemon too, so they outlive the page and
-  `atf-web`; `×` ends one. Prompt icons (Nerd Font symbols) are drawn.
+  `atf-web`; `×` ends one. Prompt icons (Nerd Font symbols) are drawn. The terminals are
+  relayed by a process of their own, so typing stays quick when the board is busy.
 
 Panel sizes are dragged on the lines between them and remembered, as are the details
 shown and the terminal.

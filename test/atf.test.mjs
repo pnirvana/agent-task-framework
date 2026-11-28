@@ -2811,6 +2811,8 @@ test('atf-web: sign-in, overview with what needs you, actions as the human, live
 
     // the terminal relay: watch and type, never start commands
     const { id } = call({ op: 'create', name: 'sh', argv: ['/bin/sh', '-c', 'echo ready; read x; echo "got $x"'], cwd: dir, env: process.env });
+    for (const t0 = Date.now(); Date.now() - t0 < 5000 && !w.relay().ready; ) await new Promise((res) => setTimeout(res, 50));
+    assert.ok(w.relay().pid && w.relay().pid !== process.pid, 'the terminals have a process of their own');
     const ws = new WebSocket(`ws://127.0.0.1:${w.port}/ws`, { headers: { ...H, origin: base } });
     const msgs = [];
     await new Promise((resolve, reject) => ((ws.onopen = resolve), (ws.onerror = reject)));
@@ -2821,6 +2823,7 @@ test('atf-web: sign-in, overview with what needs you, actions as the human, live
     for (const t0 = Date.now(); Date.now() - t0 < 5000 && !msgs.some((m) => m.ev === 'exit'); ) await new Promise((res) => setTimeout(res, 50));
     assert.match(msgs.find((m) => m.ev === 'error' && m.rid === 9)?.message ?? '', /not allowed from the browser: create/);
     assert.match(msgs.filter((m) => m.id === id && (m.ev === 'replay' || m.ev === 'out')).map((m) => m.data).join(''), /got hi/);
+    assert.deepEqual([w.relay().handed, w.relay().here], [1, 0], 'relayed by the relay process, not by atf-web');
     ws.close();
 
     // shells: the user's own terminals, in a plan's project (or home); never an agent of a plan

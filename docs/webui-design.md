@@ -494,6 +494,11 @@ runs: no task in progress that nobody works on.
   in addition nothing happened on it for 10 minutes (no command running, no update): an
   agent ATF did not start (a subagent of the human's own harness) is not flagged while it
   works. Orphans are in Needs you, with "Tell the coordinator".
+- **The terminals' relay** runs in a process of its own (`adapters/web/relay.mjs`, forked by
+  atf-web, restarted if it ends): atf-web checks a WebSocket (cookie, origin) and hands the
+  connection over; keystrokes and output then go browser ↔ relay ↔ atf-sessiond and never
+  wait for atf-web's event loop (a slow refresh of the board). Frozen atf-web (SIGSTOP): a
+  shell still echoes in milliseconds. Without the relay, atf-web relays itself.
 - **Refreshing**: the stream says which plans changed; the page asks for those only
   (`/api/overview?only=`), the rest come as `{key, same}` and it keeps its own. Everything
   again when sessions change, and every 30 s (what depends on time). Of a changed plan, only
