@@ -195,11 +195,15 @@ function planPage(tab, p) {
     'div',
     { class: 'facts' },
     h('span', { class: `chip ${p.open ? 's-in_progress' : 's-done'}` }, st.status),
-    h('span', {}, `${p.project?.name ?? ''} · ${st.id}`),
+    h('span', {}, st.id),
     h('span', {}, `${Math.round((st.progress || 0) * 100)}% · ${st.counts?.done ?? 0}/${st.total ?? 0} done`),
     h('span', {}, `updated ${ago(st.updated_at)} ago`),
   );
-  const out = [h('h1', {}, st.title), facts, h('div', { class: 'progress', style: 'max-width:420px' }, h('i', { style: `width:${Math.round((st.progress || 0) * 100)}%` }))];
+  // the project: its name and folder (copy: for a terminal)
+  const dir = p.project?.dir ?? '';
+  const copy = h('button', { class: 'btn small', title: 'copy the full path', onclick: () => navigator.clipboard.writeText(dir).then(() => toast(`copied ${dir}`), () => toast('could not copy', true)) }, 'Copy path');
+  const proj = h('div', { class: 'facts proj-path' }, h('span', {}, 'project ', h('b', {}, p.project?.name ?? '')), h('span', { class: 'mono path', title: dir }, ctx.shortPath(dir)), dir ? copy : '');
+  const out = [h('h1', {}, st.title), facts, proj, h('div', { class: 'progress', style: 'max-width:420px' }, h('i', { style: `width:${Math.round((st.progress || 0) * 100)}%` }))];
   out.push(h('div', { class: 'toolbar' }, ctx.actionsFor({ p, tab }).map(btn)));
   out.push(composer(tab));
   for (const it of p.attention?.mine ?? []) {
@@ -222,11 +226,11 @@ function planPage(tab, p) {
   out.push(
     sec(
       'Tasks',
-      h('div', { class: 'rows' }, st.order.map((id) => {
-        const t = st.tasks[id];
-        const s = t.rollup_status ?? t.status;
+      // the Plans panel's rows (status, the dot of what is worked on right now, owner), and
+      // more where there is room: what its live run says
+      h('div', { class: 'tree in-page' }, st.order.map((id) => {
         const badge = p.live?.[id];
-        return h('div', { class: 'r click', onclick: () => ctx.openTask(p, id), ondblclick: () => ctx.openTask(p, id, { preview: false }) }, h('span', { class: `s-${s}` }, STATUS_ICON[s] ?? ''), h('span', { class: 'm' }, h('span', { class: 'tree-i' }, '  '.repeat(t.depth ?? 0)), h('b', { class: 'mono' }, id), ' ', t.title, badge ? h('span', { class: `c-${badge.color}` }, `  ${badge.glyph} ${first(badge.text, 60)}`) : ''), h('span', { class: 'dim' }, t.owner === ctx.human ? 'you' : t.owner ?? ''));
+        return ctx.treeRow(p, st.tasks[id], badge ? h('span', { class: `live c-${badge.color}`, title: badge.text }, `  ${badge.glyph} ${first(badge.text, 60)}`) : null);
       })),
     ),
   );

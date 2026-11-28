@@ -11,7 +11,6 @@
 </head>
 <body>
 <header id="top">
-  <button id="plans-toggle" class="icon" title="show / hide the plans">☰</button>
   <span class="brand">Agent Task Framework</span>
   <button id="palette-open" class="search" title="search plans, tasks, documents, agents and commands"><span>Search plans, tasks, files, agents…</span><kbd>⌘K</kbd></button>
   <span class="grow"></span>
@@ -22,19 +21,20 @@
 </header>
 
 <div id="cockpit">
+  <nav id="rail" aria-label="panels: show and hide"></nav>
   <section id="plans" class="panel">
-    <header><span>Plans</span></header>
+    <header><span>Plans</span><span class="grow"></span><button class="icon hide" data-hide="plans" title="hide the plans (alt+shift+1)">–</button></header>
     <div class="body"></div>
   </section>
   <div class="gutter v" data-col="plans"></div>
   <div id="leftcol">
     <section id="needs" class="panel">
-      <header><span>Needs you</span><span id="needs-n" class="n"></span><span class="grow"></span><span class="sum">now</span></header>
+      <header><span>Needs you</span><span id="needs-n" class="n"></span><span class="grow"></span><span class="sum">now</span><button class="icon hide" data-hide="needs" title="hide Needs you (alt+shift+2)">–</button></header>
       <div class="body"></div>
     </section>
     <div class="gutter h" data-row="needs"></div>
     <section id="todos" class="panel">
-      <header><span>Your tasks</span><span id="todos-n" class="n"></span><span class="grow"></span><span class="sum">eventually</span></header>
+      <header><span>Your tasks</span><span id="todos-n" class="n"></span><span class="grow"></span><span class="sum">eventually</span><button class="icon hide" data-hide="todos" title="hide Your tasks (alt+shift+3)">–</button></header>
       <div class="body"></div>
     </section>
   </div>
@@ -53,7 +53,7 @@
       <span id="term-title"></span>
       <span class="grow"></span>
       <button id="term-max" class="icon" title="terminal taller / back">⤢</button>
-      <button id="term-hide" class="icon" title="minimize the terminal (ctrl+`)">▁</button>
+      <button id="term-hide" class="icon" title="hide the terminal (ctrl+` · alt+shift+4; the rail brings it back)">–</button>
     </header>
     <div id="tbody"></div>
   </div>

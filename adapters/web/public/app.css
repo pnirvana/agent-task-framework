@@ -23,14 +23,9 @@ body {
   display: grid; grid-template-rows: 38px minmax(0, 1fr) 5px var(--h-terms);
   background: var(--crust); color: var(--fg); font: 13px/1.45 var(--ui); overflow: hidden;
 }
-/* minimized: the terminal's title bar stays at the bottom, a click brings it back */
-body.terms-hidden { grid-template-rows: 38px minmax(0, 1fr) 0 30px; }
-body.terms-hidden #term-gutter { visibility: hidden; } /* keeps its row: the bar stays in the last one */
-body.terms-hidden #tbody, body.terms-hidden #term-list { display: none; }
-body.terms-hidden #terminals { grid-template-columns: minmax(0, 1fr); }
-body.terms-hidden #term-h { cursor: pointer; border-bottom: 0; border-top: 1px solid var(--line); }
-body.terms-hidden #term-h:hover { background: var(--surface0); }
-body.terms-hidden #term-max { display: none; }
+/* hidden: the terminal's rows shrink to nothing (the rail brings it back) */
+body.terms-hidden { grid-template-rows: 38px minmax(0, 1fr) 0 0; }
+body.terms-hidden #terminals, body.terms-hidden #term-gutter { visibility: hidden; }
 body.terms-max { grid-template-rows: 38px minmax(0, 22%) 5px minmax(0, 1fr); }
 button, input, textarea, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
@@ -59,10 +54,29 @@ kbd { font: 11px var(--mono); color: var(--subtext0); background: var(--surface0
 .conn.up { color: var(--ok); }
 
 /* ---------- the cockpit ---------- */
-#cockpit { display: grid; min-height: 0; grid-template-columns: var(--w-plans) 5px var(--w-needs) 5px minmax(0, 1fr); }
-body.no-plans #cockpit { grid-template-columns: 0 0 var(--w-needs) 5px minmax(0, 1fr); }
-body.no-plans #plans, body.no-plans [data-col=plans] { visibility: hidden; }
+/* the columns: the rail, Plans, Needs you / Your tasks, In flight; a hidden panel's column
+   (or row) shrinks to nothing and keeps its place in the grid */
+#cockpit { --c-plans: var(--w-plans); --g-plans: 5px; --c-left: var(--w-needs); --g-left: 5px; display: grid; min-height: 0; grid-template-columns: 40px var(--c-plans) var(--g-plans) var(--c-left) var(--g-left) minmax(0, 1fr); }
+body.hide-plans #cockpit { --c-plans: 0px; --g-plans: 0px; }
+body.hide-needs.hide-todos #cockpit { --c-left: 0px; --g-left: 0px; }
+body.hide-plans #plans, body.hide-plans [data-col=plans], body.hide-needs.hide-todos #leftcol, body.hide-needs.hide-todos [data-col=needs] { visibility: hidden; }
 #leftcol { display: grid; grid-template-rows: var(--h-needs) 5px minmax(0, 1fr); min-height: 0; min-width: 0; }
+body.hide-needs #leftcol { grid-template-rows: 0 0 minmax(0, 1fr); }
+body.hide-todos #leftcol { grid-template-rows: minmax(0, 1fr) 0 0; }
+body.hide-needs #needs, body.hide-todos #todos, body.hide-needs [data-row=needs], body.hide-todos [data-row=needs] { visibility: hidden; }
+.panel > header .hide { margin-left: 2px; margin-right: -6px; text-transform: none; }
+/* the rail: an icon per panel, lit when shown; badges say what a hidden panel holds */
+#rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 0; background: var(--crust); border-right: 1px solid var(--line); }
+#rail svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+#rail svg circle[r^='.'] { fill: currentColor; }
+#rail button { position: relative; width: 32px; height: 32px; border: 0; border-radius: 6px; background: none; color: var(--overlay1); font-size: 15px; cursor: pointer; display: grid; place-items: center; }
+#rail button:hover { background: var(--surface0); color: var(--fg); }
+#rail button[aria-pressed=true] { color: var(--fg); background: var(--surface0); box-shadow: inset 2px 0 0 var(--accent); }
+#rail .sep { flex: 1; }
+#rail .badge { position: absolute; top: -2px; right: -4px; min-width: 15px; height: 15px; padding: 0 3px; border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 15px; text-align: center; color: var(--crust); background: var(--overlay1); }
+#rail .badge.hot { background: var(--red); }
+#rail .badge.todo { background: var(--sky); }
+#rail .badge.dot { min-width: 8px; width: 8px; height: 8px; padding: 0; top: 4px; right: 4px; background: var(--yellow); }
 #todos > header .n { color: var(--sky); }
 .gutter { background: var(--crust); position: relative; z-index: 2; }
 .gutter.v { cursor: col-resize; }
@@ -419,3 +433,13 @@ li.step.s-done .si { color: var(--ok); }
 .card.k-approval { border-color: color-mix(in srgb, var(--yellow) 50%, transparent); }
 .card.k-orphan, .card.k-no-coordinator { border-color: color-mix(in srgb, var(--red) 50%, transparent); }
 .tcard.flat { border: 0; background: none; padding: 0; }
+
+/* a plan's task list in its details: the Plans panel's rows, a little larger */
+.tree.in-page { margin: 0 -10px; }
+.tree.in-page .trow { font-size: 13px; padding-top: 3px; padding-bottom: 3px; }
+.tree.in-page .trow .tt .live { font: var(--content-weight) 12px var(--mono); } /* content: as in the terminals */
+
+/* a plan's project in its details: name, folder, copy */
+.facts.proj-path { align-items: center; }
+.facts.proj-path .path { font-weight: var(--content-weight); color: var(--subtext1); user-select: all; }
+.btn.small { padding: 1px 8px; font-size: 11.5px; }

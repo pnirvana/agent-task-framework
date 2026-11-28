@@ -20,6 +20,7 @@
 //
 // Reads go through store/core, writes through src/actions.mjs (the same events as the
 // board and the CLI). The server also runs the supervisor (src/supervisor.mjs).
+import os from 'node:os';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -269,7 +270,7 @@ export async function startWebServer({ port = 7420, host = '127.0.0.1', token = 
       });
       return { root, dir: path.dirname(root), name: path.basename(path.dirname(root)), repo: repoOf(root), plans };
     });
-    return { human: HUMAN, now: Date.now(), projects, sessions: sessions.length };
+    return { human: HUMAN, now: Date.now(), home: os.homedir(), projects, sessions: sessions.length };
   }
 
   const known = (root, id) => {

@@ -414,11 +414,9 @@ function showTerminal(id, focus = false) {
 }
 function toggleTerminals(show = document.body.classList.contains('terms-hidden')) {
   document.body.classList.toggle('terms-hidden', !show);
-  const btn = $('#term-hide');
-  btn.textContent = show ? '▁' : '▔';
-  btn.title = show ? 'minimize the terminal (ctrl+`)' : 'show the terminal (ctrl+`)';
   document.body.classList.remove('terms-max');
   store.set('terms', show ? '' : 'hidden');
+  if ($('#rail')) renderRail();
   requestAnimationFrame(() => terms.refit());
 }
 
@@ -429,6 +427,7 @@ function render() {
   renderPlans();
   renderFlight();
   renderTerminals();
+  renderRail();
   drawer.refresh();
   const plans = openPlans();
   const n = plans.reduce((a, p) => a + p.attention.mine.length + orphansOf(p).length, 0);
@@ -448,13 +447,18 @@ function markOpen() {
   for (const el of document.querySelectorAll('[data-open]')) el.classList.toggle('open', keys.has(el.dataset.open));
 }
 /** A plan's section header: its name and project, first. */
+/** A project's folder for people: the home directory as ~. */
+function shortPath(dir) {
+  const home = S.ov?.home;
+  return dir && home && (dir === home || dir.startsWith(home + '/')) ? '~' + dir.slice(home.length) : dir ?? '';
+}
 function planHead(p, extra = []) {
   return h(
     'div',
-    { class: 'grp-h', title: `${planTitle(p)} · ${p.project.name} · open the plan`, onclick: () => openPlan(p) },
+    { class: 'grp-h', title: `${planTitle(p)} · open the plan`, onclick: () => openPlan(p) },
     h('span', { class: 'mk' }),
     h('span', { class: 'pname' }, planTitle(p)),
-    h('span', { class: 'proj' }, p.project.name),
+    h('span', { class: 'proj', title: `project ${p.project.name}: ${shortPath(p.project.dir)}` }, p.project.name),
     h('span', { class: 'right' }, extra),
   );
 }
@@ -712,7 +716,8 @@ function statusOf(p, t) {
   if (s === 'blocked' && t.blocked_on?.length) return { cls: 'blocked', text: `blocked on ${t.blocked_on.join(', ')}` };
   return { cls: s, text: label };
 }
-function treeRow(p, t) {
+/** A task's row in the Plans panel; `more`: what a wider view adds after its title (the details). */
+function treeRow(p, t, more = null) {
   const s = t.rollup_status ?? t.status;
   const kids = t.children.length;
   const fin = kids ? t.children.filter((id) => ['done', 'cancelled'].includes(p.st.tasks[id]?.rollup_status ?? p.st.tasks[id]?.status)).length : 0;
@@ -733,12 +738,12 @@ function treeRow(p, t) {
     { class: `trow${['done', 'cancelled'].includes(s) ? ' fin' : ''}${kids ? ' parent' : ''}${act ? ` act-${act.cls}` : ''}`, dataset: { open: `task#${p.key}#${t.id}` }, style: `padding-left:${12 + (t.depth ?? 0) * 16}px`, title: `${t.id} ${t.title}: ${s.replace('_', ' ')}${act ? ` · ${act.tip}` : ''}`, onclick: () => openTask(p, t.id) },
     h('span', { class: `s-${s}` }, STATUS_ICON[s] ?? ''),
     h('span', { class: 'tid' }, t.id),
-    h('span', { class: 'tt' }, t.title),
+    h('span', { class: 'tt' }, t.title, more ?? ''),
     h('span', { class: 'side' }, act ? h('span', { class: `adot ${act.cls}` }) : '', side),
   );
 }
 function renderPlans() {
-  if (document.body.classList.contains('no-plans')) return;
+  if (document.body.classList.contains('hide-plans')) return;
   const kids = [];
   const open = openPlans().sort((a, b) => a.project.name.localeCompare(b.project.name) || planTitle(a).localeCompare(planTitle(b)));
   for (const p of open) {
@@ -764,11 +769,46 @@ function renderPlans() {
   }
   redraw($('#plans .body'), kids);
 }
-function togglePlans() {
-  document.body.classList.toggle('no-plans');
-  store.set('plansPanel', document.body.classList.contains('no-plans') ? 'hidden' : 'shown');
-  renderPlans();
+// ---------------------------------------------------------------- panels: shown and hidden
+// Every panel but In flight can be hidden (its header's –, its icon on the rail, alt+shift+1…4);
+// the rail on the left brings it back, its badge saying what it holds meanwhile.
+const PANELS = [
+  // icons: 20×20, drawn with the text colour
+  { id: 'plans', label: 'Plans', svg: '<path d="M3 4.5h14M6 10h11M9 15.5h8"/><circle cx="3.5" cy="10" r=".6"/><circle cx="6.5" cy="15.5" r=".6"/>' },
+  { id: 'needs', label: 'Needs you', svg: '<circle cx="10" cy="10" r="7.2"/><path d="M10 6v5"/><circle cx="10" cy="14" r=".7"/>' },
+  { id: 'todos', label: 'Your tasks', svg: '<rect x="3" y="3" width="14" height="14" rx="2.5"/><path d="M6.5 10.2l2.3 2.3 4.7-5"/>' },
+  { id: 'terms', label: 'Terminal', svg: '<rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="M5.5 8l2.5 2-2.5 2M10 13h4"/>' },
+];
+const railIcon = (x) => {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  el.setAttribute('viewBox', '0 0 20 20');
+  el.innerHTML = x.svg; // constant markup above
+  return el;
+};
+const shown = (id) => (id === 'terms' ? !document.body.classList.contains('terms-hidden') : !document.body.classList.contains(`hide-${id}`));
+function togglePanel(id, show = !shown(id)) {
+  if (id === 'terms') toggleTerminals(show);
+  else {
+    document.body.classList.toggle(`hide-${id}`, !show);
+    store.set('panels', { ...store.get('panels', {}), [id]: show ? 'shown' : 'hidden' });
+    if (show) id === 'plans' ? renderPlans() : renderNeeds();
+  }
+  renderRail();
   requestAnimationFrame(() => terms.refit());
+}
+function renderRail() {
+  const plans = S.ov ? openPlans() : [];
+  const needs = plans.reduce((a, p) => a + p.attention.mine.length + orphansOf(p).length, 0);
+  const todos = plans.reduce((a, p) => a + p.attention.todos.length, 0);
+  const waiting = plans.some((p) => p.attention.mine.some((it) => it.kind === 'coordinator' || it.kind === 'prompt'));
+  const badge = { needs: needs ? h('span', { class: 'badge hot' }, String(needs)) : '', todos: todos ? h('span', { class: 'badge todo' }, String(todos)) : '', terms: waiting ? h('span', { class: 'badge dot', title: 'a coordinator or agent waits for you' }) : '' };
+  const tip = { needs: needs ? ` · ${needs} need${needs === 1 ? 's' : ''} you` : '', todos: todos ? ` · ${todos}` : '', terms: waiting ? ' · one waits for you' : '' };
+  $('#rail').replaceChildren(
+    ...PANELS.flatMap((x, i) => [
+      ...(x.id === 'terms' ? [h('span', { class: 'sep' })] : []),
+      h('button', { 'aria-pressed': String(shown(x.id)), title: `${shown(x.id) ? 'hide' : 'show'} ${x.label}${tip[x.id] ?? ''} (alt+shift+${i + 1})`, onclick: () => togglePanel(x.id) }, railIcon(x), badge[x.id] ?? ''),
+    ]),
+  );
 }
 
 // ---------------------------------------------------------------- In flight
@@ -962,15 +1002,9 @@ function renderFlight() {
 
 // ---------------------------------------------------------------- a plan's log and changes (inspector)
 const LOG_HIDDEN = new Set(['task.snapshot', 'task.session', 'plan.session']);
+/** The plan's last events (the previous ones stay shown while a newer version loads). */
 function logOf(p) {
-  const key = `${p.key}#${p.st.last_seq}`;
-  if (!S.logs.has(key)) {
-    S.logs.set(key, null);
-    api(`log?${q({ root: p.root, plan: p.id, n: 300 })}`)
-      .then((r) => (S.logs.set(key, r.events), refreshIf((v) => v.kind === 'planlog' && v.pk === p.key)))
-      .catch((e) => toast(e.message, true));
-  }
-  return S.logs.get(key);
+  return versioned(S.logs, p.key, p.st.last_seq, `log?${q({ root: p.root, plan: p.id, n: 300 })}`, () => refreshIf((v) => v.kind === 'planlog' && v.pk === p.key), (e) => toast(e.message, true))?.events ?? null;
 }
 function logList(p) {
   const evs = logOf(p);
@@ -1033,8 +1067,7 @@ function paletteItems() {
     for (const a of (p.agents || []).filter((x) => !x.exited)) out.push({ icon: '⌨', label: a.name, detail: `terminal · ${a.task ?? a.role ?? ''} · ${planTitle(p)}`, run: () => showTerminal(a.handle, true) });
     if (p.open) for (const a of actionsFor({ p }).filter((x) => !['N', 'c'].includes(x.key))) out.push({ icon: '›', label: `${a.label}: ${planTitle(p)}`, detail: 'command', run: a.run });
   }
-  out.push({ icon: '›', label: 'Show / hide the terminals', detail: 'ctrl+`', run: () => toggleTerminals() });
-  out.push({ icon: '›', label: 'Show / hide the plans', detail: 'command', run: togglePlans });
+  for (const x of PANELS) out.push({ icon: '›', label: `Show / hide ${x.label}`, detail: 'command', run: () => togglePanel(x.id) });
   out.push({ icon: '›', label: 'Turn on notifications', detail: 'command', run: () => $('#bell').click() });
   return out;
 }
@@ -1153,8 +1186,10 @@ bell();
   const root = document.documentElement;
   for (const [k, v] of Object.entries(store.get('sizes', {}))) if (['w-plans', 'w-needs', 'h-needs', 'w-drawer', 'h-terms'].includes(k)) root.style.setProperty(`--${k}`, v);
   // the Plans panel: shown when the window is wide enough, unless you hid it
-  const pref = store.get('plansPanel', null);
-  if (pref === 'hidden' || (pref == null && innerWidth < 1700)) document.body.classList.add('no-plans');
+  const panels = store.get('panels', {});
+  const plansPref = panels.plans ?? store.get('plansPanel', null); // (plansPanel: before the rail)
+  if (plansPref === 'hidden' || (plansPref == null && innerWidth < 1700)) document.body.classList.add('hide-plans');
+  for (const id of ['needs', 'todos']) if (panels[id] === 'hidden') document.body.classList.add(`hide-${id}`);
   if (store.get('terms', '') === 'hidden') toggleTerminals(false);
   const save = (k, v) => {
     root.style.setProperty(`--${k}`, v);
@@ -1192,10 +1227,9 @@ bell();
   }
 })();
 $('#palette-open').onclick = palette;
-$('#plans-toggle').onclick = togglePlans;
-$('#term-hide').onclick = (e) => (e.stopPropagation(), toggleTerminals(document.body.classList.contains('terms-hidden')));
-// minimized: the title bar brings the terminal back (its plan chip and task still open them)
-$('#term-h').addEventListener('click', (e) => document.body.classList.contains('terms-hidden') && !e.target.closest('.click, button') && toggleTerminals(true));
+for (const b of document.querySelectorAll('.panel > header .hide')) b.onclick = (e) => (e.stopPropagation(), togglePanel(b.dataset.hide, false));
+renderRail();
+$('#term-hide').onclick = () => toggleTerminals(false);
 $('#term-max').onclick = () => (document.body.classList.toggle('terms-max'), requestAnimationFrame(() => terms.refit()));
 addEventListener('resize', () => terms.refit());
 
@@ -1204,7 +1238,8 @@ const HELP = [
   ['Everywhere', [
     ['⌘K / ctrl+K', 'search: plans, tasks, documents, agents, commands'],
     ['alt+1 … 9', 'the coordinators’ terminals, in the order of the plans'],
-    ['ctrl+`', 'show or hide the terminals'],
+    ['ctrl+`', 'hide / show the terminal'],
+    ['alt+shift+1 … 4', 'show / hide Plans, Needs you, Your tasks, the terminal (or the rail on the left)'],
     ['ctrl+]', 'leave a terminal (the page has the keys again)'],
     ['esc', 'close the details · cancel what you write'],
     ['?', 'this help'],
@@ -1247,6 +1282,7 @@ $('#help-open').onclick = help;
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') return e.preventDefault(), palette();
   if (e.ctrlKey && (e.key === '`' || e.code === 'Backquote')) return e.preventDefault(), toggleTerminals();
+  if (e.altKey && e.shiftKey && /^Digit[1-4]$/.test(e.code)) return e.preventDefault(), togglePanel(PANELS[Number(e.code.slice(5)) - 1].id);
   if (e.altKey && /^Digit[1-9]$/.test(e.code)) {
     const g = termGroups()[Number(e.code.slice(5)) - 1];
     if (g) (e.preventDefault(), showTerminal(g.items[0].id, true));
@@ -1279,6 +1315,8 @@ document.addEventListener('keydown', (e) => {
 
 // ---------------------------------------------------------------- start
 initPages({
+  treeRow,
+  shortPath,
   get human() {
     return S.ov?.human ?? 'human';
   },

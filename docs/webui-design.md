@@ -459,7 +459,11 @@ runs: no task in progress that nobody works on.
 - **Structure first:** every view is grouped per plan, in a box under the plan's name
   (task ids are per plan); a marker in the plan's colour (muted, a few in rotation) is a
   second hint. Plans that need the human come first, then those at work, then the quiet.
-- **Plans** (leftmost, can be hidden): every open plan with its task tree, closed plans
+- **The rail** (leftmost): an icon per panel that can be hidden (Plans, Needs you, Your
+  tasks, Terminal; In flight is the centre and stays), lit when shown, with a badge that
+  keeps a hidden panel's news visible (needs-you count, your tasks, a waiting coordinator).
+  Panels hide from their header (`–`), the rail or `alt+shift+1…4`; remembered.
+- **Plans** (can be hidden): every open plan with its task tree, closed plans
   below; a task opens its details. A task in progress carries a dot saying whether it is
   worked on right now (its agent working or a command running, a command waiting for
   approval, its agent idle, nothing running, no agent); a parent the count of its tasks in

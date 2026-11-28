@@ -52,7 +52,11 @@ Every open plan at once, each in a box under its name: task ids are per plan, so
 appears without its plan. A small marker in the plan's colour is only a second hint.
 Plans that need you come first, then those at work, then the quiet ones.
 
-- **Plans** (left, `☰` shows and hides it; shown on wide windows): every open plan with
+- **The rail** (the narrow strip on the far left): an icon per panel (Plans, Needs you,
+  Your tasks, Terminal), lit when it shows; a click (or `alt+shift+1` … `4`) shows or
+  hides it, and `–` in a panel's header hides it too. A hidden panel's icon keeps a badge:
+  how many need you, your tasks, a dot when a coordinator waits. In flight always stays.
+- **Plans** (left; shown on wide windows): every open plan with
   its task tree (subtasks under their parents, the done ones dimmed); closed plans below.
   A dot by the owner says whether a task in progress is being worked on right now: green
   (its agent works or a command of it runs), yellow (a command waits for your approval),
@@ -84,8 +88,7 @@ Plans that need you come first, then those at work, then the quiet ones.
   (plan › Coordinator, or plan › task · agent); beside it the list of all terminals, per
   plan, its coordinator first (or "not running"). Big enough to follow a conversation and
   answer (40% of the window; dragged smaller it keeps about ten rows). `⤢` taller,
-  `▁` (or `ctrl+\``) minimizes it to its title bar at the bottom; a click on the bar
-  brings it back.
+  `–` (or `ctrl+\``) hides it; its icon on the rail brings it back.
 
 Panel sizes are dragged on the lines between them and remembered, as are the details
 shown and the terminal.
@@ -96,7 +99,8 @@ shown and the terminal.
 |---|---|
 | `⌘K` / `ctrl+K` | search: plans, tasks, documents, agents, commands |
 | `alt+1` … `alt+9` | the coordinators' terminals, in the order of the plans |
-| `ctrl+\`` | minimize the terminal to its title bar / bring it back |
+| `ctrl+\`` | hide / show the terminal |
+| `alt+shift+1` … `4` | show / hide Plans, Needs you, Your tasks, the terminal |
 | `ctrl+]` | leave a terminal |
 | `esc` | close the details · cancel what you write |
 | `?` | the keys |
